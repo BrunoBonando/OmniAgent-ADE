@@ -5,7 +5,7 @@ mod relay;
 mod server;
 mod session;
 
-pub use relay::{relay_config, run_relay, DeviceCredential, DEVICE_TOKEN_KEY};
+pub use relay::{relay_config, run_relay, run_relay_with, DeviceCredential, DEVICE_TOKEN_KEY};
 pub use server::{
     authorize_remote, peer_uid_allowed, remote_session_ids, run_daemon, serve_client,
     ClientContext, ClientTrust, DaemonServer, SharedWriter, REMOTE_CONTROL_KEY,

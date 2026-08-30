@@ -4,13 +4,15 @@
 //! its hello, dial a data socket for every `{"open": id}`, and run the real
 //! `serve_client(…, ClientTrust::Remote)` over that data socket — so a viewer
 //! gets `HelloAck`, an `Attach` on a shared session gets `Snapshot`, and a
-//! `Kill` is refused. Emptying the projection closes the control socket.
+//! `Kill` is refused. Emptying the projection closes the control socket, a
+//! `401` stops the daemon dialling until the token row changes, and a relay
+//! that goes silent is dropped and re-dialled.
 
 use futures_util::{SinkExt, StreamExt};
 use omniagent_pty_daemon::protocol::{Frame, MessageKind};
-use omniagent_pty_daemon::{run_relay, ClientContext, CreateSession, DaemonServer};
+use omniagent_pty_daemon::{run_relay, run_relay_with, ClientContext, CreateSession, DaemonServer};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -33,10 +35,12 @@ fn command_session(id: &str, script: &str) -> CreateSession {
 }
 
 /// Boots a daemon with shared session `s1`, writes the projection and a device
-/// token whose `relay_url` points at `port`, and starts the relay task.
+/// token whose `relay_url` points at `port`, and starts the relay task —
+/// with the production ping interval, or `ping_every` when given.
 async fn start_daemon_with_relay(
     root: &std::path::Path,
     port: u16,
+    ping_every: Option<Duration>,
 ) -> (ClientContext, oneshot::Sender<()>) {
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
@@ -63,8 +67,44 @@ async fn start_daemon_with_relay(
             .unwrap();
     }
     ctx.settings_changed.notify_one();
-    tokio::spawn(run_relay(ctx.clone()));
+    match ping_every {
+        Some(every) => tokio::spawn(run_relay_with(ctx.clone(), every)),
+        None => tokio::spawn(run_relay(ctx.clone())),
+    };
     (ctx, stop)
+}
+
+/// Accepts one TCP connection from the daemon and refuses the WebSocket
+/// upgrade with `status`, the way the relay denies a bad device token.
+#[allow(clippy::result_large_err)]
+async fn reject_ws(listener: &TcpListener, status: u16) {
+    let (tcp, _) = tokio::time::timeout(Duration::from_secs(4), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let refused = tokio_tungstenite::accept_hdr_async(tcp, |_req: &Request, _resp: Response| {
+        Err(tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(status)
+            .body(None)
+            .unwrap())
+    })
+    .await;
+    assert!(refused.is_err(), "the upgrade must have been refused");
+}
+
+/// Writes a `relay_device_token` row for `token` and wakes the relay.
+fn write_token(ctx: &ClientContext, token: &str, port: u16) {
+    ctx.settings
+        .lock()
+        .unwrap()
+        .set_setting(
+            "relay_device_token",
+            &format!(
+                r#"{{"device_id":"dev1","token":"{token}","name":"Test Mac","relay_url":"http://127.0.0.1:{port}"}}"#
+            ),
+        )
+        .unwrap();
+    ctx.settings_changed.notify_one();
 }
 
 /// Accepts one WebSocket from the daemon, recording the request path and
@@ -125,7 +165,7 @@ async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (_ctx, _stop) = start_daemon_with_relay(root.path(), port).await;
+    let (_ctx, _stop) = start_daemon_with_relay(root.path(), port, None).await;
 
     // --- play relay: control connection ---
     let (mut control, seen_path, seen_auth) = accept_ws(&listener).await;
@@ -203,7 +243,7 @@ async fn relay_disconnects_when_the_projection_empties() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (ctx, _stop) = start_daemon_with_relay(root.path(), port).await;
+    let (ctx, _stop) = start_daemon_with_relay(root.path(), port, None).await;
 
     let (mut control, seen_path, _) = accept_ws(&listener).await;
     assert_eq!(seen_path, "/v1/device");
@@ -242,4 +282,65 @@ async fn relay_disconnects_when_the_projection_empties() {
         matches!(closed, None | Some(Ok(Message::Close(_))) | Some(Err(_))),
         "expected the control socket to close, got {closed:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejected_token_stops_redialling_until_the_token_row_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ctx, _stop) = start_daemon_with_relay(root.path(), port, None).await;
+
+    reject_ws(&listener, 401).await;
+
+    // No retry on its own, and none for an unrelated setting write either.
+    let redial = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+    assert!(redial.is_err(), "daemon re-dialled after a 401");
+    ctx.settings
+        .lock()
+        .unwrap()
+        .set_setting("unrelated", "1")
+        .unwrap();
+    ctx.settings_changed.notify_one();
+    let redial = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
+    assert!(
+        redial.is_err(),
+        "daemon re-dialled after an unrelated write"
+    );
+
+    // A new token row is worth one more attempt, with the new token.
+    write_token(&ctx, "tok2", port);
+    let (_control, path, auth) = accept_ws(&listener).await;
+    assert_eq!(path, "/v1/device");
+    assert_eq!(auth, "Bearer tok2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_relay_is_dropped_and_redialled() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let ping_every = Duration::from_millis(100);
+    let (_ctx, _stop) = start_daemon_with_relay(root.path(), port, Some(ping_every)).await;
+
+    let (mut control, _, _) = accept_ws(&listener).await;
+    let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(hello.to_text().unwrap().contains("Test Mac"));
+    let connected = Instant::now();
+
+    // Hold the socket open but never poll it again: no pings from us, no
+    // pongs to the daemon's pings — a half-open link as far as it can tell.
+    // Liveness must give up after a few silent intervals and dial again.
+    let (_control2, path, _) = accept_ws(&listener).await;
+    assert_eq!(path, "/v1/device");
+    assert!(
+        connected.elapsed() >= 3 * ping_every,
+        "dropped after only {:?}",
+        connected.elapsed()
+    );
+    drop(control);
 }

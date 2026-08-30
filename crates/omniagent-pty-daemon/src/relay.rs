@@ -19,9 +19,11 @@
 //! [`relay_config`] and compares before doing anything; an unrelated write
 //! never drops the control socket. An emptied projection or removed token
 //! closes the control socket and, with it, every data connection. A `401`
-//! (or `403`) from the relay stops retrying until the token row changes.
+//! (or `403`) from the relay stops retrying until the token row changes. A
+//! control socket that goes silent for three ping intervals is treated as
+//! half-open and re-dialled — TCP alone would not notice for minutes.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use brain_core::Store;
@@ -41,6 +43,14 @@ pub const DEVICE_TOKEN_KEY: &str = "relay_device_token";
 const PING_EVERY: Duration = Duration::from_secs(30);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Silent for this many ping intervals → the socket is half-open (spec §6
+/// "host asleep / offline", a hard-killed relay pod): nothing arrives, our
+/// pings still "succeed" into the kernel buffer, and TCP would take minutes
+/// to give up. The relay pings every 30 s too, so a live socket is never
+/// silent for one interval, let alone three.
+const SILENT_INTERVALS: u32 = 3;
+/// Data connections per control session — one per viewer.
+const MAX_DATA_CONNECTIONS: usize = 64;
 
 /// The `relay_device_token` row as written by the app after pairing.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -82,10 +92,22 @@ fn request(
 enum Outcome {
     /// The relay refused the token (401/403): stop until the token row changes.
     Unauthorized,
-    /// The socket dropped or never connected: back off and retry.
-    Dropped,
+    /// The socket dropped, or never connected (`uptime` is zero then): back
+    /// off and retry. `uptime` is how long the session was up past the
+    /// hello — a session that lived a while resets the backoff; one the relay
+    /// accepted and dropped at once must not, or the loop would tighten to
+    /// one dial per second against a relay that is up but broken.
+    Dropped { uptime: Duration },
     /// The config we connected with is no longer current: re-read and act now.
     ConfigChanged,
+}
+
+/// Whether a relay-issued connection id is safe to interpolate into a path.
+fn valid_conn_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The current relay config, re-reading the store after a rebuild the way
@@ -100,6 +122,13 @@ fn current(ctx: &ClientContext) -> Option<DeviceCredential> {
 /// Drives the control and data connections forever. Spawned once by
 /// `DaemonServer::serve` when the relay is enabled; tests call it directly.
 pub async fn run_relay(ctx: ClientContext) {
+    run_relay_with(ctx, PING_EVERY).await
+}
+
+/// [`run_relay`] with the ping interval (and so the liveness window,
+/// `SILENT_INTERVALS` × `ping_every`) chosen by the caller — the seam the
+/// loopback tests use to make a silent relay time out in milliseconds.
+pub async fn run_relay_with(ctx: ClientContext, ping_every: Duration) {
     // tokio-tungstenite builds its rustls `ClientConfig` from the process
     // default provider; pin `ring` here so a `wss://` connect can never panic
     // on an ambiguous or missing provider. `Err` only means one is already
@@ -108,10 +137,11 @@ pub async fn run_relay(ctx: ClientContext) {
     let mut backoff = INITIAL_BACKOFF;
     loop {
         let Some(cred) = current(&ctx) else {
+            backoff = INITIAL_BACKOFF;
             ctx.settings_changed.notified().await;
             continue;
         };
-        match control_session(&ctx, &cred).await {
+        match control_session(&ctx, &cred, ping_every).await {
             Outcome::Unauthorized => {
                 tracing::warn!("relay rejected the device token; waiting for a new one");
                 // Every key pokes `settings_changed`; only a different token
@@ -122,7 +152,13 @@ pub async fn run_relay(ctx: ClientContext) {
                 backoff = INITIAL_BACKOFF;
             }
             Outcome::ConfigChanged => backoff = INITIAL_BACKOFF,
-            Outcome::Dropped => {
+            Outcome::Dropped { uptime } => {
+                // A session that outlived the longest backoff was a healthy
+                // one: its drop is a fresh outage, not the next step of the
+                // one we were already backing off from.
+                if uptime >= MAX_BACKOFF {
+                    backoff = INITIAL_BACKOFF;
+                }
                 // A settings write (a re-pair, a workspace toggled) cuts the
                 // wait short — the next iteration re-reads the config anyway,
                 // so a stale credential is never dialled.
@@ -136,12 +172,19 @@ pub async fn run_relay(ctx: ClientContext) {
     }
 }
 
-async fn control_session(ctx: &ClientContext, cred: &DeviceCredential) -> Outcome {
+async fn control_session(
+    ctx: &ClientContext,
+    cred: &DeviceCredential,
+    ping_every: Duration,
+) -> Outcome {
+    let never_connected = Outcome::Dropped {
+        uptime: Duration::ZERO,
+    };
     let req = match request(cred, "/v1/device") {
         Ok(req) => req,
         Err(error) => {
             tracing::warn!("relay control request could not be built: {error}");
-            return Outcome::Dropped;
+            return never_connected;
         }
     };
     let (ws, _) = match connect_async(req).await {
@@ -151,7 +194,7 @@ async fn control_session(ctx: &ClientContext, cred: &DeviceCredential) -> Outcom
         }
         Err(error) => {
             tracing::debug!("relay control connect failed: {error}");
-            return Outcome::Dropped;
+            return never_connected;
         }
     };
     let (mut sink, mut stream) = ws.split();
@@ -164,33 +207,51 @@ async fn control_session(ctx: &ClientContext, cred: &DeviceCredential) -> Outcom
         .await
         .is_err()
     {
-        return Outcome::Dropped;
+        return never_connected;
     }
     tracing::info!("relay control socket up as device {}", cred.device_id);
+    let connected = Instant::now();
+    let dropped = || Outcome::Dropped {
+        uptime: connected.elapsed(),
+    };
     // Dropped on every return path, which aborts every data connection —
     // spec §3: "projection empties or token removed → close control channel
     // and all data connections".
     let mut data = JoinSet::new();
-    let mut ping = tokio::time::interval(PING_EVERY);
+    let mut ping = tokio::time::interval(ping_every);
     ping.tick().await;
+    // Liveness: anything the relay sends (its pings, pongs to ours, opens)
+    // refreshes this; silence for `SILENT_INTERVALS` intervals is a dead link.
+    let mut last_seen = Instant::now();
     loop {
         tokio::select! {
             _ = ping.tick() => {
+                if last_seen.elapsed() > ping_every * SILENT_INTERVALS {
+                    tracing::warn!("relay control socket silent for {:?}; re-dialling", last_seen.elapsed());
+                    return dropped();
+                }
                 if sink.send(Message::Ping(Bytes::new())).await.is_err() {
-                    return Outcome::Dropped;
+                    return dropped();
                 }
             }
             msg = stream.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
+                    last_seen = Instant::now();
                     let open = serde_json::from_str::<serde_json::Value>(&text)
                         .ok()
                         .and_then(|v| v["open"].as_str().map(str::to_owned));
                     if let Some(id) = open {
-                        data.spawn(data_connection(ctx.clone(), cred.clone(), id));
+                        if !valid_conn_id(&id) {
+                            tracing::debug!("relay sent an invalid connection id; ignoring");
+                        } else if data.len() >= MAX_DATA_CONNECTIONS {
+                            tracing::warn!("relay open {id} refused: {MAX_DATA_CONNECTIONS} data connections already up");
+                        } else {
+                            data.spawn(data_connection(ctx.clone(), cred.clone(), id));
+                        }
                     }
                 }
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Outcome::Dropped,
-                Some(Ok(_)) => {}
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return dropped(),
+                Some(Ok(_)) => last_seen = Instant::now(),
             },
             _ = ctx.settings_changed.notified() => {
                 if current(ctx).as_ref() != Some(cred) {
@@ -267,6 +328,17 @@ mod tests {
             ws_url(&cred("wss://relay.omni-agent.dev"), "/v1/device"),
             "wss://relay.omni-agent.dev/v1/device"
         );
+    }
+
+    #[test]
+    fn connection_ids_are_path_safe_or_ignored() {
+        assert!(valid_conn_id("c1"));
+        assert!(valid_conn_id("conn-42_ab"));
+        assert!(!valid_conn_id(""));
+        assert!(!valid_conn_id("../device"));
+        assert!(!valid_conn_id("c1/../../v1/other"));
+        assert!(!valid_conn_id("c 1"));
+        assert!(!valid_conn_id("c1?x=1"));
     }
 
     #[test]
