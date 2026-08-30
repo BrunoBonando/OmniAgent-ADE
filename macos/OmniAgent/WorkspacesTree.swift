@@ -20,12 +20,24 @@ struct WorkspaceTreeEntry: Equatable {
     /// The customization's folder colour, already resolved to a tint —
     /// `nil` keeps `ShellPalette.folderGlyph`.
     let tint: NSColor?
+    /// Remote Control is on for this workspace — its row wears the globe
+    /// (the remote-session-control spec's §2). Defaulted so every existing
+    /// call site keeps compiling and reads "not shared", which is the truth
+    /// for a workspace nobody has enabled.
+    let remoteControl: Bool
 
-    init(id: String, label: String, sessions: [SessionGroupNode], tint: NSColor? = nil) {
+    init(
+        id: String,
+        label: String,
+        sessions: [SessionGroupNode],
+        tint: NSColor? = nil,
+        remoteControl: Bool = false
+    ) {
         self.id = id
         self.label = label
         self.sessions = sessions
         self.tint = tint
+        self.remoteControl = remoteControl
     }
 }
 
@@ -39,6 +51,12 @@ final class WorkspaceRowView: ShellRowView {
     private(set) var folderGlyph: ShellGlyphView
     private let chevron: ShellGlyphView
     private let titleField: NSTextField
+    /// The Remote Control marker, trailing. An `NSImageView` over an SF
+    /// Symbol rather than a `ShellGlyphView`: the vocabulary has no globe,
+    /// and one drawn by hand would be a lot of bezier for a 16 pt mark.
+    /// Held (not conditionally added) so a test can read the fact off the
+    /// row the way `folderGlyph` reads the fold.
+    private(set) var remoteGlyph: NSImageView
     /// The row's context menu, built fresh per right-click by whoever can
     /// resolve the workspace — the menu reads live state (the GitHub
     /// remote, the stored customization) this row never holds.
@@ -48,10 +66,14 @@ final class WorkspaceRowView: ShellRowView {
     /// stored.
     var titleText: String { titleField.stringValue }
 
-    init(id: String, label: String, expanded: Bool, tint: NSColor? = nil) {
+    init(id: String, label: String, expanded: Bool, tint: NSColor? = nil, remoteControl: Bool = false) {
         workspaceID = id
         isExpanded = expanded
         chevron = ShellGlyphView(.chevronRight, color: ShellPalette.chevron, size: 15, lineWidth: 1.8)
+        remoteGlyph = NSImageView(
+            image: NSImage(systemSymbolName: "globe", accessibilityDescription: "Remote Control on")
+                ?? NSImage()
+        )
         folderGlyph = ShellGlyphView(
             expanded ? .folderOpen : .folder,
             color: tint ?? ShellPalette.folderGlyph,
@@ -70,7 +92,12 @@ final class WorkspaceRowView: ShellRowView {
         layer?.cornerCurve = .continuous
         chevron.rotated = expanded
 
-        for view in [chevron, folderGlyph, titleField] { addSubview(view) }
+        remoteGlyph.translatesAutoresizingMaskIntoConstraints = false
+        remoteGlyph.contentTintColor = ShellPalette.folderGlyph
+        remoteGlyph.isHidden = !remoteControl
+        remoteGlyph.toolTip = "Remote Control is on for this workspace"
+
+        for view in [chevron, folderGlyph, titleField, remoteGlyph] { addSubview(view) }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 28),
 
@@ -81,8 +108,16 @@ final class WorkspaceRowView: ShellRowView {
             folderGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             titleField.leadingAnchor.constraint(equalTo: folderGlyph.trailingAnchor, constant: 6),
-            titleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            // The title stops short of the globe whether or not it is shown:
+            // a hidden view still holds its frame, so one pair of constraints
+            // serves both states and the name never slides under the mark.
+            titleField.trailingAnchor.constraint(lessThanOrEqualTo: remoteGlyph.leadingAnchor, constant: -6),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            remoteGlyph.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            remoteGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
+            remoteGlyph.widthAnchor.constraint(equalToConstant: 16),
+            remoteGlyph.heightAnchor.constraint(equalToConstant: 16),
         ])
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         setAccessibilityLabel("Workspace \(label)")
@@ -312,7 +347,8 @@ final class WorkspacesTreeView: NSView {
                 id: entry.id,
                 label: entry.label,
                 expanded: expanded,
-                tint: entry.tint
+                tint: entry.tint,
+                remoteControl: entry.remoteControl
             )
             workspaceRow.onPress = { [weak self] in self?.toggle(entry.id) }
             workspaceRow.onContextMenu = { [weak self] in self?.workspaceMenuProvider?(entry.id) }

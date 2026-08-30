@@ -30,14 +30,19 @@ final class WorkspaceContextMenuTests: XCTestCase {
             showInFinder: {},
             openOnGitHub: { _ in },
             customize: {},
+            remoteControlEnabled: false,
+            toggleRemoteControl: {},
             remove: {}
         )
         XCTAssertEqual(
             menu.items.map(\.title),
-            ["New session", "Show in Finder", "", "Customize…", "", "Remove workspace"]
+            [
+                "New session", "Show in Finder", "", "Customize…",
+                "Enable Remote Control", "", "Remove workspace",
+            ]
         )
         XCTAssertTrue(menu.items[2].isSeparatorItem)
-        XCTAssertTrue(menu.items[4].isSeparatorItem)
+        XCTAssertTrue(menu.items[5].isSeparatorItem)
     }
 
     /// With a GitHub remote the item appears between Show in Finder and the
@@ -51,13 +56,15 @@ final class WorkspaceContextMenuTests: XCTestCase {
             showInFinder: {},
             openOnGitHub: { opened.append($0) },
             customize: {},
+            remoteControlEnabled: false,
+            toggleRemoteControl: {},
             remove: {}
         )
         XCTAssertEqual(
             menu.items.map(\.title),
             [
                 "New session", "Show in Finder", "Open on GitHub", "",
-                "Customize…", "", "Remove workspace",
+                "Customize…", "Enable Remote Control", "", "Remove workspace",
             ]
         )
         try XCTUnwrap(menu.items[2] as? ShellMenuItem).performForTesting()
@@ -72,6 +79,8 @@ final class WorkspaceContextMenuTests: XCTestCase {
             showInFinder: {},
             openOnGitHub: { _ in },
             customize: {},
+            remoteControlEnabled: false,
+            toggleRemoteControl: {},
             remove: {}
         )
         let item = try XCTUnwrap(menu.items.last)
@@ -87,12 +96,169 @@ final class WorkspaceContextMenuTests: XCTestCase {
             showInFinder: { fired.append("finder") },
             openOnGitHub: { _ in },
             customize: { fired.append("customize") },
+            remoteControlEnabled: false,
+            toggleRemoteControl: { fired.append("remote") },
             remove: { fired.append("remove") }
         )
         for item in menu.items {
             (item as? ShellMenuItem)?.performForTesting()
         }
-        XCTAssertEqual(fired, ["new", "finder", "customize", "remove"])
+        XCTAssertEqual(fired, ["new", "finder", "customize", "remote", "remove"])
+    }
+
+    /// Enable Remote Control is a check-toggle: the checkmark is the only
+    /// place the menu says whether this workspace is currently offered to
+    /// other machines (the remote-session-control spec's §2).
+    func testEnableRemoteControlCarriesItsCheckmark() throws {
+        for enabled in [true, false] {
+            let menu = WorkspaceContextMenu.build(
+                gitHubURL: nil,
+                newSession: {},
+                showInFinder: {},
+                openOnGitHub: { _ in },
+                customize: {},
+                remoteControlEnabled: enabled,
+                toggleRemoteControl: {},
+                remove: {}
+            )
+            let item = try XCTUnwrap(menu.items.first { $0.title == "Enable Remote Control" })
+            XCTAssertEqual(item.state, enabled ? .on : .off)
+        }
+    }
+
+    // MARK: - Enable Remote Control (2026-08-30 remote-session-control spec §2)
+
+    /// The first enable does all four things at once: stores the intent,
+    /// writes the projection the daemon authorizes against, registers this
+    /// Mac with the relay, and lights the row's globe. Only the enabled
+    /// workspace is in the projection — that is the whole trust boundary.
+    func testEnablingRemoteControlWritesBothRowsRegistersOnceAndLightsTheGlobe() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", label: "one", group: "g-1"),
+            PersistedTab(project: "beta", engine: .shell, cwd: "/tmp/beta", id: "s-2", group: "g-2"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        var written: [String: String] = [:]
+        let registered = expectation(description: "the device token row is written")
+        controller.settingsWriter = { key, value in
+            written[key] = value
+            if key == SettingsKey.relayDeviceToken { registered.fulfill() }
+        }
+        var registrations: [String] = []
+        controller.relayDeviceRegistrar = { name in
+            registrations.append(name)
+            return RelayClient.Registration(deviceID: "d1", token: "secret")
+        }
+
+        controller.toggleRemoteControl(workspaceID: "alpha")
+
+        XCTAssertEqual(
+            RemoteControlProjection.decodeEnabled(written[SettingsKey.remoteControlWorkspaces]),
+            ["alpha"]
+        )
+        let payload = RemoteControlProjection.decode(written[SettingsKey.remoteControl])
+        XCTAssertEqual(payload.workspaces.map(\.id), ["alpha"], "only the enabled workspace is projected")
+        XCTAssertEqual(payload.workspaces[0].sessions.map(\.id), ["s-1"])
+        XCTAssertEqual(payload.workspaces[0].sessions[0].engine, "claude")
+        XCTAssertEqual(payload.workspaces[0].sessions[0].title, "one")
+
+        let row = try XCTUnwrap(firstWorkspaceRow(in: controller.shellSidebar.workspacesTree))
+        XCTAssertEqual(row.workspaceID, "alpha")
+        XCTAssertFalse(row.remoteGlyph.isHidden)
+
+        wait(for: [registered], timeout: 5)
+        XCTAssertEqual(registrations.count, 1)
+        XCTAssertEqual(
+            written[SettingsKey.relayDeviceToken],
+            RelayClient.shared.deviceTokenRow(
+                RelayClient.Registration(deviceID: "d1", token: "secret"),
+                name: try XCTUnwrap(registrations.first)
+            )
+        )
+
+        // A second workspace joins the projection; the Mac is already
+        // registered, so nothing asks the relay again.
+        controller.toggleRemoteControl(workspaceID: "beta")
+        XCTAssertEqual(
+            RemoteControlProjection.decode(written[SettingsKey.remoteControl]).workspaces.map(\.id).sorted(),
+            ["alpha", "beta"]
+        )
+        XCTAssertEqual(registrations.count, 1, "registration happens once per Mac, not once per workspace")
+    }
+
+    /// Turning it off again empties the projection — the value the daemon
+    /// closes its control channel on, dropping every remote viewer.
+    func testDisablingRemoteControlEmptiesTheProjection() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var written: [String: String] = [:]
+        controller.settingsWriter = { key, value in written[key] = value }
+        controller.relayDeviceRegistrar = { _ in RelayClient.Registration(deviceID: "d1", token: "secret") }
+
+        controller.toggleRemoteControl(workspaceID: "alpha")
+        controller.toggleRemoteControl(workspaceID: "alpha")
+
+        XCTAssertEqual(written[SettingsKey.remoteControlWorkspaces], "[]")
+        XCTAssertEqual(RemoteControlProjection.decode(written[SettingsKey.remoteControl]), .init(workspaces: []))
+        XCTAssertTrue(controller.remoteControlWorkspaceIDs.isEmpty)
+        let row = try XCTUnwrap(firstWorkspaceRow(in: controller.shellSidebar.workspacesTree))
+        XCTAssertTrue(row.remoteGlyph.isHidden)
+    }
+
+    /// A workspace is called the same thing on both machines: the projection
+    /// carries the name the sidebar prints, Customize… included — and those
+    /// are keyed by directory, not by workspace id, which is the mapping a
+    /// second lookup here would get wrong.
+    func testTheProjectionCarriesTheSidebarsDisplayName() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+        var written: [String: String] = [:]
+        controller.settingsWriter = { key, value in written[key] = value }
+        controller.relayDeviceRegistrar = { _ in RelayClient.Registration(deviceID: "d1", token: "secret") }
+        controller.applyRestoredWorkspaceCustomizations(
+            WorkspaceCustomizationsCodec.serialize(
+                ["/tmp/alpha": WorkspaceCustomization(displayName: "Mission Control", color: nil)]
+            )
+        )
+
+        controller.toggleRemoteControl(workspaceID: "alpha")
+
+        XCTAssertEqual(
+            RemoteControlProjection.decode(written[SettingsKey.remoteControl]).workspaces.map(\.name),
+            ["Mission Control"]
+        )
+    }
+
+    /// The menu the row actually pops carries the checkmark for the state
+    /// the controller holds — the toggle and the glyph read the same fact.
+    func testTheWorkspaceMenuReflectsTheStoredEnablement() throws {
+        let controller = makeController(panes: [
+            PersistedTab(project: "alpha", engine: .claude, cwd: "/tmp/alpha", id: "s-1", group: "g-1"),
+        ])
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.settingsWriter = { _, _ in }
+        controller.relayDeviceRegistrar = { _ in RelayClient.Registration(deviceID: "d1", token: "secret") }
+
+        let before = try XCTUnwrap(
+            controller.workspaceContextMenu(for: "alpha").items.first { $0.title == "Enable Remote Control" }
+        )
+        XCTAssertEqual(before.state, .off)
+
+        try XCTUnwrap(before as? ShellMenuItem).performForTesting()
+
+        let after = try XCTUnwrap(
+            controller.workspaceContextMenu(for: "alpha").items.first { $0.title == "Enable Remote Control" }
+        )
+        XCTAssertEqual(after.state, .on)
     }
 
     // MARK: - GitHub remote parsing

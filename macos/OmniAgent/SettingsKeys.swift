@@ -141,4 +141,32 @@ enum SettingsKey {
     /// `{"sessions":{"<group id>":{open,tabs,activeTab,width?,openFile?,treePosition?,showHidden?}}}`
     /// — see `ReviewPanelStateCodec`. No TypeScript twin, by design.
     static let reviewPanel = "review_panel_native"
+
+    /// **A contract with the Rust daemon, not with the web build** — the
+    /// remote-session-control spec's §2
+    /// (docs/superpowers/specs/2026-08-30-remote-session-control-design.md).
+    /// What this Mac offers to remote viewers, derived from the layout and
+    /// `remoteControlWorkspaces`:
+    /// `{"workspaces":[{"id","name","sessions":[{"id","title","engine","group"}]}]}`
+    /// — see `RemoteControlProjection`. The daemon deserializes this row on
+    /// every authorization decision for a remote connection, so the key names
+    /// inside it are snake_case-exact and may not be renamed on one side
+    /// alone. No TypeScript twin, by design.
+    static let remoteControl = "remote_control"
+
+    /// Native-only — the workspace ids the user turned Remote Control on
+    /// for, as a JSON array of ids (`ClosedWorkspacesCodec`'s shape). The
+    /// user's *intent*; `remoteControl` above is what that intent projects
+    /// to right now. Kept apart so enabling a workspace with nothing running
+    /// survives until something does.
+    static let remoteControlWorkspaces = "remote_control_workspaces"
+
+    /// **A contract with the Rust daemon** — the spec's §2 "Host
+    /// authentication — device tokens". `{"device_id","token","name","relay_url"}`,
+    /// written once by `RelayClient.deviceTokenRow` on the first Enable
+    /// Remote Control. The daemon authenticates to the relay with it; it
+    /// never leaves this Mac otherwise, and the relay itself stores only its
+    /// hash, so this row is the only copy. Deleting the server-side row
+    /// revokes the machine everywhere.
+    static let relayDeviceToken = "relay_device_token"
 }

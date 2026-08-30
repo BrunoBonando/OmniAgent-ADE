@@ -208,6 +208,29 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(WorkspaceRowView(id: "p1", label: "A", expanded: false).folderGlyph.glyph, .folder)
     }
 
+    /// A workspace offered to other machines wears the globe, and one that
+    /// is not wears nothing — the only place the sidebar admits that
+    /// something on this Mac is reachable from elsewhere (the
+    /// remote-session-control spec's §2).
+    func testTheGlobeShowsOnlyWhileRemoteControlIsOn() throws {
+        XCTAssertFalse(WorkspaceRowView(id: "p1", label: "A", expanded: true, remoteControl: true).remoteGlyph.isHidden)
+        XCTAssertTrue(WorkspaceRowView(id: "p1", label: "A", expanded: true).remoteGlyph.isHidden)
+
+        let suite = "workspaces-tree-globe-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let tree = WorkspacesTreeView(defaults: defaults)
+        tree.frame = NSRect(x: 0, y: 0, width: ShellMetrics.sidebarWidth, height: 500)
+        tree.reload(
+            entries: [
+                WorkspaceTreeEntry(id: "p1", label: "Alpha", sessions: [], remoteControl: true),
+            ],
+            focusedPaneID: nil,
+            statuses: [:]
+        )
+        XCTAssertFalse(try XCTUnwrap(tree.descendant(WorkspaceRowView.self)).remoteGlyph.isHidden)
+    }
+
     /// The session row aggregates its blocked terminals minus the focused one
     /// — selected counts as seen, and with pane rows gone the session row is
     /// the only place the count can live.

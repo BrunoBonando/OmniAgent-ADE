@@ -9,15 +9,23 @@ import AppKit
 
 enum WorkspaceContextMenu {
     /// The spec's shape: New session · Show in Finder · Open on GitHub (only
-    /// when a github.com origin exists) · separator · Customize… · separator
-    /// · Remove workspace, red — the one destructive thing on the menu says
-    /// so before it is read.
+    /// when a github.com origin exists) · separator · Customize… · Enable
+    /// Remote Control · separator · Remove workspace, red — the one
+    /// destructive thing on the menu says so before it is read.
+    ///
+    /// Enable Remote Control is a check-toggle (the remote-session-control
+    /// spec's §2, docs/superpowers/specs/2026-08-30-remote-session-control-design.md):
+    /// its checkmark is the whole of what this Mac offers remotely, so it
+    /// sits with Customize… among the things that describe the workspace,
+    /// not with the destructive item.
     static func build(
         gitHubURL: URL?,
         newSession: @escaping () -> Void,
         showInFinder: @escaping () -> Void,
         openOnGitHub: @escaping (URL) -> Void,
         customize: @escaping () -> Void,
+        remoteControlEnabled: Bool,
+        toggleRemoteControl: @escaping () -> Void,
         remove: @escaping () -> Void
     ) -> NSMenu {
         let menu = NSMenu()
@@ -29,6 +37,9 @@ enum WorkspaceContextMenu {
         }
         menu.addItem(.separator())
         menu.addItem(ShellMenuItem("Customize…", handler: customize))
+        let remote = ShellMenuItem("Enable Remote Control", handler: toggleRemoteControl)
+        remote.state = remoteControlEnabled ? .on : .off
+        menu.addItem(remote)
         menu.addItem(.separator())
         let removeItem = ShellMenuItem("Remove workspace", handler: remove)
         removeItem.attributedTitle = NSAttributedString(

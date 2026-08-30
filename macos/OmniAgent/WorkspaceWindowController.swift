@@ -356,6 +356,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Its read/write gates, the pairs above's shape and reasoning.
     private var reviewPanelReadDispatched = false
     private var reviewPanelReadCompleted = false
+
+    // MARK: - Remote Control (2026-08-30 remote-session-control spec §2)
+
+    /// The `remote_control_workspaces` row: the workspaces the user turned
+    /// Remote Control on for. The user's intent; what it currently projects
+    /// to is `remote_control`, rewritten from this and the live layout by
+    /// `persistRemoteControlProjection`.
+    private(set) var remoteControlWorkspaceIDs: Set<String> = []
+    private var remoteControlReadDispatched = false
+    /// Whether `relay_device_token` already exists. Registration is a
+    /// once-per-Mac thing, and the token is unreadable after the one response
+    /// that carried it, so this tracks only its *presence* — never its value,
+    /// which belongs to the daemon alone.
+    private(set) var hasRelayDeviceToken = false
+    /// The registration call. `nil` means the real `RelayClient`; a test
+    /// substitutes an answer — `workspaceRemovalConfirmer`'s pattern, and
+    /// what lets the first-enable path be asserted without a network.
+    var relayDeviceRegistrar: ((String) async throws -> RelayClient.Registration)?
     /// The panel view and its split item — the third `NSSplitViewItem`, on
     /// the right of the session content.
     let reviewPanel = ReviewPanelView()
@@ -1282,6 +1300,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 restoreUsageAnalyticsIfNeeded()
                 restoreWorkspaceCustomizationsIfNeeded()
                 restoreClosedWorkspacesIfNeeded()
+                restoreRemoteControlIfNeeded()
                 refreshProjectLabels()
                 // The launch read ran before the daemon was up and failed;
                 // this is the first time the rows can actually be read.
@@ -3204,7 +3223,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             projectLabels: projectLabels,
             eventTimes: lastStatusEventAt,
             customizations: sidebarCustomizations(),
-            sessionMeta: sessionMeta
+            sessionMeta: sessionMeta,
+            remoteControlWorkspaceIDs: remoteControlWorkspaceIDs
         )
     }
 
@@ -3317,6 +3337,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             },
             openOnGitHub: { [weak self] url in self?.openExternally(url) },
             customize: { [weak self] in self?.presentCustomizeWorkspace(id) },
+            remoteControlEnabled: remoteControlWorkspaceIDs.contains(id),
+            toggleRemoteControl: { [weak self] in self?.toggleRemoteControl(workspaceID: id) },
             remove: { [weak self] in self?.removeWorkspace(id) }
         )
     }
@@ -3543,6 +3565,135 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 applyRestoredClosedWorkspaces(raw)
             case .failure:
                 closedWorkspacesReadDispatched = false
+            }
+        }
+    }
+
+    // MARK: - Remote Control (2026-08-30 remote-session-control spec §2)
+
+    /// Reads the two rows the host side owns: which workspaces are enabled,
+    /// and whether this Mac is already registered with the relay. Both are
+    /// read together because the toggle needs both answers before it can
+    /// decide whether the first enable has to register — the same
+    /// read-once/re-arm-on-failure shape as the rows above.
+    private func restoreRemoteControlIfNeeded() {
+        guard !remoteControlReadDispatched else { return }
+        remoteControlReadDispatched = true
+        connection.getSetting(key: SettingsKey.remoteControlWorkspaces) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                remoteControlWorkspaceIDs = RemoteControlProjection.decodeEnabled(raw)
+                reloadOutline()
+                // The row may land after the layout did, in which case
+                // nothing else would rewrite the projection until the next
+                // pane mutation.
+                persistRemoteControlProjection()
+                connection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] tokenResult in
+                    guard let self, case let .success(raw) = tokenResult else { return }
+                    hasRelayDeviceToken = !(raw ?? "").isEmpty
+                }
+            case .failure:
+                remoteControlReadDispatched = false
+            }
+        }
+    }
+
+    /// The workspace context menu's Enable Remote Control. Flips the id,
+    /// stores the intent, re-derives the projection the daemon authorizes
+    /// against, and — on the first enable this Mac has ever had — registers
+    /// with the relay.
+    ///
+    /// Order matters: the projection is written before registration is even
+    /// attempted, because the daemon opens its control channel only when
+    /// *both* rows are present. Writing the projection first means the
+    /// token's arrival is the single event that starts the tunnel, whichever
+    /// way round the two writes land.
+    func toggleRemoteControl(workspaceID: String) {
+        if remoteControlWorkspaceIDs.contains(workspaceID) {
+            remoteControlWorkspaceIDs.remove(workspaceID)
+        } else {
+            remoteControlWorkspaceIDs.insert(workspaceID)
+        }
+        write(RemoteControlProjection.encodeEnabled(remoteControlWorkspaceIDs), to: SettingsKey.remoteControlWorkspaces)
+        persistRemoteControlProjection()
+        if !remoteControlWorkspaceIDs.isEmpty, !hasRelayDeviceToken { registerThisMachine() }
+        reloadOutline()
+    }
+
+    /// Rewrites `remote_control` from the live layout and the enabled ids.
+    /// Called on every toggle *and* from `persistLayout`, so a session added
+    /// to an enabled workspace becomes remotely reachable without anyone
+    /// remembering to refresh — and a session that ends stops being
+    /// attachable in the same instant. `write(_:to:)` swallows the no-change
+    /// case, so the layout path costs one string comparison.
+    func persistRemoteControlProjection() {
+        // A Mac that has never enabled Remote Control writes no row at all:
+        // an absent `remote_control` and an empty one say the same thing to
+        // the daemon (nothing is shared), and this runs on every layout
+        // persist — which is often. The `lastPersisted` half is what keeps
+        // the *disable* path honest: once the row exists it must be updated
+        // to the empty projection, since that is the value the daemon closes
+        // its control channel on.
+        guard !remoteControlWorkspaceIDs.isEmpty || lastPersisted[SettingsKey.remoteControl] != nil else { return }
+        // Derived from the layout, so gated on the layout the same way
+        // `persistLayout` is: a projection built from panes nobody has
+        // restored yet would tell the daemon this Mac is sharing nothing and
+        // drop every remote viewer for the length of a launch.
+        guard layoutReadCompleted else { return }
+        let descriptors = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        let payload = RemoteControlProjection.build(
+            tabs: WorkspaceRestoration.persistedTabs(from: descriptors),
+            enabledWorkspaceIDs: remoteControlWorkspaceIDs,
+            workspaceLabels: remoteControlWorkspaceLabels()
+        )
+        write(RemoteControlProjection.encode(payload), to: SettingsKey.remoteControl)
+    }
+
+    /// The names remote viewers see — `sidebarDisplayLabel`'s answer for
+    /// each enabled workspace, so a workspace is called the same thing on
+    /// both machines. Built through that one function rather than reading
+    /// `workspaceCustomizations` directly: customizations are keyed by
+    /// *directory*, not by workspace id (`customizationKey(for:)`), and a
+    /// second mapping here would be the one that drifts.
+    private func remoteControlWorkspaceLabels() -> [String: String] {
+        var labels = projectLabels
+        for id in remoteControlWorkspaceIDs {
+            labels[id] = sidebarDisplayLabel(for: id)
+        }
+        return labels
+    }
+
+    /// The first Enable Remote Control on a Mac with no device token:
+    /// registers with the relay and hands the token straight to the daemon.
+    /// The app never stores it — the relay keeps only its hash, the daemon
+    /// keeps the only copy, and this method keeps nothing but the fact that
+    /// one exists.
+    private func registerThisMachine() {
+        let name = Host.current().localizedName ?? "Mac"
+        let register = relayDeviceRegistrar ?? { try await RelayClient.shared.registerDevice(name: $0) }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let registration = try await register(name)
+                // Through `write(_:to:)` like every other settings row, not
+                // `connection.setSetting` directly: one seam means a test can
+                // watch this land without a socket, and without touching the
+                // developer's real `brain.db`.
+                write(RelayClient.shared.deviceTokenRow(registration, name: name), to: SettingsKey.relayDeviceToken)
+                hasRelayDeviceToken = true
+            } catch {
+                presentWindowAsk(
+                    title: "Could not enable Remote Control",
+                    message: error.localizedDescription,
+                    icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
+                    // The overlay's two severities: `.critical` is the tinted
+                    // card a failure gets (`Could not create branch session`'s
+                    // treatment). Never an `NSAlert` — every modal question in
+                    // this app is liquid glass.
+                    severity: .critical,
+                    options: [PaneAskOption("OK", isPrimary: true) { _ in }]
+                )
             }
         }
     }
@@ -4864,6 +5015,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: descriptors)),
             to: SettingsKey.layout
         )
+        // The projection is a function of this same layout, so it is
+        // re-derived wherever the layout is — the spec's "rewritten on every
+        // toggle and on every layout persist".
+        persistRemoteControlProjection()
     }
 
     // MARK: - Browser pane persistence (Task 5)
