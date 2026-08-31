@@ -27,6 +27,14 @@ const PROJECTION_V2: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alp
 "sessions":[{"id":"g1","label":"Session 1","order":0,
 "panes":[{"id":"s1","title":"claude","engine":"claude","kind":"terminal","order":0},
          {"id":"s3","title":"shell","engine":"shell","kind":"terminal","order":1}]}]}]}"#;
+/// A v2 projection whose session group also holds a **non-terminal** pane.
+/// Editor and browser panes carry ids in the projection just like terminals
+/// do, so the allowlist is a list of pane ids and not a promise that each one
+/// is a PTY — the registry is what makes that second claim.
+const PROJECTION_V2_WITH_EDITOR: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
+"sessions":[{"id":"g1","label":"Session 1","order":0,
+"panes":[{"id":"s1","title":"claude","engine":"claude","kind":"terminal","order":0},
+         {"id":"e1","title":"README.md","engine":null,"kind":"editor","order":1}]}]}]}"#;
 
 fn command_session(id: &str, script: &str) -> CreateSession {
     CreateSession {
@@ -84,6 +92,16 @@ async fn remote_client(
     root: &std::path::Path,
     s1_script: &str,
 ) -> (Duplex, ClientContext, oneshot::Sender<()>) {
+    remote_client_sharing(root, s1_script, PROJECTION).await
+}
+
+/// [`remote_client`] with the projection row spelled out — the phase-2 tests
+/// below need the v2 shape, where the attachable ids sit a level deeper.
+async fn remote_client_sharing(
+    root: &std::path::Path,
+    s1_script: &str,
+    projection: &str,
+) -> (Duplex, ClientContext, oneshot::Sender<()>) {
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
         root.join("brain-data"),
@@ -102,7 +120,7 @@ async fn remote_client(
     ctx.settings
         .lock()
         .unwrap()
-        .set_setting("remote_control", PROJECTION)
+        .set_setting("remote_control", projection)
         .unwrap();
     ctx.settings
         .lock()
@@ -388,6 +406,117 @@ fn a_v2_session_with_no_panes_shares_nothing_yet_keeps_the_machine_reachable() {
     store.set_setting("remote_control", IDLE).unwrap();
     assert!(omniagent_pty_daemon::remote_session_ids(&store).is_empty());
     assert!(omniagent_pty_daemon::remote_control_active(&store));
+}
+
+/// Phase 2 §2, driven through the real handler rather than the reader alone:
+/// with a v2 row active, a **pane** id attaches and the session-**group** id
+/// that contains it does not. `projection_v2_shares_every_pane_and_v1_still_parses`
+/// pins `remote_session_ids`; this pins that `serve_client`/`authorize_remote`
+/// act on what it returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_v2_projection_attaches_panes_and_refuses_the_session_group() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut client, _ctx, _stop) = remote_client_sharing(root.path(), "cat", PROJECTION_V2).await;
+
+    client
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "g1", "after_sequence": null}),
+        )
+        .await;
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::Error,
+        "a session group is a UI grouping, never an attachable daemon session"
+    );
+
+    client
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "s1", "after_sequence": null}),
+        )
+        .await;
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::SessionResized
+    );
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::Snapshot
+    );
+}
+
+/// The safety net under the projection reader: not every pane id it collects
+/// is a PTY — editor and browser panes carry ids too. They are harmless
+/// because the registry never holds a session under them, and this is what
+/// says so out loud, so a future change that starts registering something
+/// under a non-terminal pane id fails here rather than silently sharing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shared_pane_with_no_session_behind_it_cannot_be_attached() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut client, _ctx, _stop) =
+        remote_client_sharing(root.path(), "cat", PROJECTION_V2_WITH_EDITOR).await;
+
+    client
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "e1", "after_sequence": null}),
+        )
+        .await;
+    let reply = client.read().await;
+    assert_eq!(reply.header.message_kind, MessageKind::Error);
+    let reply: serde_json::Value = serde_json::from_slice(&reply.payload).unwrap();
+    assert!(
+        reply["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not found")),
+        "the projection allowed it; the session registry is what refuses it: {reply}"
+    );
+}
+
+/// Phase 2 §7 invariant 3: `RemoteViewers` goes to local connections only —
+/// a viewer must never learn that another viewer exists. The local resize is
+/// the positive control: frames really are flowing on this connection while
+/// the roster is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_viewer_is_never_told_about_other_viewers() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
+    client
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "s1", "after_sequence": null}),
+        )
+        .await;
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::SessionResized
+    );
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::Snapshot
+    );
+
+    ctx.registry
+        .get("s1")
+        .unwrap()
+        .resize(90, 20, 0, 0)
+        .unwrap();
+
+    let mut saw_the_resize = false;
+    let settled = tokio::time::Instant::now() + Duration::from_millis(500);
+    while let Some(frame) = client
+        .try_read(settled.saturating_duration_since(tokio::time::Instant::now()))
+        .await
+    {
+        assert_ne!(
+            frame.header.message_kind,
+            MessageKind::RemoteViewers,
+            "a viewer must never learn about other viewers"
+        );
+        saw_the_resize |= frame.header.message_kind == MessageKind::SessionResized;
+    }
+    assert!(saw_the_resize, "the connection was live throughout");
 }
 
 #[test]

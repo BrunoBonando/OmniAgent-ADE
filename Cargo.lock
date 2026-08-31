@@ -854,6 +854,7 @@ dependencies = [
  "brain-core",
  "brain-ingest",
  "bytes",
+ "chrono",
  "futures-util",
  "mcp-server",
  "portable-pty",

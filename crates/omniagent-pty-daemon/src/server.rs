@@ -1,11 +1,12 @@
+use crate::connections::{ConnectionRegistry, ViewerIdentity};
 use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, write_frame, AttachPayload,
-    BrainGetContextPayload, BrainSearchPayload, ErrorPayload, Frame, HelloAckPayload, HelloPayload,
-    MessageKind, ResizePayload, ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload,
-    RootsReingestProjectPayload, RootsRenameProjectPayload, RootsSetPausedPayload,
-    RootsStartIngestPayload, SessionCreatedPayload, SessionExitedPayload, SessionIdPayload,
-    SessionListPayload, SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue,
-    PROTOCOL_VERSION,
+    BrainGetContextPayload, BrainSearchPayload, DisconnectViewerPayload, ErrorPayload, Frame,
+    HelloAckPayload, HelloPayload, MessageKind, RemoteViewersPayload, ResizePayload,
+    ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
+    RootsRenameProjectPayload, RootsSetPausedPayload, RootsStartIngestPayload,
+    SessionCreatedPayload, SessionExitedPayload, SessionIdPayload, SessionListPayload,
+    SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue, PROTOCOL_VERSION,
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
@@ -19,10 +20,11 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, Mutex, Notify};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 const CLIENT_QUEUE_CAPACITY: usize = 64;
 
@@ -57,6 +59,10 @@ pub struct ClientContext {
     /// Poked after every successful `SetSetting`; the relay task watches it
     /// to notice `remote_control` / device-token changes without polling.
     pub settings_changed: Arc<Notify>,
+    /// Every live client connection (phase 2 spec §5) — what makes presence
+    /// and the kick possible at all. Constructed once by
+    /// [`DaemonServer::bind_with_data_dir`] and cloned into every connection.
+    pub connections: ConnectionRegistry,
 }
 
 /// The write half of a client connection, shared between the dispatch loop
@@ -66,6 +72,51 @@ pub type SharedWriter = Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>;
 /// The settings row holding the remote-control projection — the only
 /// workspaces (and their sessions) a remote client may ever see.
 pub const REMOTE_CONTROL_KEY: &str = "remote_control";
+
+/// The settings row listing viewer ids the host has disconnected — a JSON
+/// array of strings, `["<viewer_id>", …]` (phase 2 spec §5).
+///
+/// **The daemon writes this row.** A kick that only dropped the socket would
+/// not hold: a viewer with a valid device token re-dials within 30 s, and it
+/// has to be refused even with the host app closed, so the enforcer has to be
+/// the one keeping the list.
+///
+/// **The app clears the whole row** — a single `SetSetting(…, "[]")` — when
+/// Remote Control is switched on for any workspace. The list is global rather
+/// than per-workspace because it answers "which machines may not reach this
+/// Mac", and turning sharing back on anywhere is the deliberate act that
+/// forgives them. Both sides writing one small array is safe here: the two
+/// writes are a human action apart.
+pub const BLOCKED_VIEWERS_KEY: &str = "remote_control_blocked";
+
+/// The viewer ids currently blocked. An unreadable store, a missing row or
+/// unparsable JSON all mean "nobody is blocked": this list only ever *adds*
+/// refusals, so failing open here refuses nothing that the trust boundary in
+/// [`authorize_remote`] would have let through anyway.
+fn blocked_viewers(settings: &std::sync::Mutex<Store>) -> HashSet<String> {
+    lock_store(settings)
+        .ok()
+        .and_then(|store| store.get_setting(BLOCKED_VIEWERS_KEY).ok().flatten())
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .map(|ids| ids.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Adds one viewer id to [`BLOCKED_VIEWERS_KEY`], read-modify-write. A row
+/// that does not parse as an array of ids is replaced rather than inherited —
+/// the alternative is a kick that silently does not hold.
+fn block_viewer(store: &Store, viewer_id: &str) -> Result<()> {
+    let mut ids: Vec<String> = store
+        .get_setting(BLOCKED_VIEWERS_KEY)?
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    if !ids.iter().any(|id| id == viewer_id) {
+        ids.push(viewer_id.to_owned());
+    }
+    store
+        .set_setting(BLOCKED_VIEWERS_KEY, &serde_json::to_string(&ids)?)
+        .map_err(Into::into)
+}
 
 /// The session ids the `remote_control` projection currently shares — the
 /// allowlist every remote `Attach`/`Input`/`Interrupt` is checked against.
@@ -83,7 +134,14 @@ pub const REMOTE_CONTROL_KEY: &str = "remote_control";
 /// - **v1** flattened panes into `sessions[]`, so there each entry *is* the
 ///   attachable id. The absence of a `panes` array is what selects this.
 ///
-/// Either way the id collected is the daemon session id, i.e. the pane.
+/// Either way the id collected is a **pane** id rather than a session-group
+/// id. Not every pane is a PTY, though: an editor or browser pane carries an
+/// id in the projection exactly like a terminal pane does. Those are harmless
+/// because the daemon never registers a session under them — a remote `Attach`
+/// passes the allowlist and then gets "session not found" from the registry
+/// (`a_shared_pane_with_no_session_behind_it_cannot_be_attached`) — but what
+/// this returns is a set of shared pane ids, not a promise that each one names
+/// a terminal.
 pub fn remote_session_ids(store: &Store) -> HashSet<String> {
     let Some(raw) = store.get_setting(REMOTE_CONTROL_KEY).ok().flatten() else {
         return HashSet::new();
@@ -204,6 +262,8 @@ pub struct DaemonServer {
     ingestion: IngestionState,
     /// See [`ClientContext::settings_changed`].
     settings_changed: Arc<Notify>,
+    /// See [`ClientContext::connections`].
+    connections: ConnectionRegistry,
     /// Whether [`Self::serve`] spawns the relay client (`relay.rs`). Off
     /// for [`Self::bind_with_data_dir`] so tests drive `run_relay` directly;
     /// [`run_daemon`] turns it on with [`Self::with_relay`].
@@ -295,6 +355,7 @@ impl DaemonServer {
             data_dir,
             ingestion: IngestionState::new(),
             settings_changed: Arc::new(Notify::new()),
+            connections: ConnectionRegistry::default(),
             relay_enabled: false,
         })
     }
@@ -320,6 +381,7 @@ impl DaemonServer {
             data_dir: self.data_dir.clone(),
             ingestion: self.ingestion.clone(),
             settings_changed: Arc::clone(&self.settings_changed),
+            connections: self.connections.clone(),
         }
     }
 
@@ -431,6 +493,7 @@ where
         data_dir,
         ingestion,
         settings_changed,
+        connections,
     } = ctx;
     let (mut reader, writer) = tokio::io::split(stream);
     let writer: SharedWriter = Arc::new(Mutex::new(Box::new(writer)));
@@ -438,7 +501,26 @@ where
     if hello.header.message_kind != MessageKind::Hello {
         return Err(anyhow!("first client frame must be Hello"));
     }
-    parse_json::<HelloPayload>(&hello.payload)?;
+    let identity = parse_json::<HelloPayload>(&hello.payload)?;
+    // The blocklist is checked here — before the ack, and by the daemon rather
+    // than the app — because a kick has to hold against a viewer that still
+    // holds a valid device token and re-dials on its own (spec §5).
+    if trust == ClientTrust::Remote {
+        if let Some(viewer_id) = identity.viewer_id.as_deref() {
+            if blocked_viewers(&settings).contains(viewer_id) {
+                send_error(
+                    &writer,
+                    hello.header.request_or_sequence,
+                    anyhow!(
+                        "viewer {viewer_id} is disconnected until Remote Control \
+                         is turned off and on again"
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
     send_json(
         &writer,
         MessageKind::HelloAck,
@@ -449,16 +531,59 @@ where
     )
     .await?;
 
+    // Registration starts here, past the point where a connection can be
+    // refused, and the guard is what takes it back out however this function
+    // ends — including an early `?` and an aborted task.
+    let cancel = CancellationToken::new();
+    let connection =
+        ConnectionGuard::register(&connections, trust, Arc::clone(&writer), cancel.clone());
+    let named_itself = match identity.viewer_id {
+        Some(viewer_id) => connections.set_viewer(
+            connection.id,
+            ViewerIdentity {
+                viewer_id,
+                // A viewer that gives an id but no name is still a machine the
+                // host must be able to see and kick.
+                machine_name: identity
+                    .machine_name
+                    .unwrap_or_else(|| "Unknown Mac".into()),
+            },
+        ),
+        None => false,
+    };
+    // A host is told the roster on its own `Hello`, so an app that has just
+    // opened is immediately correct rather than correct at the next change —
+    // but only when there is something to tell it. An empty roster is what a
+    // client already believes, and sending it anyway would put an unsolicited
+    // frame between every local `Hello` and the reply to its first request,
+    // for the overwhelmingly common case of nobody watching at all.
+    let nobody_is_watching = connections.viewers().is_empty();
+    if (trust == ClientTrust::Local && !nobody_is_watching) || named_itself {
+        connections.broadcast_presence().await;
+    }
+
     let mut attachments = HashMap::<String, Attachment>::new();
-    while let Ok(frame) = next_frame(
-        &mut reader,
-        trust,
-        &settings,
-        &settings_changed,
-        &mut attachments,
-    )
-    .await
-    {
+    loop {
+        let frame = tokio::select! {
+            // A kicked connection stops mid-frame. Dropping a partly-read
+            // frame would desynchronise the stream, which is exactly why
+            // `next_frame` keeps one read future across its own wakes — but
+            // here the stream is being torn down, so there is nothing left to
+            // desynchronise.
+            _ = cancel.cancelled() => break,
+            frame = next_frame(
+                &mut reader,
+                trust,
+                &settings,
+                &settings_changed,
+                &mut attachments,
+                &connections,
+                connection.id,
+            ) => match frame {
+                Ok(frame) => frame,
+                Err(_) => break,
+            },
+        };
         let request = frame.header.request_or_sequence;
         // The remote trust boundary: a point read of the projection per
         // frame (microseconds; nothing to cache or invalidate), then the
@@ -548,15 +673,33 @@ where
                             .attach_and_subscribe(attach.after_sequence, CLIENT_QUEUE_CAPACITY);
                         let empty_resume =
                             matches!(&state, AttachState::Resume(events) if events.is_empty());
+                        // Presence learns about this attachment *before* the
+                        // client is told about it, so "the viewer has its
+                        // snapshot" implies "the host's roster names the pane":
+                        // a `ListViewers` can never disagree with what the
+                        // viewer can already see on screen.
+                        sync_attached(
+                            &connections,
+                            connection.id,
+                            attachments
+                                .keys()
+                                .cloned()
+                                .chain([attach.id.clone()])
+                                .collect(),
+                        )
+                        .await;
                         // The grid before the screen drawn on it: a viewer
                         // scales the host's size rather than imposing its own
                         // (phase 2 §1), so it must know that size to lay the
-                        // snapshot out.
+                        // snapshot out. The header carries the session's
+                        // current sequence, the same stamp `Snapshot` gets —
+                        // never this attach's request id, which would give one
+                        // message kind two meanings for the same header field.
                         let (cols, rows) = session.size();
                         send_json(
                             &writer,
                             MessageKind::SessionResized,
-                            request,
+                            session.sequence(),
                             &SessionSizePayload {
                                 id: attach.id.clone(),
                                 cols,
@@ -909,6 +1052,38 @@ where
                     Err(error) => send_error(&writer, request, error).await,
                 }
             }
+            // Both viewer-presence kinds are local-only, and neither is in
+            // `authorize_remote`'s allow arms — a remote client is answered
+            // with `Error` before ever reaching this dispatch (spec §7
+            // invariant 2, pinned by `presence_is_local_only`).
+            MessageKind::ListViewers => {
+                decode_payload!(serde_json::Value);
+                send_json(
+                    &writer,
+                    MessageKind::Response,
+                    request,
+                    &RemoteViewersPayload {
+                        viewers: connections.viewers(),
+                    },
+                )
+                .await
+            }
+            MessageKind::DisconnectViewer => {
+                let payload = decode_payload!(DisconnectViewerPayload);
+                // Block first, then kick: a viewer dropped before the row is
+                // written could re-dial into the gap.
+                let blocked = lock_store(&settings)
+                    .and_then(|store| block_viewer(&store, &payload.viewer_id));
+                match blocked {
+                    Ok(()) => {
+                        connections.cancel_viewer(&payload.viewer_id);
+                        let replied = send_response(&writer, request).await;
+                        connections.broadcast_presence().await;
+                        replied
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
             MessageKind::Hello => {
                 send_error(&writer, request, anyhow!("Hello is only valid once")).await
             }
@@ -924,9 +1099,88 @@ where
         if result.is_err() {
             break;
         }
+        sync_attached(
+            &connections,
+            connection.id,
+            attachments.keys().cloned().collect(),
+        )
+        .await;
     }
 
+    if cancel.is_cancelled() {
+        // End the socket here rather than whenever the last clone of the
+        // shared writer happens to go — the attachments' forwarding tasks
+        // hold clones, and `abort()` does not drop them synchronously. A kick
+        // the viewer only notices a beat later is a kick that looks broken.
+        let _ = writer.lock().await.shutdown().await;
+    }
+    // Leave the registry here, where the roster push can be awaited, rather
+    // than in the guard's `Drop`, where it cannot.
+    connection.close().await;
     Ok(())
+}
+
+/// Keeps one connection in the registry for as long as it is being served.
+///
+/// `serve_client` has half a dozen ways out — a returned `Err`, a `?` inside
+/// the dispatch, the loop ending, and the accept loop aborting the whole task
+/// on shutdown — and a connection left behind in the registry is a viewer the
+/// host is told is still watching. A guard is the only thing that covers all
+/// of them.
+struct ConnectionGuard {
+    connections: ConnectionRegistry,
+    id: u64,
+}
+
+impl ConnectionGuard {
+    fn register(
+        connections: &ConnectionRegistry,
+        trust: ClientTrust,
+        writer: SharedWriter,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            connections: connections.clone(),
+            id: connections.register(trust, writer, cancel),
+        }
+    }
+
+    /// The orderly exit: remove the entry and, if that changed the roster,
+    /// wait for the hosts to be told. Idempotent — `Drop` then finds nothing.
+    async fn close(&self) {
+        if self.connections.remove(self.id) {
+            self.connections.broadcast_presence().await;
+        }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if !self.connections.remove(self.id) {
+            return;
+        }
+        // Only the disorderly exits reach here (`close` already ran on the
+        // orderly one). `Drop` cannot await, so the push is fire-and-forget;
+        // if the runtime is already gone there is nobody left to tell, and a
+        // host that missed it is corrected by its next roster.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let connections = self.connections.clone();
+            handle.spawn(async move { connections.broadcast_presence().await });
+        }
+    }
+}
+
+/// Mirrors one connection's attachments into the registry, telling the hosts
+/// when that changed what they are shown. The single call-site pattern for
+/// "this viewer is now watching a different set of panes".
+async fn sync_attached(
+    connections: &ConnectionRegistry,
+    connection: u64,
+    attached: HashSet<String>,
+) {
+    if connections.set_attached(connection, attached) {
+        connections.broadcast_presence().await;
+    }
 }
 
 /// The session ids the projection shares right now — empty when the store
@@ -953,6 +1207,8 @@ async fn next_frame<R: AsyncRead + Unpin>(
     settings: &std::sync::Mutex<Store>,
     settings_changed: &Notify,
     attachments: &mut HashMap<String, Attachment>,
+    connections: &ConnectionRegistry,
+    connection: u64,
 ) -> io::Result<Frame> {
     let mut read = std::pin::pin!(read_frame(reader));
     if trust == ClientTrust::Local {
@@ -964,6 +1220,14 @@ async fn next_frame<R: AsyncRead + Unpin>(
             _ = settings_changed.notified() => {
                 let allowed = shared_sessions(settings);
                 attachments.retain(|id, _| allowed.contains(id));
+                // The host's roster follows the prune here rather than at this
+                // viewer's next frame — a passive viewer may not send one.
+                sync_attached(
+                    connections,
+                    connection,
+                    attachments.keys().cloned().collect(),
+                )
+                .await;
             }
         }
     }

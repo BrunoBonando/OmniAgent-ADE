@@ -7,9 +7,22 @@ pub const PROTOCOL_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 16;
 pub const MAX_PAYLOAD_LEN: usize = 1024 * 1024;
 
+/// The first frame of every connection.
+///
+/// `viewer_id`/`machine_name` are what a viewer calls itself (phase 2 spec
+/// §5). Both are `Option` so a client older than phase 2 — which sends
+/// `{"client": …}` alone — still parses, and both are self-reported: the two
+/// Macs belong to one account and the relay already refuses anyone else, so
+/// this is a labelling mechanism, not an authorization boundary. The daemon
+/// records them only for a `ClientTrust::Remote` connection, and they are what
+/// its presence roster and its blocklist are keyed on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloPayload {
     pub client: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +181,31 @@ pub struct SessionSizePayload {
     pub rows: u16,
 }
 
+/// One machine currently watching sessions on this daemon — an entry of both
+/// the `RemoteViewers` push and the `ListViewers` reply (phase 2 §5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewerSummaryPayload {
+    pub viewer_id: String,
+    pub machine_name: String,
+    /// The pane ids this viewer is attached to right now.
+    pub sessions: Vec<String>,
+    /// RFC 3339, when this viewer connected.
+    pub since: String,
+}
+
+/// The presence roster: the `RemoteViewers` push payload and, on the same
+/// shape, the `ListViewers` reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteViewersPayload {
+    pub viewers: Vec<ViewerSummaryPayload>,
+}
+
+/// `DisconnectViewer` request payload — kick and block one machine (phase 2 §5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisconnectViewerPayload {
+    pub viewer_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MessageKind {
@@ -228,6 +266,14 @@ pub enum MessageKind {
     /// `mcp_server::tools::search_brain`, left unwired by Task 6a and closed
     /// here so the native command palette's brain search has a route.
     BrainSearch = 0x19,
+    /// The roster of remote viewers attached to this daemon, on demand
+    /// (phase 2 §5 — appended, never renumbering an existing kind).
+    /// Local-only: it is nowhere in [`crate::authorize_remote`]'s allow
+    /// arms, so a remote client is answered with `Error`.
+    ListViewers = 0x1a,
+    /// Kicks one remote viewer and blocks it until Remote Control is turned
+    /// on again (phase 2 §5). Local-only, like `ListViewers`.
+    DisconnectViewer = 0x1b,
     HelloAck = 0x81,
     SessionList = 0x82,
     SessionCreated = 0x83,
@@ -244,6 +290,11 @@ pub enum MessageKind {
     /// pushed to a session's subscribers whenever its size changes; a local
     /// client ignores it, a remote viewer re-pins its scaled render to it.
     SessionResized = 0x8c,
+    /// The presence roster, [`RemoteViewersPayload`] (phase 2 §5 — appended,
+    /// never renumbering an existing kind). Pushed to **local** connections
+    /// only, whenever the set of identified remote viewers or what they are
+    /// attached to changes: a viewer never learns about other viewers.
+    RemoteViewers = 0x8d,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -276,6 +327,8 @@ impl TryFrom<u8> for MessageKind {
             0x17 => Self::RootsReingestProject,
             0x18 => Self::RootsRebuild,
             0x19 => Self::BrainSearch,
+            0x1a => Self::ListViewers,
+            0x1b => Self::DisconnectViewer,
             0x81 => Self::HelloAck,
             0x82 => Self::SessionList,
             0x83 => Self::SessionCreated,
@@ -288,6 +341,7 @@ impl TryFrom<u8> for MessageKind {
             0x8a => Self::ResyncRequired,
             0x8b => Self::Error,
             0x8c => Self::SessionResized,
+            0x8d => Self::RemoteViewers,
             other => return Err(FrameError::UnknownMessageKind(other)),
         })
     }

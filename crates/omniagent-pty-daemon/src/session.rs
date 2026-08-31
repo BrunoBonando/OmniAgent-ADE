@@ -477,6 +477,21 @@ impl ManagedSession {
         self.write_input(b"\x03")
     }
 
+    /// The sequence number of the last event this session recorded — the same
+    /// stamp an `AttachState::Snapshot` carries.
+    ///
+    /// Every server push stamps `request_or_sequence` with a sequence; only a
+    /// reply stamps it with a request id. `SessionResized` is a push on both
+    /// of its routes (attach time and every accepted resize), so both must
+    /// read this rather than one of them borrowing the attach's request id.
+    pub fn sequence(&self) -> u64 {
+        self.terminal
+            .lock()
+            .map(|terminal| terminal.sequence)
+            // A poisoned lock still holds the last sequence written.
+            .unwrap_or_else(|poisoned| poisoned.into_inner().sequence)
+    }
+
     /// The grid this session is running at, as last applied by [`Self::resize`].
     pub fn size(&self) -> (u16, u16) {
         self.size

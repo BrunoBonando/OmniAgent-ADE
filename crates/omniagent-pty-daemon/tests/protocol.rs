@@ -1,10 +1,11 @@
 use omniagent_pty_daemon::protocol::{
     decode_raw_payload, encode_raw_payload, AttentionPayload, BrainGetContextPayload,
-    BrainSearchPayload, ErrorPayload, Frame, FrameError, Header, MessageKind,
-    ResizePayload, ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload,
-    RootsReingestProjectPayload, RootsRenameProjectPayload, RootsSetPausedPayload,
-    RootsStartIngestPayload, SessionExitedPayload, SessionStatus, SessionStatusPayload,
-    SettingKey, SettingValue, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
+    BrainSearchPayload, DisconnectViewerPayload, ErrorPayload, Frame, FrameError, Header,
+    HelloPayload, MessageKind, RemoteViewersPayload, ResizePayload, ResponsePayload,
+    ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
+    RootsRenameProjectPayload, RootsSetPausedPayload, RootsStartIngestPayload,
+    SessionExitedPayload, SessionSizePayload, SessionStatus, SessionStatusPayload, SettingKey,
+    SettingValue, ViewerSummaryPayload, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
 
 #[test]
@@ -224,6 +225,87 @@ fn roots_message_kind_discriminants_are_appended_after_brain_get_context_never_r
     assert_eq!(
         MessageKind::try_from(0x19).unwrap(),
         MessageKind::BrainSearch
+    );
+}
+
+/// Phase 2's kinds, appended after `BrainSearch` and after `Error` rather
+/// than slotted in among the frozen ones. These four discriminants are also
+/// spelled out in `macos/OmniAgent/SessionProtocol.swift`; the two enums are
+/// one wire contract, so a change here without a change there is a bug.
+#[test]
+fn phase_2_message_kind_discriminants_are_appended_never_renumbering_v1() {
+    assert_eq!(
+        [
+            MessageKind::ListViewers as u8,
+            MessageKind::DisconnectViewer as u8,
+            MessageKind::SessionResized as u8,
+            MessageKind::RemoteViewers as u8,
+        ],
+        [0x1a, 0x1b, 0x8c, 0x8d]
+    );
+    assert_eq!(
+        MessageKind::try_from(0x1a).unwrap(),
+        MessageKind::ListViewers
+    );
+    assert_eq!(
+        MessageKind::try_from(0x1b).unwrap(),
+        MessageKind::DisconnectViewer
+    );
+    assert_eq!(
+        MessageKind::try_from(0x8d).unwrap(),
+        MessageKind::RemoteViewers
+    );
+}
+
+#[test]
+fn phase_2_payload_shapes_match_the_swift_client() {
+    assert_eq!(
+        serde_json::to_value(SessionSizePayload {
+            id: "sess-1".into(),
+            cols: 120,
+            rows: 40,
+        })
+        .unwrap(),
+        serde_json::json!({"id": "sess-1", "cols": 120, "rows": 40})
+    );
+    assert_eq!(
+        serde_json::to_value(RemoteViewersPayload {
+            viewers: vec![ViewerSummaryPayload {
+                viewer_id: "v-air".into(),
+                machine_name: "Air".into(),
+                sessions: vec!["pane-1".into()],
+                since: "2026-08-31T09:00:00+00:00".into(),
+            }],
+        })
+        .unwrap(),
+        serde_json::json!({"viewers": [{
+            "viewer_id": "v-air",
+            "machine_name": "Air",
+            "sessions": ["pane-1"],
+            "since": "2026-08-31T09:00:00+00:00"
+        }]})
+    );
+    assert_eq!(
+        serde_json::to_value(DisconnectViewerPayload {
+            viewer_id: "v-air".into(),
+        })
+        .unwrap(),
+        serde_json::json!({"viewer_id": "v-air"})
+    );
+    // A client older than phase 2 sends `{"client": …}` alone and must still
+    // parse — the viewer identity is additive, and self-reported.
+    let old = serde_json::from_value::<HelloPayload>(
+        serde_json::json!({"client": "omniagent-native-macos"}),
+    )
+    .unwrap();
+    assert_eq!((old.viewer_id, old.machine_name), (None, None));
+    let named = serde_json::from_value::<HelloPayload>(serde_json::json!({
+        "client": "omniagent-native-macos", "viewer_id": "v-air", "machine_name": "Air"
+    }))
+    .unwrap();
+    assert_eq!(
+        (named.viewer_id.as_deref(), named.machine_name.as_deref()),
+        (Some("v-air"), Some("Air"))
     );
 }
 

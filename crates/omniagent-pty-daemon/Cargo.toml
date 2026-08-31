@@ -36,6 +36,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 bytes = "1"
+# connections.rs: `since` on the presence roster is RFC 3339 on the wire.
+# Same pin as brain-core's, so this adds a direct edge to a crate the
+# workspace already builds rather than a new dependency.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"
