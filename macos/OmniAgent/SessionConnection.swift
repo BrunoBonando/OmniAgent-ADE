@@ -82,6 +82,42 @@ struct RemoteViewer: Codable, Equatable {
     }
 }
 
+/// What this Mac calls itself on every `Hello` — the other half of
+/// `RemoteViewer` (phase 2 §5). The daemon records it only for a
+/// `ClientTrust::Remote` connection, and it is what its presence roster and
+/// its blocklist are keyed on.
+///
+/// The id is created once and persisted, so this Mac keeps **one** identity
+/// across launches: a kick has to stick, and the daemon blocks by viewer id.
+/// A fresh id per launch would let a disconnected viewer walk straight back
+/// in by relaunching.
+struct SessionIdentity: Equatable {
+    /// Where the id lives. Not a `settings`-table row: it identifies this
+    /// *installation* to whatever daemon it dials, so it must not travel
+    /// with an account's data dir.
+    static let viewerIDDefaultsKey = "remote.viewerID"
+
+    let viewerID: String
+    let machineName: String
+
+    /// `defaults` is injectable because the test host shares the real app's
+    /// defaults domain — a test must never write into it.
+    init(
+        defaults: UserDefaults = .standard,
+        machineName: String = Host.current().localizedName ?? "Mac"
+    ) {
+        if let existing = defaults.string(forKey: Self.viewerIDDefaultsKey),
+           !existing.isEmpty {
+            viewerID = existing
+        } else {
+            let fresh = UUID().uuidString
+            defaults.set(fresh, forKey: Self.viewerIDDefaultsKey)
+            viewerID = fresh
+        }
+        self.machineName = machineName
+    }
+}
+
 struct SessionExitedEvent: Codable, Equatable {
     let id: String
     let exitCode: UInt32?
@@ -188,6 +224,11 @@ final class SessionConnection {
     }
 
     private let transport: SessionTransport
+    /// What this Mac calls itself on every `Hello`. Sent on local and remote
+    /// connections alike: the daemon records identity only for a remote
+    /// client, so there is nothing to branch on, and a local `Hello`
+    /// carrying it is harmless.
+    private let identity: SessionIdentity
     /// `true` when this connection reaches a daemon on another machine
     /// through the relay (`.webSocket`), `false` for the local unix socket.
     var isRemote: Bool {
@@ -251,24 +292,28 @@ final class SessionConnection {
     init(
         transport: SessionTransport,
         reconnectDelay: TimeInterval = 0.25,
-        callbackQueue: DispatchQueue = .main
+        callbackQueue: DispatchQueue = .main,
+        identity: SessionIdentity = SessionIdentity()
     ) {
         self.transport = transport
         self.reconnectDelay = reconnectDelay
         self.nextReconnectDelay = reconnectDelay
         self.callbackQueue = callbackQueue
+        self.identity = identity
     }
 
     /// The local daemon — every pre-existing call site, unchanged.
     convenience init(
         socketURL: URL,
         reconnectDelay: TimeInterval = 0.25,
-        callbackQueue: DispatchQueue = .main
+        callbackQueue: DispatchQueue = .main,
+        identity: SessionIdentity = SessionIdentity()
     ) {
         self.init(
             transport: .unixSocket(socketURL),
             reconnectDelay: reconnectDelay,
-            callbackQueue: callbackQueue
+            callbackQueue: callbackQueue,
+            identity: identity
         )
     }
 
@@ -848,7 +893,13 @@ final class SessionConnection {
                 SessionFrame(
                     kind: .hello,
                     requestOrSequence: request,
-                    payload: try encoder.encode(HelloPayload(client: "omniagent-native-macos"))
+                    payload: try encoder.encode(
+                        HelloPayload(
+                            client: "omniagent-native-macos",
+                            viewerID: identity.viewerID,
+                            machineName: identity.machineName
+                        )
+                    )
                 )
             )
         } catch {
@@ -1235,8 +1286,19 @@ final class SessionConnection {
     }
 }
 
+/// `{client, viewer_id, machine_name}` (phase 2 §5). The daemon declares the
+/// two identity fields `Option` with `#[serde(default)]` and ignores unknown
+/// fields, so this stays readable by a daemon that predates them.
 private struct HelloPayload: Codable {
     let client: String
+    let viewerID: String
+    let machineName: String
+
+    enum CodingKeys: String, CodingKey {
+        case client
+        case viewerID = "viewer_id"
+        case machineName = "machine_name"
+    }
 }
 
 private struct SessionListPayload: Codable {

@@ -33,6 +33,12 @@ final class SessionConnectionWebSocketTests: XCTestCase {
         private var connection: NWConnection?
         private var attemptCount = 0
         private var attemptHandler: (() -> Void)?
+        private var helloPayload: Data?
+        /// The `Hello` frame's JSON, as the daemon would see it.
+        var receivedHello: [String: Any]? {
+            guard let data = lock.withLock({ helloPayload }) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
         /// Every TCP connection the listener accepted — one per dial,
         /// whether it was upgraded or refused.
         var attempts: Int { lock.withLock { attemptCount } }
@@ -129,6 +135,7 @@ final class SessionConnectionWebSocketTests: XCTestCase {
                    meta.opcode == .binary {
                     var decoder = FrameDecoder()
                     if let frame = try? decoder.append(data).first, frame.kind == .hello {
+                        self.lock.withLock { self.helloPayload = frame.payload }
                         let ack = SessionFrame(kind: .helloAck, requestOrSequence: frame.requestOrSequence,
                                                payload: try! JSONEncoder().encode(["protocol_version": 1]))
                         let m = NWProtocolWebSocket.Metadata(opcode: .binary)
@@ -314,6 +321,57 @@ final class SessionConnectionWebSocketTests: XCTestCase {
         )
         wait(for: [roster], timeout: 5)
         connection.disconnect()
+    }
+
+    /// A throwaway defaults suite: the test host shares the real app's
+    /// defaults domain, so a test must never write a viewer id into it.
+    private func throwawayDefaults() -> UserDefaults {
+        let name = "digital.bruno.omniagent.tests.viewer-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
+        return defaults
+    }
+
+    /// The daemon builds its presence roster from what `Hello` carries
+    /// (phase 2 §5), so the identity has to be on the wire — and the id has
+    /// to survive relaunches, or a kicked viewer would walk back in by
+    /// quitting the app.
+    func testHelloCarriesAStableViewerIdentity() throws {
+        let defaults = throwawayDefaults()
+        let relay = try FakeRelay()
+        addTeardownBlock { relay.listener.cancel() }
+        relay.start()
+
+        let connection = SessionConnection(
+            transport: .webSocket(relay.url, bearer: { "viewer-token" }),
+            callbackQueue: .main,
+            identity: SessionIdentity(defaults: defaults)
+        )
+        let connected = expectation(description: "connected")
+        connection.onStateChange = { state in if case .connected = state { connected.fulfill() } }
+        connection.connect()
+        wait(for: [connected], timeout: 5)
+        connection.disconnect()
+
+        let hello = relay.receivedHello
+        XCTAssertEqual(hello?["client"] as? String, "omniagent-native-macos")
+        XCTAssertEqual(hello?["machine_name"] as? String, Host.current().localizedName ?? "Mac")
+        let sentID = hello?["viewer_id"] as? String
+        XCTAssertFalse(sentID?.isEmpty ?? true, "the Hello must carry a viewer id")
+
+        // Same defaults, a second construction — the id is read back, not
+        // minted again, which is what makes a kick stick across launches.
+        XCTAssertEqual(SessionIdentity(defaults: defaults).viewerID, sentID)
+        XCTAssertEqual(SessionIdentity(defaults: defaults).viewerID, sentID)
+    }
+
+    /// Two installations are two viewers: the id is per-defaults-domain, not
+    /// a constant.
+    func testADifferentDefaultsDomainIsADifferentViewer() {
+        let first = SessionIdentity(defaults: throwawayDefaults())
+        let second = SessionIdentity(defaults: throwawayDefaults())
+        XCTAssertNotEqual(first.viewerID, second.viewerID)
+        XCTAssertEqual(first.machineName, second.machineName)
     }
 
     /// Only a token refusal may park a connection. The relay answers 403 for
