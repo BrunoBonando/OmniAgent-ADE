@@ -510,7 +510,10 @@ final class ShellGlyphView: NSView {
 
 /// The row of 5pt status dots the design puts on every session row.
 final class ShellDotsView: NSView {
-    private var colors: [NSColor] = []
+    /// What `apply` was last handed — one colour per pane. Readable so the
+    /// dots a row drew are a fact a test can check, the way
+    /// `WorkspaceRowView.folderGlyph` makes the fold one.
+    private(set) var colors: [NSColor] = []
     /// Indices that breathe — the design animates only the "thinking" dot.
     private var pulsing: Set<Int> = []
     private var widthConstraint: NSLayoutConstraint!
@@ -846,7 +849,11 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     var onContextMenu: (() -> NSMenu?)?
 
     private let titleField: NSTextField
-    private let dots = ShellDotsView()
+    /// The per-pane status dots. Held readable for the same reason
+    /// `WorkspaceRowView.folderGlyph` is: one dot per pane is the fact the
+    /// viewer's sidebar exists to get right, and it should be checkable off
+    /// the row rather than inferred from what was passed in.
+    private(set) var dots = ShellDotsView()
     private let bar = NSView()
     private let isCurrent: Bool
     /// The workspace's folder colour, when one is customized — worn by the

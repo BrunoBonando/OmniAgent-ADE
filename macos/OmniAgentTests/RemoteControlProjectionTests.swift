@@ -34,25 +34,6 @@ final class RemoteControlProjectionTests: XCTestCase {
         )
     }
 
-    private func tab(
-        _ id: String,
-        project: String,
-        label: String? = nil,
-        group: String? = nil,
-        groupLabel: String? = nil,
-        engine: Engine = .shell
-    ) -> PersistedTab {
-        PersistedTab(
-            project: project,
-            engine: engine,
-            cwd: project,
-            id: id,
-            label: label,
-            group: group,
-            groupLabel: groupLabel
-        )
-    }
-
     /// Finding 2 of Bruno's two-Mac session, in one assertion: three panes of
     /// one session used to arrive as "Session 1" three times, because phase 1
     /// flattened panes into "sessions" and fell back to the group's label for
@@ -194,20 +175,5 @@ final class RemoteControlProjectionTests: XCTestCase {
         )
         XCTAssertEqual(RemoteControlProjection.decodeEnabled(nil), [])
         XCTAssertEqual(RemoteControlProjection.decodeEnabled("{"), [])
-    }
-
-    /// The phase-1 `build(tabs:)` overload survives only until T8 moves the
-    /// window's two call sites onto `build(panes:)`. While it exists it keeps
-    /// phase-1's flattening — one session per pane, the pane id attachable —
-    /// lifted into the v2 shape, so nothing regresses in the meantime.
-    func testTheDeprecatedTabsOverloadStillCarriesAttachablePaneIDs() {
-        let payload = RemoteControlProjection.build(
-            tabs: [tab("s1", project: "/a", label: "one", group: "g1")],
-            enabledWorkspaceIDs: ["/a"],
-            workspaceLabels: ["/a": "Alpha"]
-        )
-        XCTAssertEqual(payload.version, 2)
-        XCTAssertEqual(payload.workspaces[0].sessions.map(\.label), ["one"])
-        XCTAssertEqual(payload.workspaces[0].sessions.flatMap(\.panes).map(\.id), ["s1"])
     }
 }

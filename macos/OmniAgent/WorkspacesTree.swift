@@ -55,7 +55,21 @@ struct RemoteMachineTreeEntry: Equatable {
 /// expanded), display name. Pressing it folds — selection belongs to the
 /// session rows underneath.
 final class WorkspaceRowView: ShellRowView {
+    /// What the trailing mark says. `.shared` is this Mac offering the
+    /// workspace to other machines (the globe); `.viewing` is a workspace
+    /// that lives on *another* Mac and is being watched from here. The glyph
+    /// is one of only two things a remote row is allowed to differ by — the
+    /// other is where a click goes (the phase-2 spec's §2 "Rendering",
+    /// docs/superpowers/specs/2026-08-31-remote-session-control-phase-2-design.md).
+    enum RemoteMark: String {
+        case shared = "globe"
+        case viewing = "desktopcomputer.and.arrow.down"
+    }
+
     let workspaceID: String
+    /// Which mark the row wears when it wears one — readable so a test can
+    /// tell a shared workspace from a watched one without decoding an image.
+    let mark: RemoteMark
     private(set) var isExpanded: Bool
     /// Held so the fold state is a fact a test can read off the icon.
     private(set) var folderGlyph: ShellGlyphView
@@ -76,13 +90,25 @@ final class WorkspaceRowView: ShellRowView {
     /// stored.
     var titleText: String { titleField.stringValue }
 
-    init(id: String, label: String, expanded: Bool, tint: NSColor? = nil, remoteControl: Bool = false) {
+    init(
+        id: String,
+        label: String,
+        expanded: Bool,
+        tint: NSColor? = nil,
+        remoteControl: Bool = false,
+        mark: RemoteMark = .shared
+    ) {
         workspaceID = id
+        self.mark = mark
         isExpanded = expanded
         chevron = ShellGlyphView(.chevronRight, color: ShellPalette.chevron, size: 15, lineWidth: 1.8)
         remoteGlyph = NSImageView(
-            image: NSImage(systemSymbolName: "globe", accessibilityDescription: "Remote Control on")
-                ?? NSImage()
+            image: NSImage(
+                systemSymbolName: mark.rawValue,
+                accessibilityDescription: mark == .shared
+                    ? "Remote Control on"
+                    : "Shared from another Mac"
+            ) ?? NSImage()
         )
         folderGlyph = ShellGlyphView(
             expanded ? .folderOpen : .folder,
@@ -105,7 +131,9 @@ final class WorkspaceRowView: ShellRowView {
         remoteGlyph.translatesAutoresizingMaskIntoConstraints = false
         remoteGlyph.contentTintColor = ShellPalette.folderGlyph
         remoteGlyph.isHidden = !remoteControl
-        remoteGlyph.toolTip = "Remote Control is on for this workspace"
+        remoteGlyph.toolTip = mark == .shared
+            ? "Remote Control is on for this workspace"
+            : "This workspace lives on another Mac"
 
         for view in [chevron, folderGlyph, titleField, remoteGlyph] { addSubview(view) }
         NSLayoutConstraint.activate([
@@ -130,7 +158,8 @@ final class WorkspaceRowView: ShellRowView {
             remoteGlyph.heightAnchor.constraint(equalToConstant: 16),
         ])
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        setAccessibilityLabel("Workspace \(label)")
+        // VoiceOver keeps the one fact the glyph carries: whose Mac this is.
+        setAccessibilityLabel(mark == .shared ? "Workspace \(label)" : "Remote workspace \(label)")
     }
 
     @available(*, unavailable)
@@ -139,58 +168,6 @@ final class WorkspaceRowView: ShellRowView {
     override func menu(for event: NSEvent) -> NSMenu? {
         onContextMenu?() ?? super.menu(for: event)
     }
-}
-
-/// A remote machine's workspace row: the remote glyph in place of the
-/// folder, the projected name after it. No chevron and no fold — the
-/// section is as long as what the machine shares — and no selection: the
-/// session rows underneath are the doors.
-final class RemoteWorkspaceRowView: NSView {
-    private let glyph: NSImageView
-    private let titleField: NSTextField
-
-    var titleText: String { titleField.stringValue }
-
-    init(label: String) {
-        glyph = NSImageView(
-            image: NSImage(
-                systemSymbolName: "desktopcomputer.and.arrow.down",
-                accessibilityDescription: "Remote workspace"
-            ) ?? NSImage()
-        )
-        titleField = ShellFont.label(
-            label,
-            font: ShellFont.ui(13.5, .semibold),
-            color: ShellPalette.inkFolder
-        )
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-
-        glyph.translatesAutoresizingMaskIntoConstraints = false
-        glyph.contentTintColor = ShellPalette.folderGlyph
-        addSubview(glyph)
-        addSubview(titleField)
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 28),
-            // The folder column — past where a chevron would sit, so remote
-            // names line up with the local workspace names above them.
-            glyph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 23),
-            glyph.centerYAnchor.constraint(equalTo: centerYAnchor),
-            glyph.widthAnchor.constraint(equalToConstant: 17),
-            glyph.heightAnchor.constraint(equalToConstant: 15),
-
-            titleField.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 6),
-            titleField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
-            titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
-        setAccessibilityLabel("Remote workspace \(label)")
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
 /// The dim placeholder under an expanded workspace that has nothing running.
@@ -455,29 +432,49 @@ final class WorkspacesTreeView: NSView {
 
     /// The remote sections, after whichever local shape is chosen: one
     /// bucket-voice header per machine — "<name> · remote" — then its
-    /// projected workspaces and their session rows. Rendered in every group
-    /// mode, because another Mac's sessions have no local status or event
-    /// times to bucket by; a click opens the session rather than selecting
-    /// it (the remote-session-control spec's §4 "Viewer side").
+    /// projected workspaces, drawn through the *same* rows the local tree
+    /// uses. Same disclosure row, same fold, same folder tint, same session
+    /// rows with a dot per pane, same empty placeholder: the phase-2 spec's
+    /// §2 leaves a remote row exactly two ways to differ — the trailing
+    /// glyph, and that a click opens the session on its own machine instead
+    /// of selecting one of ours.
+    ///
+    /// Rendered in every group mode, because another Mac's sessions have no
+    /// local status or event times to bucket by. Their order is the host's
+    /// and is never re-sorted here: `SessionMeta.arrange` reads *this* Mac's
+    /// pins, and applying them to another machine's tree is exactly the
+    /// drift the shared projection exists to prevent.
     private func renderRemoteMachines(_ machines: [RemoteMachineTreeEntry]) {
         renderedRemoteMachineNames = machines.map(\.name)
         for machine in machines {
             add(WorkspacesBucketHeaderView(title: "\(machine.name) · remote"))
             for workspace in machine.workspaces {
-                add(RemoteWorkspaceRowView(label: workspace.label))
+                // The ids arrive prefixed per machine, so the fold is stored
+                // per remote workspace and cannot collide with a local one.
+                let expanded = !collapsed.contains(workspace.id)
+                let workspaceRow = WorkspaceRowView(
+                    id: workspace.id,
+                    label: workspace.label,
+                    expanded: expanded,
+                    tint: workspace.tint,
+                    remoteControl: true,
+                    mark: .viewing
+                )
+                workspaceRow.onPress = { [weak self] in self?.toggle(workspace.id) }
+                add(workspaceRow)
+
+                guard expanded else { continue }
+                if workspace.sessions.isEmpty {
+                    // An enabled workspace with nothing running is projected
+                    // with no sessions — the host draws the same placeholder.
+                    add(WorkspaceEmptyRowView())
+                    continue
+                }
                 for session in workspace.sessions {
-                    let row = SessionRowView(
-                        session: session,
-                        statuses: session.paneIDs.map { _ -> RemoteSessionStatus? in nil }
+                    addSessionRow(
+                        session,
+                        remote: (deviceID: machine.deviceID, tint: workspace.tint)
                     )
-                    row.onPress = { [weak self] in
-                        self?.onOpenRemoteSession?(
-                            machine.deviceID,
-                            session.paneIDs.first ?? session.id,
-                            session.label
-                        )
-                    }
-                    add(row)
                 }
             }
         }
@@ -492,10 +489,18 @@ final class WorkspacesTreeView: NSView {
         for session in sessions { addSessionRow(session) }
     }
 
+    /// One session row. `remote` names the machine a session lives on when it
+    /// is not this one: the row itself is identical — same dots, indent,
+    /// tint and label — but the press opens the session over that machine's
+    /// connection, and the local-only wiring is left off. Rename would write
+    /// *this* Mac's session meta for an id that is not ours, and the hover
+    /// card reads local statuses and event times; neither is a fact about
+    /// the other Mac.
     private func addSessionRow(
         _ session: SessionGroupNode,
         nested: Bool = false,
-        workspaceLabel: String? = nil
+        workspaceLabel: String? = nil,
+        remote: (deviceID: String, tint: NSColor?)? = nil
     ) {
         renderedSessionIDs.append(session.id)
         let row = SessionRowView(
@@ -512,14 +517,28 @@ final class WorkspacesTreeView: NSView {
             workspaceName: nested ? workspaceLabel : nil,
             // The rail wears the workspace's folder colour; looked up here so
             // the Status and Last-updated modes get it too, not just the tree.
-            tint: lastRender.entries.first { $0.id == session.project }?.tint
+            // A remote session's workspace is not in `entries` at all — its
+            // tint is the host's, carried by the projection.
+            tint: remote?.tint ?? lastRender.entries.first { $0.id == session.project }?.tint
         )
-        row.onPress = { [weak self] in self?.onSelectSession?(session) }
-        row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
-        row.onHover = { [weak self] inside in
-            self?.onHoverTarget?(inside ? .session(session.id) : nil)
+        if let remote {
+            row.onPress = { [weak self] in
+                self?.onOpenRemoteSession?(
+                    remote.deviceID,
+                    // The attachable id is the pane's, as the projection
+                    // schema says; the session id is the host's grouping.
+                    session.paneIDs.first ?? session.id,
+                    session.label
+                )
+            }
+        } else {
+            row.onPress = { [weak self] in self?.onSelectSession?(session) }
+            row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
+            row.onHover = { [weak self] inside in
+                self?.onHoverTarget?(inside ? .session(session.id) : nil)
+            }
+            row.onContextMenu = { [weak self] in self?.sessionMenuProvider?(session) }
         }
-        row.onContextMenu = { [weak self] in self?.sessionMenuProvider?(session) }
         add(row)
     }
 

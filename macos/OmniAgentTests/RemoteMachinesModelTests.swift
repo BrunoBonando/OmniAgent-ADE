@@ -154,7 +154,7 @@ final class RemoteMachinesModelTests: XCTestCase {
         XCTAssertEqual(model.machines.map(\.name), ["Studio"])
         XCTAssertEqual(model.machines.first?.deviceID, "d1")
         XCTAssertEqual(model.machines.first?.projection.workspaces.map(\.id), ["/a"])
-        XCTAssertEqual(model.machines.first?.projection.workspaces.first?.sessions.map(\.title), ["Build"])
+        XCTAssertEqual(model.machines.first?.projection.workspaces.first?.sessions.map(\.label), ["Build"])
         XCTAssertNotNil(model.connection(for: "d1"))
         XCTAssertNil(model.connection(for: "d2"), "an offline device gets no connection")
         XCTAssertEqual(changes, 1)
@@ -612,7 +612,13 @@ final class RemoteMachinesModelTests: XCTestCase {
 /// The window side of B4: remote panes, their routing and what they must
 /// never do — persist, spawn or kill.
 final class RemotePanesTests: XCTestCase {
-    private static let projection = RemoteMachinesModelTests.projectionA
+    /// A schema-v2 row — the shape phase 2 ships: one session ("g1") with two
+    /// panes in it, each running its own engine. The pane ids are what a
+    /// viewer attaches to; the session id is the host's grouping, and the
+    /// only place a viewer can learn that two panes belong together.
+    /// (`RemoteMachinesModelTests.projectionA` stays v1 on purpose — it is
+    /// what pins the back-compatibility path.)
+    private static let projection = #"{"version":2,"workspaces":[{"id":"/a","name":"A","tint":null,"order":0,"sessions":[{"id":"g1","label":"Build","order":0,"panes":[{"id":"s1","title":"Build","engine":"claude","kind":"terminal","order":0},{"id":"s2","title":"Docs","engine":"codex","kind":"terminal","order":1}]}]}]}"#
 
     override func setUp() {
         super.setUp()
@@ -760,6 +766,34 @@ final class RemotePanesTests: XCTestCase {
 
         XCTAssertNil(controller.workspaceView.descriptor(for: "s1"))
         XCTAssertTrue(killed.isEmpty, "closing a remote pane detaches; it never kills the host's session")
+    }
+
+    /// The whole point of projecting the host's tree: a viewer opens two
+    /// panes of one remote session and gets one session here too — same
+    /// group, so they share a grid — with each pane's own engine on its own
+    /// badge. The id a viewer holds is a *pane* id, so a lookup that matched
+    /// the session's id instead would find nothing and quietly hand every
+    /// remote pane its own group and a Shell badge.
+    @MainActor
+    func testTwoPanesOfOneRemoteSessionShareItsGroupAndKeepTheirEngines() async throws {
+        let machines = await makeMachines()
+        let controller = makeController(remoteMachines: machines)
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes([])
+
+        controller.openRemoteSession(deviceID: "d1", sessionID: "s1", title: "Build")
+        controller.openRemoteSession(deviceID: "d1", sessionID: "s2", title: "Docs")
+
+        let first = try XCTUnwrap(controller.workspaceView.descriptor(for: "s1"))
+        let second = try XCTUnwrap(controller.workspaceView.descriptor(for: "s2"))
+        XCTAssertEqual(first.group, "g1", "the host's session group, not the pane id")
+        XCTAssertEqual(second.group, first.group, "two panes of one host session share a grid here too")
+        XCTAssertEqual(first.groupLabel, "Build", "and the session is named what the host names it")
+        XCTAssertEqual(first.engine, .claude)
+        XCTAssertEqual(second.engine, .codex, "each pane keeps the engine the host runs in it")
+        XCTAssertEqual(second.label, "Docs", "and its own title")
     }
 
     @MainActor

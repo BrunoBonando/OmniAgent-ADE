@@ -766,6 +766,41 @@ final class NavigationSidebarTests: XCTestCase {
 
     // MARK: - Remote machines
 
+    /// Finding 1 of Bruno's two-Mac session: the remote sidebar looked
+    /// nothing like the host's, and three panes of one session showed up as
+    /// "Session 1" three times. A remote machine's workspace is now drawn by
+    /// the *same* row type as a local one, from the same projection the host
+    /// writes — so one session with two panes is one row with two dots, here
+    /// as there (the phase-2 spec's §2 "Rendering").
+    func testARemoteWorkspaceRendersLikeALocalOne() throws {
+        // A fold left behind by an earlier run would hide the session rows
+        // this asserts on.
+        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
+        let view = makeSidebar()
+        let payload = RemoteControlProjection.build(
+            panes: [pane("s1", group: "g1", project: "/a", groupLabel: "Session 1"),
+                    pane("s2", group: "g1", project: "/a", groupLabel: "Session 1")],
+            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
+        view.reloadWorkspaces(
+            workspaces: [],
+            panes: [],
+            focusedPaneID: nil,
+            statuses: [:],
+            projectLabels: [:],
+            remoteMachines: [
+                RemoteMachineTreeEntry(deviceID: "d1", name: "Studio",
+                                       workspaces: RemoteControlProjection.treeEntries(payload))
+            ]
+        )
+
+        let workspaceRows = view.descendants(ofType: WorkspaceRowView.self)
+        XCTAssertEqual(workspaceRows.map(\.titleText), ["Alpha"],
+                       "a remote workspace uses the same row type as a local one")
+        let sessionRows = view.descendants(ofType: SessionRowView.self)
+        XCTAssertEqual(sessionRows.count, 1, "two panes of one session are one row, not two")
+        XCTAssertEqual(sessionRows[0].paneDotCount, 2)
+    }
+
     /// One section per online machine (the remote-session-control spec's §4
     /// "Viewer side"): a header naming the machine, its projected workspaces
     /// under the remote glyph, and session rows that hand the click — device,
@@ -801,10 +836,13 @@ final class NavigationSidebarTests: XCTestCase {
             "the machine's section header names the machine and says remote"
         )
         let workspaceRow = try XCTUnwrap(
-            descendants(RemoteWorkspaceRowView.self, under: sidebar).first,
+            descendants(WorkspaceRowView.self, under: sidebar)
+                .first { $0.workspaceID == "remote:d1//a" },
             "the projected workspace renders under the machine's header"
         )
         XCTAssertEqual(workspaceRow.titleText, "Beta")
+        XCTAssertEqual(workspaceRow.mark, .viewing, "and wears the remote glyph, not the globe")
+        XCTAssertFalse(workspaceRow.remoteGlyph.isHidden)
 
         let sessionRow = try XCTUnwrap(
             sidebar.workspacesTree.rowView(for: .session("s1")) as? SessionRowView
@@ -833,11 +871,16 @@ final class NavigationSidebarTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func pane(_ id: String, group: String, project: String) -> PaneDescriptor {
+    private func pane(
+        _ id: String,
+        group: String,
+        project: String,
+        groupLabel: String? = nil
+    ) -> PaneDescriptor {
         PaneDescriptor(
             sessionID: id,
             group: group,
-            groupLabel: group,
+            groupLabel: groupLabel ?? group,
             title: "term",
             project: project,
             engine: .claude,
@@ -2140,4 +2183,24 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertNil(merged.sessionResetsAt, "so there is no instant to count down to")
     }
 
+}
+
+// MARK: - Sidebar test accessors
+
+/// The two facts the remote sidebar has to get right, read off the rows
+/// themselves rather than off the values that built them — a row type and a
+/// dot count are exactly what Bruno could see was wrong on his second Mac.
+private extension NSView {
+    func descendants<View: NSView>(ofType type: View.Type) -> [View] {
+        subviews.flatMap { subview -> [View] in
+            var found = subview.descendants(ofType: type)
+            if let match = subview as? View { found.insert(match, at: 0) }
+            return found
+        }
+    }
+}
+
+private extension SessionRowView {
+    /// One status dot per pane of the session — the host's own count.
+    var paneDotCount: Int { dots.colors.count }
 }

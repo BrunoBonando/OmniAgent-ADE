@@ -163,9 +163,16 @@ final class WorkspaceContextMenuTests: XCTestCase {
         )
         let payload = RemoteControlProjection.decode(written[SettingsKey.remoteControl])
         XCTAssertEqual(payload.workspaces.map(\.id), ["alpha"], "only the enabled workspace is projected")
-        XCTAssertEqual(payload.workspaces[0].sessions.map(\.id), ["s-1"])
-        XCTAssertEqual(payload.workspaces[0].sessions[0].engine, "claude")
-        XCTAssertEqual(payload.workspaces[0].sessions[0].title, "one")
+        XCTAssertEqual(
+            payload.workspaces[0].sessions.map(\.id), ["g-1"],
+            "the host's session group, which is what makes the two sidebars the same shape"
+        )
+        XCTAssertEqual(
+            payload.workspaces[0].sessions[0].panes.map(\.id), ["s-1"],
+            "and the attachable id is the pane's"
+        )
+        XCTAssertEqual(payload.workspaces[0].sessions[0].panes[0].engine, "claude")
+        XCTAssertEqual(payload.workspaces[0].sessions[0].panes[0].title, "one")
 
         let row = try XCTUnwrap(firstWorkspaceRow(in: controller.shellSidebar.workspacesTree))
         XCTAssertEqual(row.workspaceID, "alpha")
@@ -322,17 +329,19 @@ final class WorkspaceContextMenuTests: XCTestCase {
 
         controller.toggleRemoteControl(workspaceID: "alpha")
         XCTAssertEqual(
-            RemoteControlProjection.decode(written[SettingsKey.remoteControl]).workspaces.first?.sessions.map(\.id),
+            RemoteControlProjection.decode(written[SettingsKey.remoteControl])
+                .workspaces.first?.sessions.flatMap(\.panes).map(\.id),
             ["s-1"]
         )
 
-        // `startSession` answers with the session *group* id; the projection
-        // carries daemon session ids, one per pane.
+        // `startSession` answers with the session *group* id; the panes inside
+        // it carry the daemon session ids a viewer attaches to.
         XCTAssertNotNil(controller.startSession(inDirectory: "/tmp/alpha", project: "alpha"))
         let added = try XCTUnwrap(controller.workspaceView.paneIDs.first { $0 != "s-1" })
 
         XCTAssertEqual(
-            RemoteControlProjection.decode(written[SettingsKey.remoteControl]).workspaces.first?.sessions.map(\.id),
+            RemoteControlProjection.decode(written[SettingsKey.remoteControl])
+                .workspaces.first?.sessions.flatMap(\.panes).map(\.id),
             ["s-1", added],
             "the layout persist re-derived the projection"
         )

@@ -3030,38 +3030,54 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         remoteMachines.machine(for: deviceID)?.name ?? deviceID
     }
 
-    /// The relay's machines as the sidebar tree renders them: each projected
-    /// workspace as a tree entry whose session rows carry the projection's
-    /// ids and titles — what a click hands `openRemoteSession`.
+    /// The relay's machines as the sidebar tree renders them — the host's own
+    /// tree, in the very same value types the local sidebar is built from
+    /// (`RemoteControlProjection.treeEntries`), so the two sidebars cannot
+    /// drift into different shapes. Only the ids are touched here: they are
+    /// the projection's own until this point, and only this side knows which
+    /// machine they came from.
     private func remoteTreeEntries() -> [RemoteMachineTreeEntry] {
         remoteMachines.machines.map { machine in
             RemoteMachineTreeEntry(
                 deviceID: machine.deviceID,
                 name: machine.name,
-                workspaces: machine.projection.workspaces.map { workspace in
+                workspaces: RemoteControlProjection.treeEntries(machine.projection).map { entry in
                     WorkspaceTreeEntry(
                         // Prefixed so a workspace shared by another Mac can
-                        // never collide with the same folder open locally.
-                        id: "remote:\(machine.deviceID)/\(workspace.id)",
-                        label: workspace.name,
-                        sessions: workspace.sessions.map { session in
+                        // never collide with the same folder open locally —
+                        // the fold state is keyed by this id too.
+                        id: "remote:\(machine.deviceID)/\(entry.id)",
+                        label: entry.label,
+                        sessions: entry.sessions.map { session in
                             SessionGroupNode(
                                 id: session.id,
+                                // The project a pane of this session is opened
+                                // into (`openRemoteSession`), so the row and
+                                // the pane agree on where the session lives.
                                 project: "remote:\(machine.deviceID)",
-                                name: session.title,
-                                label: session.title,
-                                cwd: "",
-                                paneIDs: [session.id],
-                                isCurrent: false
+                                // `name` means "a name a human actually stored
+                                // on the panes"; the projection carries no such
+                                // fact, and the row prints `name ?? label`
+                                // either way.
+                                name: nil,
+                                label: session.label,
+                                cwd: session.cwd,
+                                paneIDs: session.paneIDs,
+                                isCurrent: session.isCurrent
                             )
-                        }
+                        },
+                        tint: entry.tint
                     )
                 }
             )
         }
     }
 
-    /// The same list, flattened to the names the spotlight's rows print.
+    /// The same list, flattened to the names the spotlight's rows print. The
+    /// palette's rows are the things a click can *open*, and what a viewer
+    /// attaches to is a pane — so a session of three panes is three rows
+    /// here, each named the way the host's own tab is, while the sidebar
+    /// keeps them as one row with three dots.
     private func paletteRemoteMachines() -> [PaletteRemoteMachine] {
         remoteMachines.machines.map { machine in
             PaletteRemoteMachine(
@@ -3071,7 +3087,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     PaletteRemoteWorkspace(
                         id: workspace.id,
                         name: workspace.name,
-                        sessions: workspace.sessions.map {
+                        sessions: workspace.sessions.flatMap(\.panes).map {
                             PaletteRemoteSession(id: $0.id, title: $0.title)
                         }
                     )
@@ -3160,18 +3176,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         wireRemoteConnection(remote, deviceID: deviceID)
         // The host's own grouping and engine, so two panes of one remote
         // session share a grid here as they do there and the badge names
-        // what is actually running.
+        // what is actually running. The id handed in is a *pane* id — the
+        // only thing a viewer may attach to — so the session it belongs to
+        // is found by looking inside the panes, never by matching the
+        // session's own id, which is the host's grouping and matches
+        // nothing a viewer ever holds.
         let projected = remoteMachines.machine(for: deviceID)?.projection.workspaces
             .lazy
             .flatMap(\.sessions)
-            .first { $0.id == sessionID }
+            .first { $0.panes.contains { $0.id == sessionID } }
+        let projectedPane = projected?.panes.first { $0.id == sessionID }
         let descriptor = PaneDescriptor(
             sessionID: sessionID,
-            group: projected?.group ?? sessionID,
-            groupLabel: title,
+            group: projected?.id ?? sessionID,
+            groupLabel: projected?.label ?? title,
             project: "remote:\(deviceID)",
-            engine: projected.flatMap { Engine(rawValue: $0.engine) } ?? .shell,
-            label: title,
+            engine: projectedPane.flatMap { Engine(rawValue: $0.engine) } ?? .shell,
+            label: projectedPane?.title ?? title,
             remoteDeviceID: deviceID
         )
         guard addDescriptor(descriptor, reattaches: true, startSession: false) else { return }
@@ -4101,11 +4122,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the user just asked for has to reach disk whatever else has or has not
     /// loaded.
     private func writeRemoteControlProjection() {
-        let descriptors = localPaneDescriptors()
+        // The live pane descriptors, not the persisted tabs: the projection
+        // is the host's *tree*, grouped by the same `SessionOutline.group`
+        // the sidebar renders, and that grouping is a fact about the panes.
         let payload = RemoteControlProjection.build(
-            tabs: WorkspaceRestoration.persistedTabs(from: descriptors),
+            panes: localPaneDescriptors(),
             enabledWorkspaceIDs: remoteControlWorkspaceIDs,
-            workspaceLabels: remoteControlWorkspaceLabels()
+            workspaceLabels: remoteControlWorkspaceLabels(),
+            tints: remoteControlWorkspaceTints()
         )
         write(RemoteControlProjection.encode(payload), to: SettingsKey.remoteControl)
     }
@@ -4122,6 +4146,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             labels[id] = sidebarDisplayLabel(for: id)
         }
         return labels
+    }
+
+    /// And the colours: `sidebarTint`'s answer for each enabled workspace,
+    /// so a workspace is not only called the same thing on both machines but
+    /// wears the same folder colour there as here.
+    private func remoteControlWorkspaceTints() -> [String: NSColor] {
+        var tints: [String: NSColor] = [:]
+        for id in remoteControlWorkspaceIDs {
+            tints[id] = sidebarTint(for: id)
+        }
+        return tints
     }
 
     /// Makes sure this Mac has a device token, registering for one only from

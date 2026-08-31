@@ -63,22 +63,6 @@ enum RemoteControlProjection {
         let label: String
         let order: Int
         let panes: [Pane]
-
-        // MARK: Phase-1 compatibility
-        //
-        // The three names phase 1's flattened `Session` carried, kept as
-        // derived values so `WorkspaceWindowController`'s remote tree,
-        // palette rows and `openRemoteSession` keep compiling while T8 moves
-        // them onto the real tree. Delete all three with that task — nothing
-        // else may grow a dependency on them.
-
-        /// Phase-1 name for `label`.
-        var title: String { label }
-        /// Phase-1 `group` — which in v2 *is* this session's id.
-        var group: String? { id }
-        /// Phase-1 `engine`: the session's first pane's, since a session no
-        /// longer is one pane.
-        var engine: String { panes.first?.engine ?? Engine.shell.rawValue }
     }
 
     /// One workspace: `PaneDescriptor.project`, the same string the sidebar's
@@ -186,51 +170,6 @@ enum RemoteControlProjection {
             )
         }
         return Payload(workspaces: workspaces)
-    }
-
-    /// Phase-1 entry point, kept only until T8 moves
-    /// `WorkspaceWindowController`'s two call sites onto `build(panes:…)`.
-    /// It reproduces phase 1's flattening exactly — one session per pane,
-    /// with the pane id attachable — lifted into the v2 shape, so the row on
-    /// disk is readable by both daemons while the migration is half done.
-    /// Deprecated: delete it with that task.
-    static func build(
-        tabs: [PersistedTab],
-        enabledWorkspaceIDs: Set<String>,
-        workspaceLabels: [String: String]
-    ) -> Payload {
-        var order: [String] = []
-        var sessions: [String: [LegacySession]] = [:]
-        for tab in tabs {
-            guard enabledWorkspaceIDs.contains(tab.project) else { continue }
-            guard let id = tab.id, !id.isEmpty else { continue }
-            if sessions[tab.project] == nil {
-                sessions[tab.project] = []
-                order.append(tab.project)
-            }
-            sessions[tab.project]?.append(
-                LegacySession(
-                    id: id,
-                    title: tab.label ?? tab.groupLabel ?? id,
-                    engine: tab.engine.rawValue,
-                    group: tab.group
-                )
-            )
-        }
-        for project in enabledWorkspaceIDs.sorted() where sessions[project] == nil {
-            order.append(project)
-        }
-        return lift(
-            LegacyPayload(
-                workspaces: order.map { project in
-                    LegacyWorkspace(
-                        id: project,
-                        name: name(project, labels: workspaceLabels),
-                        sessions: sessions[project] ?? []
-                    )
-                }
-            )
-        )
     }
 
     /// The projection as the sidebar's own values — the *same*
