@@ -4136,7 +4136,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Test seam, `settingsWriter`'s pattern: `nil` means the real
     /// `connection.disconnectViewer`. A kick is a write to another Mac's
     /// connection; no test may send one down a live socket.
-    var viewerDisconnector: ((String) -> Void)?
+    var viewerDisconnector: ((String, @escaping (Result<Void, Error>) -> Void) -> Void)?
+
+    /// The read half of the same seam, so the resync a failed kick triggers
+    /// is reachable from a test without a socket.
+    var viewerLister: ((@escaping (Result<[RemoteViewer], Error>) -> Void) -> Void)?
 
     /// The daemon's roster, applied everywhere it shows: the count beside a
     /// workspace's globe, the machine name under a watched pane's card, and
@@ -4153,9 +4157,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Re-reads the roster from the daemon. Called once per connect; the
     /// pushes carry every later change.
     private func refreshRemoteViewers() {
-        connection.listViewers { [weak self] result in
+        let apply: (Result<[RemoteViewer], Error>) -> Void = { [weak self] result in
             guard let self, case let .success(viewers) = result else { return }
             applyRemoteViewers(viewers)
+        }
+        if let viewerLister {
+            viewerLister(apply)
+        } else {
+            connection.listViewers(completion: apply)
         }
     }
 
@@ -4186,13 +4195,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// id until Remote Control is switched on again. Dropped from the roster
     /// here as well as by the daemon's next push — the popover it was
     /// disconnected from must not keep offering the button.
+    ///
+    /// The optimistic removal is a guess, and the daemon's reply is the only
+    /// thing that turns it into a fact. The reply used to be discarded: a
+    /// `DisconnectViewer` the daemon refused — a blocklist write that failed,
+    /// a dropped socket — left nothing blocked and nobody kicked, while the
+    /// host's window had already stopped showing the machine. That is the one
+    /// wrong answer this surface can give, because it is a security surface:
+    /// "you're safe" when the other Mac is still watching. On a failure the
+    /// roster is re-read from the daemon, so the window goes back to showing
+    /// what is actually connected.
     func disconnectViewer(_ viewerID: String) {
-        if let viewerDisconnector {
-            viewerDisconnector(viewerID)
-        } else {
-            connection.disconnectViewer(viewerID: viewerID)
+        let finish: (Result<Void, Error>) -> Void = { [weak self] result in
+            guard case .failure = result else { return }
+            self?.refreshRemoteViewers()
         }
+        // The guess goes in first, so a reply that arrives synchronously —
+        // an encoding failure, or a test double — corrects it instead of
+        // being overwritten by it.
         applyRemoteViewers(remoteViewers.filter { $0.viewerID != viewerID })
+        if let viewerDisconnector {
+            viewerDisconnector(viewerID, finish)
+        } else {
+            connection.disconnectViewer(viewerID: viewerID, completion: finish)
+        }
     }
 
     /// The popover behind the count: every machine watching this workspace,

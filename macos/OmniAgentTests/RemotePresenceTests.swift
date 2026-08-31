@@ -49,6 +49,29 @@ final class RemotePresenceTests: XCTestCase {
         controller.applyRemoteViewers([.init(viewerID: "v1", machineName: "Air", sessions: ["s1"], since: "…")])
         controller.disconnectViewer("v1")
         XCTAssertEqual(controller.connectionDouble.disconnectedViewerIDs, ["v1"])
+        XCTAssertEqual(controller.remoteViewerNames(forPane: "s1"), [])
+    }
+
+    /// The removal is optimistic, so the daemon refusing the kick has to undo
+    /// it. Anything else is the one wrong answer a security surface must
+    /// never give: the window saying nobody is watching while the other Mac
+    /// still is.
+    func testADisconnectTheDaemonRefusesPutsTheMachineBackOnTheRoster() {
+        let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
+        let air = RemoteViewer(viewerID: "v1", machineName: "Air", sessions: ["s1"], since: "…")
+        controller.applyRemoteViewers([air])
+        // The kick fails, and the daemon — asked again — still has the Air.
+        controller.connectionDouble.disconnectResult = .failure(
+            NSError(domain: "test", code: 1)
+        )
+        controller.connectionDouble.rosterFromDaemon = [air]
+
+        controller.disconnectViewer("v1")
+
+        XCTAssertEqual(controller.connectionDouble.listViewerCalls, 1,
+                       "a failed kick must re-read the roster rather than trust its guess")
+        XCTAssertEqual(controller.remoteViewerNames(forPane: "s1"), ["Air"],
+                       "the machine is still watching, so it is still listed")
     }
 
     // MARK: - The rest of the surface
@@ -245,7 +268,14 @@ final class RemotePresenceTests: XCTestCase {
         controller.sessionEnsurer = { _ in }
         controller.sessionKiller = { _ in }
         controller.settingsWriter = { key, value in recorder.written[key] = value }
-        controller.viewerDisconnector = { recorder.disconnectedViewerIDs.append($0) }
+        controller.viewerDisconnector = { viewerID, completion in
+            recorder.disconnectedViewerIDs.append(viewerID)
+            completion(recorder.disconnectResult)
+        }
+        controller.viewerLister = { completion in
+            recorder.listViewerCalls += 1
+            completion(.success(recorder.rosterFromDaemon))
+        }
         controller.relayDeviceRegistrar = { _ in
             XCTFail("no test here may reach the relay")
             return RelayClient.Registration(deviceID: "d1", token: "secret")
@@ -278,6 +308,13 @@ final class RemotePresenceTests: XCTestCase {
     final class Recorder {
         var written: [String: String] = [:]
         var disconnectedViewerIDs: [String] = []
+        /// What the daemon is pretending to answer a kick with. A refusal is
+        /// the interesting case: the kick did not happen.
+        var disconnectResult: Result<Void, Error> = .success(())
+        /// What a re-read of the roster finds, and how often one was asked
+        /// for.
+        var rosterFromDaemon: [RemoteViewer] = []
+        var listViewerCalls = 0
     }
 }
 
