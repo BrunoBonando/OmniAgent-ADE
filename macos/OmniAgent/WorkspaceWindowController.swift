@@ -211,6 +211,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private var homeLaunches: [String: HomeLaunch] = [:]
     var sessionSetupProvider: ((SessionSetupRequest) -> SessionSetupResult?)?
     let palette = CommandPaletteController()
+    /// "Resume remote session…" — the list of the other Macs' shared
+    /// sessions (the phase 2 spec's §4). One at a time, held here rather
+    /// than made per click so a second click on the menu item cannot stack
+    /// two sheets of glass over the window.
+    let remoteSessionPicker = RemoteSessionPickerController()
     private var readySessions: Set<String> = []
     /// The `layout` read has been sent — a later reconnect must re-attach the
     /// panes that already exist rather than reading the row again and
@@ -903,7 +908,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     HomeDropdown.Row(
                         icon: HomeDropdown.symbol("desktopcomputer.and.arrow.down"),
                         title: "Resume remote session…"
-                    ) { [weak self] in self?.presentCommandPalette(initialQuery: "remote") },
+                    ) { [weak self] in self?.presentRemoteSessionPicker() },
                 ]),
             ], searchPlaceholder: "Search repositories…", from: anchor)
         }
@@ -1049,10 +1054,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onOpenRemoteSession = { [weak self] deviceID, sessionID, title in
             self?.openRemoteSession(deviceID: deviceID, sessionID: sessionID, title: title)
         }
-        // The plus menu's "Resume remote session…": the spotlight, opened
-        // pre-filtered to the remote rows (spec §4 "Viewer side").
+        // The plus menu's "Resume remote session…": the picker of the other
+        // Macs' shared sessions (phase 2 spec §4). The spotlight's `remote`
+        // rows stay as they were — they are the fast path.
         shellSidebar.onResumeRemoteSession = { [weak self] in
-            self?.presentCommandPalette(initialQuery: "remote")
+            self?.presentRemoteSessionPicker()
         }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it.
@@ -3396,6 +3402,36 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             initialQuery: initialQuery,
             over: window
         )
+    }
+
+    /// "Resume remote session…" — the list of what the other Macs are
+    /// sharing (the phase 2 spec's §4 "The + menu picker"). Phase 1 shipped
+    /// this menu item as "the spotlight, pre-filtered to `remote`", which
+    /// answers "I know its name" and not "show me what is out there"; the
+    /// spotlight rows are untouched, and remain the fast path.
+    ///
+    /// The rows are built from the same `remoteMachines.machines` the
+    /// sidebar's remote sections and the spotlight's remote rows are built
+    /// from, so all three agree about what is on the other Mac.
+    func presentRemoteSessionPicker() {
+        // The hover card is a floating window over the workspace; it would
+        // otherwise sit above the sheet's glass. `presentCommandPalette`'s
+        // reasoning exactly.
+        hoverCard.dismiss(fade: 0)
+        remoteSessionPicker.present(
+            over: window,
+            rows: RemoteSessionPickerModel.rows(
+                machines: remoteMachines.machines,
+                // The page's own reading of the account rows, as the
+                // spotlight uses: signed out is "Signing in…", not "nothing
+                // is shared".
+                signedIn: settingsView.accountSignedIn
+            )
+        ) { [weak self] deviceID, paneID, title in
+            // A *pane* id: the only thing a viewer may attach to, and what
+            // `openRemoteSession` looks up inside its session.
+            self?.openRemoteSession(deviceID: deviceID, sessionID: paneID, title: title)
+        }
     }
 
     /// The one place a palette row becomes a workspace command — every arm

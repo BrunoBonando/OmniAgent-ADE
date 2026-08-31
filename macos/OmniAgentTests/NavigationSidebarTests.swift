@@ -853,7 +853,8 @@ final class NavigationSidebarTests: XCTestCase {
 
     /// The plus menu's remote future comes alive: with the sidebar's seam
     /// wired, Resume remote session… is enabled, wears the remote glyph, and
-    /// fires the seam — the controller's side opens the spotlight on "remote".
+    /// fires the seam — the controller's side opens the remote-session
+    /// picker (`RemoteSessionPickerController`).
     func testThePlusMenusResumeRemoteSessionFiresTheSeam() throws {
         let sidebar = makeSidebar()
         var resumed = 0

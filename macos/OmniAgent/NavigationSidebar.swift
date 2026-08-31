@@ -990,7 +990,8 @@ final class NavigationSidebarView: NSView {
     /// title — forwarded to the controller, which owns the remote panes.
     var onOpenRemoteSession: ((String, String, String) -> Void)?
     /// The plus menu's "Resume remote session…" — the controller opens the
-    /// spotlight pre-filtered to the remote rows.
+    /// picker of the other Macs' shared sessions
+    /// (`RemoteSessionPickerController`).
     var onResumeRemoteSession: (() -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []

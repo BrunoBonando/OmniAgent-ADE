@@ -145,10 +145,10 @@ enum WorkspacesHeaderMenus {
 
     /// "Start session in" over one item per workspace, "Add project from"
     /// over the local-folder chooser, then Resume remote session… behind a
-    /// separator — alive when the caller can open the spotlight on the
-    /// remote rows (the remote-session-control spec's §4 "Viewer side"),
-    /// the announced-but-disabled future for callers that cannot (the menu
-    /// bar's copy).
+    /// separator — alive when the caller can open the picker of the other
+    /// Macs' shared sessions (the phase 2 spec's §4 "The + menu picker",
+    /// `RemoteSessionPickerController`), the announced-but-disabled future
+    /// for callers that cannot (the menu bar's copy).
     static func plus(
         workspaces: [(id: String, label: String)],
         startSession: @escaping (String) -> Void,
