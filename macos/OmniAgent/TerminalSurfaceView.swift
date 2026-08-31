@@ -497,7 +497,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
         // Until the host's grid lands — the daemon sends it on attach, just
         // before the snapshot — the pane is laid out like any other terminal.
         // Nothing is sent to the host either way; `flushResize` sees to that.
-        guard let grid = remoteGrid, let cell = swiftTermCellSize else {
+        guard let fit = remoteFitting(zoom: scaler.zoom) else {
             remoteFit = nil
             scaleHost.frame = bounds
             scaleHost.bounds = CGRect(origin: .zero, size: bounds.size)
@@ -506,19 +506,7 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
             terminalView.metalScaleFactorOverride = nil
             return
         }
-        // SwiftTerm keeps `reservedScrollerWidth` for its scroll indicator
-        // *inside* the terminal's frame (`getEffectiveWidth`), so it is not
-        // part of the grid: the fit is computed on the pane minus that strip
-        // and the strip is added back onto the frame. It draws nothing, so the
-        // grid still reads as centred with it hanging off the trailing edge.
         let chrome = reservedScrollerWidth
-        let fit = RemoteTerminalScaler.fit(
-            hostCols: Int(grid.cols),
-            hostRows: Int(grid.rows),
-            cell: cell,
-            pane: CGSize(width: max(0, bounds.width - chrome), height: bounds.height),
-            zoom: scaler.zoom
-        )
         remoteFit = fit
         // Half a point of slack: SwiftTerm divides the frame by the cell and
         // truncates, and `cols × cell ÷ cell` does not always round-trip in
@@ -529,15 +517,20 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
             height: fit.terminalSize.height + 0.5
         )
         let drawn = CGSize(width: unscaled.width * fit.scale, height: unscaled.height * fit.scale)
-        // `fit.origin` centres the grid at its true size; once `scale` has
-        // shrunk it, the leftover is letterboxed here so the host's screen
-        // sits in the middle of the pane rather than in a corner — never
-        // above where the fit put it, which is where a zoom past the fit
-        // (drawn wider than the pane) pins it.
+        // Centred on the *glyphs* — `terminalSize × scale` — and not on the
+        // frame, so what the eye sees as the host's screen is what sits in the
+        // middle of the pane; the scroller strip, which draws nothing,
+        // overhangs the trailing edge into the clip. `fit.origin` is the
+        // floor: it is where a zoom past the fit (drawn wider than the pane)
+        // pins the screen.
+        let glyphs = CGSize(
+            width: fit.terminalSize.width * fit.scale,
+            height: fit.terminalSize.height * fit.scale
+        )
         scaleHost.frame = CGRect(
             origin: CGPoint(
-                x: max(fit.origin.x, (bounds.width - drawn.width) / 2),
-                y: max(fit.origin.y, (bounds.height - drawn.height) / 2)
+                x: max(fit.origin.x, (bounds.width - glyphs.width) / 2),
+                y: max(fit.origin.y, (bounds.height - glyphs.height) / 2)
             ),
             size: drawn
         )
@@ -552,6 +545,28 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
         // rasterizes glyphs at the pixels they are shown at instead of
         // rendering the grid full size and letting the compositor squash it.
         terminalView.metalScaleFactorOverride = fit.scale * (window?.backingScaleFactor ?? 2)
+    }
+
+    /// What this pane would draw at a given zoom, or `nil` when there is
+    /// nothing to fit yet: no host grid, no cell, no size. Separate from
+    /// applying it so ⌘− can ask what the *fit* is (`zoom: 0`) — its floor —
+    /// without disturbing what is on screen.
+    ///
+    /// SwiftTerm keeps `reservedScrollerWidth` for its scroll indicator
+    /// *inside* the terminal's frame (`getEffectiveWidth`), so it is not part
+    /// of the grid: the fit is computed on the pane minus that strip, and the
+    /// strip is added back onto the frame in `applyRemoteFit`.
+    private func remoteFitting(zoom: CGFloat) -> RemoteTerminalScaler.Fit? {
+        guard scaleHost != nil, bounds.width > 0, bounds.height > 0,
+              let grid = remoteGrid, let cell = swiftTermCellSize
+        else { return nil }
+        return RemoteTerminalScaler.fit(
+            hostCols: Int(grid.cols),
+            hostRows: Int(grid.rows),
+            cell: cell,
+            pane: CGSize(width: max(0, bounds.width - reservedScrollerWidth), height: bounds.height),
+            zoom: zoom
+        )
     }
 
     /// SwiftTerm's cell, in points, read back out of the frame it says its
@@ -633,8 +648,12 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
     private static let zoomStep: CGFloat = 1.25
 
     private func stepRemoteZoom(by factor: CGFloat) {
-        guard scaleHost != nil else { return }
-        scaler.stepZoom(by: factor, from: remoteFit?.scale ?? 1)
+        // Nothing to zoom until the pane is pinned to the host's grid: a ⌘+
+        // taken before the first `SessionResized` would leave a 1.25 stuck on
+        // a pane whose scale means nothing yet, and the grid would arrive
+        // already magnified.
+        guard let current = remoteFit, let fitted = remoteFitting(zoom: 0)?.scale else { return }
+        scaler.stepZoom(by: factor, from: current.scale, fit: fitted)
         applyRemoteFit()
     }
 

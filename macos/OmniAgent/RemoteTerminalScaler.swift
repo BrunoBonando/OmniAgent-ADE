@@ -35,12 +35,13 @@ struct RemoteTerminalScaler: Equatable {
     }
 
     /// `0` means "fit the pane". Anything above overrides the fit and is
-    /// clamped to ``minZoom``...``maxZoom`` — ⌘+ / ⌘− set it, ⌘0 clears it.
+    /// clamped to *the fit*...``maxZoom`` — ⌘+ / ⌘− set it, ⌘0 clears it.
     var zoom: CGFloat = 0
 
-    /// Below a quarter the host's screen is unreadable; above double, a
-    /// viewer is magnifying a bitmap of someone else's terminal.
-    static let minZoom: CGFloat = 0.25
+    /// "Scale ceiling 2.0, floor is fit-to-pane" (spec §1). There is no
+    /// absolute floor: below the fit a viewer would be shrinking the host's
+    /// screen inside a pane that already shows all of it, which is nothing
+    /// anybody asked for — so ⌘− stops at the whole screen.
     static let maxZoom: CGFloat = 2
 
     static func fit(hostCols: Int, hostRows: Int, cell: CGSize, pane: CGSize, zoom: CGFloat) -> Fit {
@@ -56,7 +57,7 @@ struct RemoteTerminalScaler: Equatable {
         let fitted = min(1, min(pane.width / width, pane.height / height))
         return Fit(
             terminalSize: CGSize(width: width, height: height),
-            scale: zoom > 0 ? clampZoom(zoom) : fitted,
+            scale: zoom > 0 ? min(max(zoom, fitted), maxZoom) : fitted,
             origin: CGPoint(
                 x: max(0, (pane.width - width) / 2),
                 y: max(0, (pane.height - height) / 2)
@@ -64,19 +65,20 @@ struct RemoteTerminalScaler: Equatable {
         )
     }
 
-    /// One press of ⌘+ or ⌘−. `current` is the scale on screen right now, so
-    /// the first press magnifies what the eye can see: stepping `zoom` itself
-    /// would multiply its "fit the pane" 0 by 1.25 and stay at the fit forever.
-    mutating func stepZoom(by factor: CGFloat, from current: CGFloat) {
-        zoom = Self.clampZoom((zoom > 0 ? zoom : current) * factor)
+    /// One press of ⌘+ or ⌘−.
+    ///
+    /// `current` is the scale on screen right now, so the first press
+    /// magnifies what the eye can see: stepping `zoom` itself would multiply
+    /// its "fit the pane" 0 by 1.25 and stay at the fit forever. `fitted` is
+    /// the floor — ⌘− walks back down to the whole screen and stops there,
+    /// which is also the only way back to the fit if ⌘0 is ever unreachable.
+    mutating func stepZoom(by factor: CGFloat, from current: CGFloat, fit fitted: CGFloat) {
+        zoom = min(max((zoom > 0 ? zoom : current) * factor, fitted), Self.maxZoom)
     }
 
-    /// ⌘0: back to whatever fits.
+    /// ⌘0: back to whatever fits. Deliberately `0` rather than the fit's
+    /// current value — the pane keeps fitting as it is resized.
     mutating func resetZoom() {
         zoom = 0
-    }
-
-    private static func clampZoom(_ value: CGFloat) -> CGFloat {
-        min(max(value, minZoom), maxZoom)
     }
 }

@@ -23,11 +23,17 @@ final class RemoteTerminalScalerTests: XCTestCase {
         XCTAssertEqual(fit.origin.x, 480, accuracy: 0.001)
     }
 
+    /// The floor is **fit-to-pane**, not an absolute 0.25: spec §1 item 4,
+    /// "Scale ceiling 2.0, floor is fit-to-pane". Shrinking the host's screen
+    /// inside a pane that already shows all of it is nothing anyone asked
+    /// for, and an absolute floor would make ⌘− a one-way door away from the
+    /// fit.
     func testZoomOverridesFitAndIsClamped() {
         let cell = CGSize(width: 8, height: 18), pane = CGSize(width: 800, height: 900)
         XCTAssertEqual(RemoteTerminalScaler.fit(hostCols: 200, hostRows: 50, cell: cell, pane: pane, zoom: 1).scale, 1)
         XCTAssertEqual(RemoteTerminalScaler.fit(hostCols: 200, hostRows: 50, cell: cell, pane: pane, zoom: 9).scale, 2)
-        XCTAssertEqual(RemoteTerminalScaler.fit(hostCols: 200, hostRows: 50, cell: cell, pane: pane, zoom: 0.01).scale, 0.25)
+        XCTAssertEqual(RemoteTerminalScaler.fit(hostCols: 200, hostRows: 50, cell: cell, pane: pane, zoom: 0.01).scale, 0.5,
+                       "clamped up to the fit, which is this pane's floor")
     }
 
     func testADegenerateGridIsSafe() {
@@ -38,17 +44,19 @@ final class RemoteTerminalScalerTests: XCTestCase {
     }
 
     /// ⌘+ from a fit steps off the scale on screen, not off `zoom`'s own 0:
-    /// multiplying "fit" by 1.25 would leave it at 0 (fit) forever.
-    func testZoomStepsOffWhateverIsOnScreen() {
+    /// multiplying "fit" by 1.25 would leave it at 0 (fit) forever. ⌘− walks
+    /// back down and stops at the fit — the way back even if ⌘0 is taken by
+    /// something else.
+    func testZoomStepsOffWhateverIsOnScreenAndStopsAtTheFit() {
         var scaler = RemoteTerminalScaler()
-        scaler.stepZoom(by: 1.25, from: 0.5)
+        scaler.stepZoom(by: 1.25, from: 0.5, fit: 0.5)
         XCTAssertEqual(scaler.zoom, 0.625, accuracy: 0.001, "the first ⌘+ leaves the fit behind")
-        scaler.stepZoom(by: 1.25, from: 0.5)
+        scaler.stepZoom(by: 1.25, from: 0.5, fit: 0.5)
         XCTAssertEqual(scaler.zoom, 0.78125, accuracy: 0.001, "the second compounds the first, not the fit")
-        for _ in 0..<10 { scaler.stepZoom(by: 1.25, from: 0.5) }
+        for _ in 0..<10 { scaler.stepZoom(by: 1.25, from: 0.5, fit: 0.5) }
         XCTAssertEqual(scaler.zoom, 2, "clamped at the ceiling")
-        for _ in 0..<20 { scaler.stepZoom(by: 1 / 1.25, from: 0.5) }
-        XCTAssertEqual(scaler.zoom, 0.25, "and at the floor")
+        for _ in 0..<20 { scaler.stepZoom(by: 1 / 1.25, from: 0.5, fit: 0.5) }
+        XCTAssertEqual(scaler.zoom, 0.5, "and at the fit, never below it")
     }
 
     // MARK: The view
@@ -72,13 +80,18 @@ final class RemoteTerminalScalerTests: XCTestCase {
 
         // The scale is AppKit's own, not a layer transform: it is in the
         // coordinate system, so this conversion — the same one every mouse
-        // event goes through — sees it, and the whole grid lands inside the
-        // pane, letterboxed in the middle of what the fit left over.
+        // event goes through — sees it. The *glyphs* are what is centred; the
+        // scroller strip SwiftTerm reserves inside the frame draws nothing and
+        // overhangs into the pane's clip.
         let onScreen = surface.terminalView.convert(surface.terminalView.bounds, to: surface)
         XCTAssertEqual(onScreen.width, surface.terminalView.bounds.width * scale, accuracy: 0.5)
-        XCTAssertLessThanOrEqual(onScreen.maxX, surface.bounds.maxX + 0.5, "inside the pane")
-        XCTAssertLessThanOrEqual(onScreen.maxY, surface.bounds.maxY + 0.5)
-        XCTAssertEqual(onScreen.midY, surface.bounds.midY, accuracy: 0.5, "centred vertically")
+        let fit = try XCTUnwrap(surface.remoteFit)
+        let glyphs = CGRect(
+            x: onScreen.minX, y: onScreen.minY,
+            width: fit.terminalSize.width * scale, height: fit.terminalSize.height * scale
+        )
+        XCTAssertEqual(glyphs.midX, surface.bounds.midX, accuracy: 0.5, "the host's screen is centred")
+        XCTAssertEqual(glyphs.midY, surface.bounds.midY, accuracy: 0.5)
     }
 
     /// The invariant a reviewer checks hardest: none of this touches a local
@@ -154,6 +167,55 @@ final class RemoteTerminalScalerTests: XCTestCase {
         surface.resetRemoteTerminalZoom(nil)
         XCTAssertEqual(try XCTUnwrap(surface.remoteFit).scale, fitted, accuracy: 0.0001,
                        "⌘0 is back to the fit")
+        XCTAssertEqual(surface.resizeSendCount, 0)
+    }
+
+    /// The three commands are real View-menu items travelling the responder
+    /// chain, which is what settles ⌘0: the Panes menu binds the same chord to
+    /// Pane 10, and validation — not menu-versus-view dispatch order — decides
+    /// which one gets it. The selectors are built from strings in
+    /// `ApplicationMenus`, so only a test catches a typo: it would show as a
+    /// permanently greyed-out item.
+    @MainActor
+    func testTheViewMenuCarriesTheZoomCommands() throws {
+        ApplicationMenus.install()
+        let view = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "View")?.submenu)
+        let items = ["Zoom In", "Zoom Out", "Actual Fit"].map { view.item(withTitle: $0) }
+        XCTAssertEqual(
+            items.map { $0?.action },
+            [
+                #selector(TerminalSurfaceView.zoomInRemoteTerminal(_:)),
+                #selector(TerminalSurfaceView.zoomOutRemoteTerminal(_:)),
+                #selector(TerminalSurfaceView.resetRemoteTerminalZoom(_:)),
+            ]
+        )
+        XCTAssertEqual(items.map { $0?.keyEquivalent }, ["+", "-", "0"])
+        XCTAssertTrue(items.allSatisfy { $0?.keyEquivalentModifierMask == [.command] })
+        XCTAssertTrue(items.allSatisfy { $0?.target == nil }, "they travel the responder chain")
+    }
+
+    /// ⌘− stops at the whole screen — the fit is the floor, so zoom is never a
+    /// one-way door — and ⌘+ before the host's grid has landed does nothing at
+    /// all rather than sticking a magnification on an unpinned pane.
+    @MainActor
+    func testZoomOutStopsAtTheFitAndZoomInWaitsForTheGrid() throws {
+        let surface = TerminalSurfaceView(connection: Self.remoteConnection(), sessionID: "s1")
+        surface.frame = CGRect(x: 0, y: 0, width: 400, height: 300)
+
+        surface.zoomInRemoteTerminal(nil)
+        XCTAssertNil(surface.remoteFit, "no grid, nothing to zoom")
+
+        surface.remoteGrid = (cols: 180, rows: 46)
+        let fitted = try XCTUnwrap(surface.remoteFit).scale
+        surface.resetRemoteTerminalZoom(nil)
+        XCTAssertEqual(try XCTUnwrap(surface.remoteFit).scale, fitted, accuracy: 0.0001,
+                       "the ⌘+ taken before the grid landed left nothing stuck on it")
+
+        for _ in 0..<5 { surface.zoomOutRemoteTerminal(nil) }
+        XCTAssertEqual(try XCTUnwrap(surface.remoteFit).scale, fitted, accuracy: 0.0001,
+                       "⌘− never shrinks the host's screen below the pane that already shows all of it")
+        surface.zoomInRemoteTerminal(nil)
+        XCTAssertGreaterThan(try XCTUnwrap(surface.remoteFit).scale, fitted, "…and ⌘+ still steps up from there")
         XCTAssertEqual(surface.resizeSendCount, 0)
     }
 

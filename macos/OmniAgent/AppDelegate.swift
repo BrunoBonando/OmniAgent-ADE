@@ -259,6 +259,18 @@ enum ApplicationMenus {
         view.addItem(
             item("Toggle Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
         )
+        view.addItem(.separator())
+        // A viewer never resizes the host's grid (remote session control
+        // phase 2 §1) — it draws all of it, scaled — so zoom is what a remote
+        // pane has instead of a resize. `TerminalSurfaceView.validateMenuItem`
+        // enables these three for a remote pane and greys them everywhere
+        // else, which is also what settles ⌘0: the Panes menu binds it to
+        // Pane 10, and a disabled item there hands the chord straight on.
+        // Menu items rather than a view-level chord alone so the dispatch
+        // order is not the thing deciding which of the two wins.
+        view.addItem(item("Zoom In", Selector(("zoomInRemoteTerminal:")), "+"))
+        view.addItem(item("Zoom Out", Selector(("zoomOutRemoteTerminal:")), "-"))
+        view.addItem(item("Actual Fit", Selector(("resetRemoteTerminalZoom:")), "0"))
 
         let session = NSMenu(title: "Session")
         main.addItem(withSubmenu: session)
