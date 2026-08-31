@@ -60,6 +60,28 @@ struct BrainContext: Codable, Equatable {
     }
 }
 
+/// One machine currently watching sessions on this daemon — the
+/// `RemoteViewers` push and `ListViewers` response entry (phase 2 §5).
+///
+/// The identity is **self-reported by the viewer app**: both Macs belong to
+/// the same account and the relay already refuses anyone else, so this is a
+/// labelling and convenience mechanism, not an authorization boundary.
+struct RemoteViewer: Codable, Equatable {
+    let viewerID: String
+    let machineName: String
+    /// The pane ids this viewer is attached to right now.
+    let sessions: [String]
+    /// RFC 3339, when this viewer connected.
+    let since: String
+
+    enum CodingKeys: String, CodingKey {
+        case viewerID = "viewer_id"
+        case machineName = "machine_name"
+        case sessions
+        case since
+    }
+}
+
 struct SessionExitedEvent: Codable, Equatable {
     let id: String
     let exitCode: UInt32?
@@ -92,10 +114,12 @@ enum SessionConnectionError: Error, LocalizedError {
     case disconnected
     case invalidResponse(MessageKind)
     case daemon(String)
-    /// The relay answered the WebSocket upgrade with 401/403: this device's
+    /// The relay answered the WebSocket upgrade with 401: this device's
     /// bearer is signed out, expired or revoked. Retrying with the same
     /// credentials cannot succeed, so the connection stops reconnecting
-    /// until an explicit `connect()` supplies a fresh bearer.
+    /// until an explicit `connect()` supplies a fresh bearer. Only 401 —
+    /// a 403 means the host is not registered *yet* and keeps retrying
+    /// (`isTokenRefusal`).
     case unauthorized
 
     var errorDescription: String? {
@@ -140,6 +164,16 @@ final class SessionConnection {
     var onAttention: ((String) -> Void)?
     var onExit: ((SessionExitedEvent) -> Void)?
     var onError: ((Error) -> Void)?
+    /// The host's grid for one session — `(sessionID, cols, rows)` — from a
+    /// `SessionResized` push (phase 2 §1). The daemon sends one on attach,
+    /// just before the snapshot, and again whenever the host resizes. A
+    /// local pane ignores it (its own view drives the size); a remote pane
+    /// pins its terminal to this grid and scales it into the space it has.
+    var onSessionSize: ((String, UInt16, UInt16) -> Void)?
+    /// The machines currently watching sessions on this daemon, from a
+    /// `RemoteViewers` push (phase 2 §5). Local connections only: the daemon
+    /// never tells a viewer about other viewers.
+    var onRemoteViewers: (([RemoteViewer]) -> Void)?
     /// Fires when a **reconnect's automatic reattach** comes back "session
     /// not found" — Task 6c's restart-loss signal. Only the reconnect-time
     /// blind reattach (the `helloAck` handler's loop below) is tracked, not
@@ -422,6 +456,41 @@ final class SessionConnection {
         completion: ((Result<Void, Error>) -> Void)? = nil
     ) {
         sendCodable(kind: .setSetting, value: SettingValuePayload(key: key, value: value)) {
+            self.finishResponse($0, completion: completion)
+        }
+    }
+
+    // MARK: - Viewer presence (phase 2 §5)
+
+    /// The machines currently watching sessions on this daemon, on demand —
+    /// the same roster the `RemoteViewers` push carries, for a surface that
+    /// opens after the last push. Local connections only: `ListViewers` is
+    /// in the daemon's `authorize_remote` deny arm, so a remote connection
+    /// gets an `.error` here rather than a roster.
+    func listViewers(completion: @escaping (Result<[RemoteViewer], Error>) -> Void) {
+        request(kind: .listViewers, payload: Data("{}".utf8)) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result {
+                        try self.decoder.decode(RemoteViewersPayload.self, from: frame.payload).viewers
+                    }
+                }
+            )
+        }
+    }
+
+    /// Kicks one viewer: the daemon drops its data WebSocket immediately and
+    /// blocks the viewer id (in its own `remote_control_blocked` settings
+    /// row) until Remote Control is switched on again. Local-only, like
+    /// `listViewers`.
+    func disconnectViewer(
+        viewerID: String,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        sendCodable(kind: .disconnectViewer, value: DisconnectViewerPayload(viewerID: viewerID)) {
             self.finishResponse($0, completion: completion)
         }
     }
@@ -810,15 +879,27 @@ final class SessionConnection {
         }
     }
 
+    /// Whether an upgrade status means "this bearer will never work" — the
+    /// only reason to stop dialling the relay.
+    ///
+    /// Phase 1 parked on 403 too, and that was the loudest defect of the
+    /// first build: the relay answers **403** for "that device's control
+    /// channel is not registered yet", a race every viewer loses when it
+    /// polls before the host's daemon has opened its control WebSocket. One
+    /// early dial then blinded the viewer to that Mac until the app was
+    /// relaunched. 403 (and 5xx, and everything else) is transient: keep
+    /// retrying on the existing backoff.
+    static func isTokenRefusal(status: Int) -> Bool { status == 401 }
+
     /// Every WebSocket-side failure (the receive loop's and `send`'s) lands
-    /// here. A 401/403 on the upgrade is not an outage: the relay looked at
-    /// the bearer and refused it, so reconnecting with the same one would
-    /// dial `relay.omni-agent.ai` four times a second for nothing. Report
+    /// here. A 401 on the upgrade is not an outage: the relay looked at the
+    /// bearer and refused it, so reconnecting with the same one would dial
+    /// `relay.omni-agent.ai` four times a second for nothing. Report
     /// `.unauthorized` once and stop until an explicit `connect()`.
     private func webSocketFailed(_ task: URLSessionWebSocketTask, error: Error) {
         guard webSocketTask === task else { return }
         if let status = (task.response as? HTTPURLResponse)?.statusCode,
-           status == 401 || status == 403 {
+           Self.isTokenRefusal(status: status) {
             shouldReconnect = false
             nextReconnectDelay = reconnectDelay
             closeConnection(error: SessionConnectionError.unauthorized)
@@ -927,6 +1008,18 @@ final class SessionConnection {
                 callbackQueue.async { self.onStatus?(event) }
             } catch {
                 closeConnection(error: error)
+            }
+        case .sessionResized:
+            // Deliberately *not* run through `updateSequence`: a resize is
+            // not terminal output, and advancing a session's resume cursor
+            // past output it has not received would drop that output on the
+            // next reattach.
+            if let size = try? decoder.decode(SessionSizePayload.self, from: frame.payload) {
+                callbackQueue.async { self.onSessionSize?(size.id, size.cols, size.rows) }
+            }
+        case .remoteViewers:
+            if let payload = try? decoder.decode(RemoteViewersPayload.self, from: frame.payload) {
+                callbackQueue.async { self.onRemoteViewers?(payload.viewers) }
             }
         case .attention:
             if let id = try? decoder.decode(SessionIDPayload.self, from: frame.payload).id {
@@ -1180,6 +1273,28 @@ private struct ResizePayload: Codable {
 
 private struct ErrorPayload: Codable {
     let message: String
+}
+
+/// `SessionResized`'s payload — the daemon's `SessionSizePayload`
+/// (`{id, cols, rows}`), the host's current grid for one session.
+private struct SessionSizePayload: Codable {
+    let id: String
+    let cols: UInt16
+    let rows: UInt16
+}
+
+/// The `RemoteViewers` push payload, and `ListViewers`' `Response` payload —
+/// the same `{"viewers": [...]}` shape on both routes.
+private struct RemoteViewersPayload: Codable {
+    let viewers: [RemoteViewer]
+}
+
+private struct DisconnectViewerPayload: Codable {
+    let viewerID: String
+
+    enum CodingKeys: String, CodingKey {
+        case viewerID = "viewer_id"
+    }
 }
 
 private struct SettingKeyPayload: Codable {

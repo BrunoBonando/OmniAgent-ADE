@@ -56,6 +56,14 @@ enum MessageKind: UInt8 {
     /// Full-text search over the local knowledge graph (Task 6a-2). Mirrors
     /// `BrainSearch`.
     case brainSearch = 0x19
+    /// The roster of remote viewers currently attached to this daemon, on
+    /// demand (phase 2 §5 — appended, never renumbering an existing kind).
+    /// Local-only: it is in `authorize_remote`'s deny arm. Mirrors
+    /// `omniagent_pty_daemon::protocol::MessageKind::ListViewers`.
+    case listViewers = 0x1a
+    /// Kicks one remote viewer and blocks it until Remote Control is turned
+    /// on again (phase 2 §5). Local-only. Mirrors `DisconnectViewer`.
+    case disconnectViewer = 0x1b
     case helloAck = 0x81
     case sessionList = 0x82
     case sessionCreated = 0x83
@@ -67,6 +75,16 @@ enum MessageKind: UInt8 {
     case response = 0x89
     case resyncRequired = 0x8a
     case error = 0x8b
+    /// The session's current grid, `{id, cols, rows}` (phase 2 §1 —
+    /// appended, never renumbering an existing kind). Pushed on `Attach`,
+    /// just before the snapshot, and again on every accepted resize; a local
+    /// client ignores it, a remote viewer re-pins its scaled render to it.
+    /// Mirrors `omniagent_pty_daemon::protocol::MessageKind::SessionResized`.
+    case sessionResized = 0x8c
+    /// The presence roster push, `{"viewers":[…]}` (phase 2 §5). Sent to
+    /// local connections only — a viewer never learns about other viewers.
+    /// Mirrors `RemoteViewers`.
+    case remoteViewers = 0x8d
 }
 
 enum SessionProtocolError: Error, Equatable {
