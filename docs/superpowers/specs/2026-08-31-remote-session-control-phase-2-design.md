@@ -51,8 +51,8 @@ The only way to obtain a genuine 100-column layout is to tell the program it has
 The daemon does not track a session's size today (`ManagedSession` has no size field; `TerminalState` is `{ parser, history, sequence }`). This phase adds it:
 
 - `ManagedSession` records the last applied `(cols, rows)`, set at `CreateSession` and updated on every accepted `Resize`.
-- `SnapshotPayload` gains `cols` and `rows`, so a client knows the grid the snapshot was rendered at. Adding fields to an existing JSON payload is backward compatible: an older client ignores them.
-- A new server push `SessionResized` (`0x8c`) is emitted to a session's subscribers when its size changes, so an attached viewer re-pins live. Local clients ignore it (their own view drives the size); remote clients act on it.
+- A new server push `SessionResized` (`0x8c`, payload `{id, cols, rows}`) carries the grid. It is **sent on attach, immediately before the snapshot**, and again whenever the size changes, so a viewer knows the grid it must lay the snapshot out on and re-pins live afterwards. Local clients ignore it (their own view drives the size); remote clients act on it.
+- The size does *not* ride along inside the snapshot: there is no `SnapshotPayload` struct to add fields to — a snapshot is a raw wire format (the session's bytes), so a separate framed message is the only place a `(cols, rows)` pair can go. Both the attach copy and the change pushes are stamped with the session's sequence rather than a request id, so one message kind never means two things in the same header field.
 
 ### Rendering mechanics (viewer only)
 
@@ -119,7 +119,9 @@ Result: enabling Remote Control on the host makes the machine appear on the othe
 
 ### Daemon: a connection registry
 
-`ClientContext` gains `connections: Arc<Mutex<HashMap<ConnectionId, ConnectionEntry>>>` where `ConnectionEntry` is `{ trust, viewer: Option<ViewerIdentity>, attached: HashSet<String>, writer: SharedWriter, cancel: CancellationToken }`. `serve_client` registers on entry, updates `attached` on `Attach`/`Detach`, and removes on exit. This is the first per-connection state the daemon keeps; it is what makes both presence and the kick possible, and it is deliberately small.
+`ClientContext` gains `connections: Arc<Mutex<HashMap<ConnectionId, ConnectionEntry>>>` where `ConnectionEntry` is `{ trust, viewer: Option<ViewerIdentity>, attached: HashSet<String>, cancel: CancellationToken, since: SystemTime }`. `serve_client` registers on entry, updates `attached` on `Attach`/`Detach`, and removes on exit. This is the first per-connection state the daemon keeps; it is what makes both presence and the kick possible, and it is deliberately small.
+
+**No writer lives in the entry, and the registry does no I/O.** The roster is published into a `watch` channel — a synchronous, non-blocking, latest-wins handoff — and each *local* connection owns a `PresenceFeed` task that writes what it finds there to its own socket. Holding a `SharedWriter` per entry would have meant writing to every client in turn from inside the registry's lock, so one client that stopped draining its socket could stall presence and the attach/detach dispatch of every other connection. With no writer reachable from the lock, a stalled client can only ever wedge its own feed task.
 
 `ViewerIdentity` is `{ viewer_id: String, machine_name: String }`, carried in `HelloPayload` (which today holds only `client`). Both fields are added as `Option` so older clients still parse.
 
