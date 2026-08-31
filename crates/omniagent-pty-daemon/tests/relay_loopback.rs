@@ -223,6 +223,11 @@ async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
     data.send(Message::Binary(attach.encode().unwrap().into()))
         .await
         .unwrap();
+    // The host's grid crosses the relay ahead of the screen drawn on it.
+    assert_eq!(
+        read_frame_from_ws(&mut data).await.header.message_kind,
+        MessageKind::SessionResized
+    );
     assert_eq!(
         read_frame_from_ws(&mut data).await.header.message_kind,
         MessageKind::Snapshot

@@ -4,7 +4,8 @@ use crate::protocol::{
     MessageKind, ResizePayload, ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload,
     RootsReingestProjectPayload, RootsRenameProjectPayload, RootsSetPausedPayload,
     RootsStartIngestPayload, SessionCreatedPayload, SessionExitedPayload, SessionIdPayload,
-    SessionListPayload, SessionStatusPayload, SettingKey, SettingValue, PROTOCOL_VERSION,
+    SessionListPayload, SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue,
+    PROTOCOL_VERSION,
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
@@ -118,9 +119,10 @@ struct SessionRef {
 /// The trust boundary for relayed clients (spec §2). `Err(reason)` means
 /// "answer with `Error`, skip dispatch". Allowed: `Hello`, `ListSessions`
 /// (the dispatch arm filters the list), `Detach`, and `Attach`/`Input`/
-/// `Resize`/`Interrupt` whose session id is in `allowed`; `GetSetting`
+/// `Interrupt` whose session id is in `allowed`; `GetSetting`
 /// only for the projection row itself. Everything else — `Kill`,
-/// `CreateSession`, `SetSetting`, every Brain/Roots RPC — is refused.
+/// `CreateSession`, `SetSetting`, `Resize`, every Brain/Roots RPC — is
+/// refused.
 pub fn authorize_remote(frame: &Frame, allowed: &HashSet<String>) -> Result<(), String> {
     let shared = |id: &str| {
         allowed
@@ -130,7 +132,12 @@ pub fn authorize_remote(frame: &Frame, allowed: &HashSet<String>) -> Result<(), 
     };
     match frame.header.message_kind {
         MessageKind::Hello | MessageKind::ListSessions | MessageKind::Detach => Ok(()),
-        MessageKind::Attach | MessageKind::Resize | MessageKind::Interrupt => shared(
+        // `Resize` is deliberately absent: the host owns the grid (phase 2
+        // spec §1). One session is one screen buffer, so honouring a
+        // viewer's window size would collapse the host's terminal — and
+        // any viewer being able to resize any shared session was a
+        // trust-boundary hole besides. It falls through to the deny arm.
+        MessageKind::Attach | MessageKind::Interrupt => shared(
             &parse_json::<SessionRef>(&frame.payload)
                 .map_err(|error| error.to_string())?
                 .id,
@@ -524,6 +531,22 @@ where
                             .attach_and_subscribe(attach.after_sequence, CLIENT_QUEUE_CAPACITY);
                         let empty_resume =
                             matches!(&state, AttachState::Resume(events) if events.is_empty());
+                        // The grid before the screen drawn on it: a viewer
+                        // scales the host's size rather than imposing its own
+                        // (phase 2 §1), so it must know that size to lay the
+                        // snapshot out.
+                        let (cols, rows) = session.size();
+                        send_json(
+                            &writer,
+                            MessageKind::SessionResized,
+                            request,
+                            &SessionSizePayload {
+                                id: attach.id.clone(),
+                                cols,
+                                rows,
+                            },
+                        )
+                        .await?;
                         send_attach_state(&writer, &attach.id, state).await?;
                         if empty_resume {
                             send_response(&writer, request).await?;
@@ -1058,6 +1081,19 @@ async fn send_event(writer: &SharedWriter, id: &str, event: SessionEvent) -> Res
                         | crate::protocol::SessionStatus::Error
                 ),
                 engine,
+            })?,
+        ),
+        SessionEvent::Resized {
+            sequence,
+            cols,
+            rows,
+        } => Frame::new(
+            MessageKind::SessionResized,
+            sequence,
+            serde_json::to_vec(&SessionSizePayload {
+                id: id.into(),
+                cols,
+                rows,
             })?,
         ),
         SessionEvent::Exited {

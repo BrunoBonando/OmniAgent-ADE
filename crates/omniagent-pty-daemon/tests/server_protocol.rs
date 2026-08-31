@@ -259,8 +259,7 @@ async fn exited_before_attach_still_replays_snapshot_and_exit() {
             &serde_json::json!({"id":"fast-exit","after_sequence":null}),
         )
         .await;
-    let snapshot = client.read().await;
-    assert_eq!(snapshot.header.message_kind, MessageKind::Snapshot);
+    let snapshot = client.read_kind(MessageKind::Snapshot).await;
     let (_, bytes) = decode_raw_payload(&snapshot.payload).unwrap();
     assert!(
         bytes

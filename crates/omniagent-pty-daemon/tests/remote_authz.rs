@@ -6,7 +6,7 @@
 //! `tokio::io::duplex` pipe — no unix socket, no peer-UID path.
 
 use omniagent_pty_daemon::protocol::{
-    read_frame, write_frame, Frame, MessageKind, SessionListPayload, SettingKey,
+    read_frame, write_frame, Frame, MessageKind, SessionListPayload, SessionSizePayload, SettingKey,
 };
 use omniagent_pty_daemon::{serve_client, ClientContext, ClientTrust, CreateSession, DaemonServer};
 use std::collections::HashMap;
@@ -144,6 +144,11 @@ async fn remote_clients_only_list_and_attach_projected_sessions() {
             serde_json::json!({"id": "s1", "after_sequence": null}),
         )
         .await;
+    // An accepted attach opens with the host's grid, then the screen on it.
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::SessionResized
+    );
     assert_eq!(
         client.read().await.header.message_kind,
         MessageKind::Snapshot
@@ -214,6 +219,10 @@ async fn un_sharing_an_attached_session_stops_its_output_without_a_frame_from_th
         .await;
     assert_eq!(
         client.read().await.header.message_kind,
+        MessageKind::SessionResized
+    );
+    assert_eq!(
+        client.read().await.header.message_kind,
         MessageKind::Snapshot
     );
     while client.read().await.header.message_kind != MessageKind::Output {}
@@ -248,6 +257,95 @@ async fn un_sharing_an_attached_session_stops_its_output_without_a_frame_from_th
         )
         .await;
     assert_eq!(client.read().await.header.message_kind, MessageKind::Error);
+}
+
+/// Phase 2 §1: one grid exists and it belongs to the host. Before this, any
+/// viewer could resize any shared session — which is both the defect that
+/// collapsed the host's terminal and a trust-boundary hole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_client_may_not_resize_a_shared_session() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut client, _ctx, _stop) = remote_client(root.path(), "cat").await;
+    client
+        .send(
+            MessageKind::Resize,
+            serde_json::json!({"id": "s1", "cols": 40, "rows": 10}),
+        )
+        .await;
+    let reply = client.read().await;
+    assert_eq!(
+        reply.header.message_kind,
+        MessageKind::Error,
+        "the host owns the grid: a viewer's window must never resize it"
+    );
+}
+
+/// A viewer renders the host's grid scaled to fit, so it must be told that
+/// grid before the snapshot it has to lay out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attaching_tells_the_client_the_session_size_before_the_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
+    ctx.registry
+        .get("s1")
+        .unwrap()
+        .resize(120, 40, 0, 0)
+        .unwrap();
+
+    client
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "s1", "after_sequence": null}),
+        )
+        .await;
+
+    let size = client.read().await;
+    assert_eq!(size.header.message_kind, MessageKind::SessionResized);
+    let size: SessionSizePayload = serde_json::from_slice(&size.payload).unwrap();
+    assert_eq!((size.id.as_str(), size.cols, size.rows), ("s1", 120, 40));
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::Snapshot
+    );
+}
+
+/// The host resizing its own window must re-pin every attached viewer, with
+/// no request from the viewer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resize_reaches_every_attached_client() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
+    client
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "s1", "after_sequence": null}),
+        )
+        .await;
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::SessionResized
+    );
+    assert_eq!(
+        client.read().await.header.message_kind,
+        MessageKind::Snapshot
+    );
+
+    ctx.registry
+        .get("s1")
+        .unwrap()
+        .resize(100, 30, 0, 0)
+        .unwrap();
+
+    // The attached viewer is told, without asking.
+    let pushed = loop {
+        let frame = client.read().await;
+        if frame.header.message_kind == MessageKind::SessionResized {
+            break frame;
+        }
+        assert_ne!(frame.header.message_kind, MessageKind::Error);
+    };
+    let pushed: SessionSizePayload = serde_json::from_slice(&pushed.payload).unwrap();
+    assert_eq!((pushed.cols, pushed.rows), (100, 30));
 }
 
 #[test]

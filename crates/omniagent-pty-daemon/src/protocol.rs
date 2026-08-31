@@ -157,6 +157,17 @@ pub struct SessionExitedPayload {
     pub exit_code: Option<u32>,
 }
 
+/// The grid a session is currently running at — the one the host owns
+/// (phase 2 spec §1). Sent on `Attach` and pushed on every accepted resize
+/// so a remote viewer can render that grid scaled instead of imposing its
+/// own window's size on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSizePayload {
+    pub id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MessageKind {
@@ -228,6 +239,11 @@ pub enum MessageKind {
     Response = 0x89,
     ResyncRequired = 0x8a,
     Error = 0x8b,
+    /// The session's current grid, `SessionSizePayload` (phase 2 §1 —
+    /// appended, never renumbering an existing kind). Sent on `Attach` and
+    /// pushed to a session's subscribers whenever its size changes; a local
+    /// client ignores it, a remote viewer re-pins its scaled render to it.
+    SessionResized = 0x8c,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -271,6 +287,7 @@ impl TryFrom<u8> for MessageKind {
             0x89 => Self::Response,
             0x8a => Self::ResyncRequired,
             0x8b => Self::Error,
+            0x8c => Self::SessionResized,
             other => return Err(FrameError::UnknownMessageKind(other)),
         })
     }

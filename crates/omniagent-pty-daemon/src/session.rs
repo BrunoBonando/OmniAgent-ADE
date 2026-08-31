@@ -279,6 +279,14 @@ pub enum SessionEvent {
         status: SessionStatus,
         engine: String,
     },
+    /// The grid changed (phase 2 §1). Broadcast like `Status`: subscribers
+    /// only, never recorded in `history`, since it describes the session as
+    /// it is now rather than a byte of its output to replay.
+    Resized {
+        sequence: u64,
+        cols: u16,
+        rows: u16,
+    },
     Exited {
         sequence: u64,
         exit_code: Option<u32>,
@@ -291,6 +299,7 @@ impl SessionEvent {
             Self::Output { sequence, .. }
             | Self::ResyncRequired { sequence }
             | Self::Status { sequence, .. }
+            | Self::Resized { sequence, .. }
             | Self::Exited { sequence, .. } => *sequence,
         }
     }
@@ -432,6 +441,10 @@ pub struct ManagedSession {
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     reader_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     terminal: Mutex<TerminalState>,
+    /// The last applied grid, `(cols, rows)` — the size the program running
+    /// in this PTY believes it has. Only a local client sets it; a remote
+    /// viewer is told it and renders scaled (phase 2 §1).
+    size: Mutex<(u16, u16)>,
     subscribers: Mutex<Vec<Weak<SubscriptionInner>>>,
     engine: String,
     status: Mutex<SessionStatus>,
@@ -464,6 +477,16 @@ impl ManagedSession {
         self.write_input(b"\x03")
     }
 
+    /// The grid this session is running at, as last applied by [`Self::resize`].
+    pub fn size(&self) -> (u16, u16) {
+        self.size
+            .lock()
+            .map(|size| *size)
+            // A poisoned lock still holds the last size written; reporting it
+            // beats inventing a grid the program is not running at.
+            .unwrap_or_else(|poisoned| *poisoned.into_inner())
+    }
+
     pub fn resize(&self, cols: u16, rows: u16, pixel_width: u16, pixel_height: u16) -> Result<()> {
         self.master
             .lock()
@@ -475,11 +498,25 @@ impl ManagedSession {
                 pixel_height,
             })
             .context("resize PTY")?;
-        self.terminal
+        let sequence = {
+            let mut terminal = self
+                .terminal
+                .lock()
+                .map_err(|e| anyhow!("terminal lock poisoned: {e}"))?;
+            terminal.parser.set_size(rows, cols);
+            terminal.sequence
+        };
+        *self
+            .size
             .lock()
-            .map_err(|e| anyhow!("terminal lock poisoned: {e}"))?
-            .parser
-            .set_size(rows, cols);
+            .map_err(|e| anyhow!("session size lock poisoned: {e}"))? = (cols, rows);
+        // Told, not asked: attached clients re-pin to the new grid the way
+        // they do for a status change.
+        self.broadcast(SessionEvent::Resized {
+            sequence,
+            cols,
+            rows,
+        });
         Ok(())
     }
 
@@ -1088,6 +1125,7 @@ fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
                 history: VecDeque::new(),
                 sequence: 0,
             }),
+            size: Mutex::new((request.cols, request.rows)),
             subscribers: Mutex::new(Vec::new()),
             engine,
             status: Mutex::new(SessionStatus::Ready),
