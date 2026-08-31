@@ -67,8 +67,23 @@ pub type SharedWriter = Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>;
 /// workspaces (and their sessions) a remote client may ever see.
 pub const REMOTE_CONTROL_KEY: &str = "remote_control";
 
-/// The session ids the `remote_control` projection currently shares.
+/// The session ids the `remote_control` projection currently shares — the
+/// allowlist every remote `Attach`/`Input`/`Interrupt` is checked against.
 /// Missing row, unparsable JSON or an unexpected shape all mean "nothing".
+///
+/// Two projection shapes are read, because a Mac that has not updated yet
+/// still writes the first one (phase 2 spec §2, "Compatibility"):
+///
+/// - **v2** (`"version": 2`) carries the host's real tree, so a `sessions[]`
+///   entry is a session *group* whose `panes[]` hold the attachable ids. The
+///   group's own id is a UI grouping and is never a daemon session, so it is
+///   deliberately not collected — an idle group (`"panes": []`) shares
+///   nothing at all, and the machine stays reachable through
+///   [`remote_control_active`] instead.
+/// - **v1** flattened panes into `sessions[]`, so there each entry *is* the
+///   attachable id. The absence of a `panes` array is what selects this.
+///
+/// Either way the id collected is the daemon session id, i.e. the pane.
 pub fn remote_session_ids(store: &Store) -> HashSet<String> {
     let Some(raw) = store.get_setting(REMOTE_CONTROL_KEY).ok().flatten() else {
         return HashSet::new();
@@ -80,13 +95,15 @@ pub fn remote_session_ids(store: &Store) -> HashSet<String> {
         .as_array()
         .into_iter()
         .flatten()
-        .flat_map(|workspace| {
-            workspace["sessions"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
+        .filter_map(|workspace| workspace["sessions"].as_array())
+        .flatten()
+        .flat_map(|session| {
+            let panes = session["panes"].as_array();
+            let v2 = panes.into_iter().flatten();
+            let v1 = panes.is_none().then_some(session);
+            v2.chain(v1)
         })
-        .filter_map(|session| session["id"].as_str().map(str::to_owned))
+        .filter_map(|pane| pane["id"].as_str().map(str::to_owned))
         .collect()
 }
 

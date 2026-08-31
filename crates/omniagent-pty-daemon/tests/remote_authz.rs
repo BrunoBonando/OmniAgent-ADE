@@ -21,6 +21,12 @@ const PROJECTION: &str = r#"{"workspaces":[{"id":"w1","name":"w1","sessions":[{"
 /// stays shared — a non-empty projection, so the relay keeps every
 /// connection open and only `serve_client` can cut `s1` off.
 const PROJECTION_ONLY_S2: &str = r#"{"workspaces":[{"id":"w2","name":"w2","sessions":[{"id":"s2","title":"two","engine":"shell","group":null}]}]}"#;
+/// The phase-2 shape (spec §2 "Projection schema v2"): the host's real tree,
+/// where the attachable id is the **pane** id, not the session-group id.
+const PROJECTION_V2: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
+"sessions":[{"id":"g1","label":"Session 1","order":0,
+"panes":[{"id":"s1","title":"claude","engine":"claude","kind":"terminal","order":0},
+         {"id":"s3","title":"shell","engine":"shell","kind":"terminal","order":1}]}]}]}"#;
 
 fn command_session(id: &str, script: &str) -> CreateSession {
     CreateSession {
@@ -346,6 +352,42 @@ async fn a_resize_reaches_every_attached_client() {
     };
     let pushed: SessionSizePayload = serde_json::from_slice(&pushed.payload).unwrap();
     assert_eq!((pushed.cols, pushed.rows), (100, 30));
+}
+
+/// Phase 2 §2: the reader walks the pane level. Missing these ids denies
+/// every remote attach, so this is the load-bearing assertion of the change —
+/// and a v1 row from a Mac that has not updated yet must still parse.
+#[test]
+fn projection_v2_shares_every_pane_and_v1_still_parses() {
+    let store = brain_core::Store::open_in_memory().unwrap();
+    store.set_setting("remote_control", PROJECTION_V2).unwrap();
+    let ids = omniagent_pty_daemon::remote_session_ids(&store);
+    assert_eq!(
+        ids,
+        ["s1".to_string(), "s3".to_string()].into_iter().collect(),
+        "a pane is what a viewer attaches to"
+    );
+    assert!(omniagent_pty_daemon::remote_control_active(&store));
+
+    // A phase-1 row from a Mac that has not updated yet.
+    store.set_setting("remote_control", PROJECTION).unwrap();
+    assert_eq!(
+        omniagent_pty_daemon::remote_session_ids(&store),
+        ["s1".to_string()].into_iter().collect()
+    );
+}
+
+/// An idle Mac: a workspace is shared, its session has no panes open. Nothing
+/// is attachable, but the machine must stay reachable — that pairing is the
+/// whole reason `remote_control_active` counts workspaces and not sessions.
+#[test]
+fn a_v2_session_with_no_panes_shares_nothing_yet_keeps_the_machine_reachable() {
+    const IDLE: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
+    "sessions":[{"id":"g1","label":"Session 1","order":0,"panes":[]}]}]}"#;
+    let store = brain_core::Store::open_in_memory().unwrap();
+    store.set_setting("remote_control", IDLE).unwrap();
+    assert!(omniagent_pty_daemon::remote_session_ids(&store).is_empty());
+    assert!(omniagent_pty_daemon::remote_control_active(&store));
 }
 
 #[test]
