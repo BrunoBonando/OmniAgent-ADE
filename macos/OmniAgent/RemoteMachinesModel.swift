@@ -37,7 +37,14 @@ struct RemoteMachine: Equatable {
 ///   answers synchronously) and again on every `.connected` transition, since
 ///   the real socket is not up yet when the first read goes out.
 /// - A device that is online but whose socket is **down** is `connect()`ed
-///   again by every poll — the connection's own backoff owns the rate.
+///   again by every poll, so this model's promise — "the relay says it is
+///   online, so we are dialling it" — no longer rests on the transport
+///   never giving up on its own. One dial per poll at most; a dial already
+///   in flight is left alone. It is not free: an explicit `connect()` is a
+///   fresh start for the transport, so a machine that stays down ramps its
+///   backoff from the seed again every thirty seconds rather than settling
+///   at the 30 s cap. Noticing a host the moment it registers is worth more
+///   than those dials.
 ///   Phase 1 re-dialled only when the bearer had *changed*, which in-session
 ///   it does not for fifteen minutes, so the relay's 403 for "that device's
 ///   control channel is not registered yet" (the race a viewer loses the
@@ -312,10 +319,13 @@ final class RemoteMachinesModel {
                     }
                 } else if connectionStates[deviceID] == .disconnected {
                     // Online to the relay, down to us: dial it again. Every
-                    // other refusal is transient — the 403 while the host's
-                    // control channel registers, a relay restart, an outage —
-                    // and leaving it to the bearer changing was what stranded
-                    // a machine until the app was relaunched.
+                    // refusal but a 401 is transient — the 403 while the
+                    // host's control channel registers, a relay restart, an
+                    // outage — and leaving those to the bearer changing was
+                    // what stranded a machine until the app was relaunched.
+                    // The transport retries these itself; this is the poll
+                    // saying so anyway, so no future path that quietly stops
+                    // retrying can blind the viewer again.
                     existing.connect()
                 }
             } else {
