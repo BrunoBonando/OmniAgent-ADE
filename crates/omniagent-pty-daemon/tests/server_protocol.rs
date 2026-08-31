@@ -117,6 +117,22 @@ impl Client {
             }
         }
     }
+
+    /// Reads until both kinds have arrived, in **either** order.
+    ///
+    /// A reply and an unrelated push race for the connection's one shared
+    /// writer, and the protocol gives them no relative order — while
+    /// [`Self::read_kind`] *discards* every frame it skips. So waiting for one
+    /// and then the other silently throws away whichever arrived first and
+    /// then blocks forever on it.
+    async fn read_both(&mut self, one: MessageKind, other: MessageKind) {
+        let (mut seen_one, mut seen_other) = (false, false);
+        while !(seen_one && seen_other) {
+            let kind = self.read().await.header.message_kind;
+            seen_one |= kind == one;
+            seen_other |= kind == other;
+        }
+    }
 }
 
 fn command_session(id: &str, script: &str) -> CreateSession {
@@ -216,8 +232,13 @@ async fn one_persistent_connection_streams_raw_bytes_and_applies_resize() {
     client
         .send_json(MessageKind::Kill, &serde_json::json!({"id":"raw"}))
         .await;
-    client.read_kind(MessageKind::SessionExited).await;
-    client.read_kind(MessageKind::Response).await;
+    // `ManagedSession::kill` joins the PTY reader thread, so `Exited` is
+    // already queued by the time the dispatch loop answers — the push and the
+    // reply then race for the writer, and this test used to fail whenever the
+    // reply won (7/20 on a clean tree).
+    client
+        .read_both(MessageKind::SessionExited, MessageKind::Response)
+        .await;
     server.stop().await;
 }
 
