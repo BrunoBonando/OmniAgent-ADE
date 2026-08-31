@@ -801,6 +801,64 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(sessionRows[0].paneDotCount, 2)
     }
 
+    /// A remote session row counts every pane — the dots have to match the
+    /// host's — but opens a **terminal**: only a terminal has a daemon
+    /// session behind it, and an editor's id handed to `Attach` names nothing
+    /// the daemon knows, so the pane would open empty and never connect (the
+    /// phase-2 spec's §2). The editor is ordered first here, which is exactly
+    /// the case an "open the first pane" rule gets wrong.
+    func testARemoteSessionRowOpensItsTerminalNotItsEditor() throws {
+        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
+        let view = makeSidebar()
+        var opened: [String] = []
+        view.onOpenRemoteSession = { _, sessionID, _ in opened.append(sessionID) }
+        let payload = RemoteControlProjection.build(
+            panes: [pane("e1", group: "g1", project: "/a", groupLabel: "Session 1", kind: .editor),
+                    pane("t1", group: "g1", project: "/a", groupLabel: "Session 1")],
+            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
+        view.reloadWorkspaces(
+            workspaces: [],
+            panes: [],
+            focusedPaneID: nil,
+            statuses: [:],
+            projectLabels: [:],
+            remoteMachines: [
+                RemoteMachineTreeEntry(deviceID: "d1", name: "Studio",
+                                       workspaces: RemoteControlProjection.treeEntries(
+                                           payload, idPrefix: "remote:d1"))
+            ]
+        )
+
+        let sessionRow = try XCTUnwrap(view.descendants(ofType: SessionRowView.self).first)
+        XCTAssertEqual(sessionRow.paneDotCount, 2, "both panes still count — the host shows two dots")
+        sessionRow.onPress?()
+        XCTAssertEqual(opened, ["t1"], "the terminal, not the editor sitting in front of it")
+    }
+
+    /// And a session with nothing but editors in it renders, dots and all,
+    /// with no door: pressing it must not open a pane bound to an id the
+    /// daemon has no session behind.
+    func testARemoteSessionOfEditorsOnlyHasNothingToOpen() throws {
+        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
+        let view = makeSidebar()
+        view.onOpenRemoteSession = { _, _, _ in XCTFail("there is nothing here to attach to") }
+        let payload = RemoteControlProjection.build(
+            panes: [pane("e1", group: "g1", project: "/a", groupLabel: "Notes", kind: .editor)],
+            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
+        view.reloadWorkspaces(
+            workspaces: [], panes: [], focusedPaneID: nil, statuses: [:], projectLabels: [:],
+            remoteMachines: [
+                RemoteMachineTreeEntry(deviceID: "d1", name: "Studio",
+                                       workspaces: RemoteControlProjection.treeEntries(
+                                           payload, idPrefix: "remote:d1"))
+            ]
+        )
+
+        let sessionRow = try XCTUnwrap(view.descendants(ofType: SessionRowView.self).first)
+        XCTAssertEqual(sessionRow.paneDotCount, 1, "the row is still there, with its dot")
+        sessionRow.onPress?()
+    }
+
     /// One section per online machine (the remote-session-control spec's §4
     /// "Viewer side"): a header naming the machine, its projected workspaces
     /// under the remote glyph, and session rows that hand the click — device,
@@ -876,7 +934,8 @@ final class NavigationSidebarTests: XCTestCase {
         _ id: String,
         group: String,
         project: String,
-        groupLabel: String? = nil
+        groupLabel: String? = nil,
+        kind: PaneKind = .terminal
     ) -> PaneDescriptor {
         PaneDescriptor(
             sessionID: id,
@@ -885,7 +944,8 @@ final class NavigationSidebarTests: XCTestCase {
             title: "term",
             project: project,
             engine: .claude,
-            cwd: "/tmp"
+            cwd: "/tmp",
+            kind: kind
         )
     }
 

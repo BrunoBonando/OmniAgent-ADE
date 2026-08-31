@@ -3037,53 +3037,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     /// The relay's machines as the sidebar tree renders them — the host's own
-    /// tree, in the very same value types the local sidebar is built from
-    /// (`RemoteControlProjection.treeEntries`), so the two sidebars cannot
-    /// drift into different shapes. Only the ids are touched here: they are
-    /// the projection's own until this point, and only this side knows which
-    /// machine they came from.
+    /// tree, in the very same value types the local sidebar is built from, so
+    /// the two sidebars cannot drift into different shapes. Everything about
+    /// the shape is `treeEntries`'; this side only says which machine the
+    /// payload came from.
     private func remoteTreeEntries() -> [RemoteMachineTreeEntry] {
         remoteMachines.machines.map { machine in
             RemoteMachineTreeEntry(
                 deviceID: machine.deviceID,
                 name: machine.name,
-                workspaces: RemoteControlProjection.treeEntries(machine.projection).map { entry in
-                    WorkspaceTreeEntry(
-                        // Prefixed so a workspace shared by another Mac can
-                        // never collide with the same folder open locally —
-                        // the fold state is keyed by this id too.
-                        id: "remote:\(machine.deviceID)/\(entry.id)",
-                        label: entry.label,
-                        sessions: entry.sessions.map { session in
-                            SessionGroupNode(
-                                id: session.id,
-                                // The project a pane of this session is opened
-                                // into (`openRemoteSession`), so the row and
-                                // the pane agree on where the session lives.
-                                project: "remote:\(machine.deviceID)",
-                                // `name` means "a name a human actually stored
-                                // on the panes"; the projection carries no such
-                                // fact, and the row prints `name ?? label`
-                                // either way.
-                                name: nil,
-                                label: session.label,
-                                cwd: session.cwd,
-                                paneIDs: session.paneIDs,
-                                isCurrent: session.isCurrent
-                            )
-                        },
-                        tint: entry.tint
-                    )
-                }
+                workspaces: RemoteControlProjection.treeEntries(
+                    machine.projection,
+                    idPrefix: "remote:\(machine.deviceID)"
+                )
             )
         }
     }
 
     /// The same list, flattened to the names the spotlight's rows print. The
     /// palette's rows are the things a click can *open*, and what a viewer
-    /// attaches to is a pane — so a session of three panes is three rows
-    /// here, each named the way the host's own tab is, while the sidebar
-    /// keeps them as one row with three dots.
+    /// attaches to is a **terminal** pane — so a session of three terminals
+    /// is three rows here, each named the way the host's own tab is, while
+    /// the sidebar keeps them as one row with three dots. An editor or
+    /// browser pane is in the projection for structural fidelity only (the
+    /// phase-2 spec's §2) and gets no row: opening one would build a
+    /// terminal pane for an id the daemon has no session behind.
     private func paletteRemoteMachines() -> [PaletteRemoteMachine] {
         remoteMachines.machines.map { machine in
             PaletteRemoteMachine(
@@ -3093,9 +3071,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     PaletteRemoteWorkspace(
                         id: workspace.id,
                         name: workspace.name,
-                        sessions: workspace.sessions.flatMap(\.panes).map {
-                            PaletteRemoteSession(id: $0.id, title: $0.title)
-                        }
+                        panes: workspace.sessions
+                            .flatMap(\.panes)
+                            .filter { $0.kind == PaneKind.terminal.rawValue }
+                            .map { PaletteRemotePane(id: $0.id, title: $0.title) }
                     )
                 }
             )

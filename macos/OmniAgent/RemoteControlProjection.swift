@@ -178,29 +178,46 @@ enum RemoteControlProjection {
     /// the ordinary workspace/session rows rather than a second row variant
     /// that could drift from them.
     ///
-    /// Ids are the projection's own; the caller prefixes them per machine
-    /// (`remote:<device>/<workspace>`) since only it knows which machine this
-    /// payload came from.
-    static func treeEntries(_ payload: Payload) -> [WorkspaceTreeEntry] {
+    /// `idPrefix` names the machine this payload came from — a viewer passes
+    /// `remote:<device>`, so a workspace another Mac shares (`remote:<device>/
+    /// <workspace>`) can never collide with the same folder open locally, and
+    /// the sessions carry that same string as their project, which is where
+    /// `openRemoteSession` puts the panes it opens. Empty (the default)
+    /// leaves the projection's own ids alone. This is the *only* place these
+    /// values are built: a second construction beside it is how the two
+    /// sidebars would drift apart again.
+    static func treeEntries(_ payload: Payload, idPrefix: String = "") -> [WorkspaceTreeEntry] {
         // Sorted by the host's `order` and never re-sorted — the host's
         // ordering is the answer, and re-deriving one here is exactly the
         // drift this schema exists to prevent.
         payload.workspaces.sorted { $0.order < $1.order }.map { workspace in
             WorkspaceTreeEntry(
-                id: workspace.id,
+                id: idPrefix.isEmpty ? workspace.id : "\(idPrefix)/\(workspace.id)",
                 label: workspace.name,
                 sessions: workspace.sessions.sorted { $0.order < $1.order }.map { session in
-                    SessionGroupNode(
+                    let panes = session.panes.sorted { $0.order < $1.order }
+                    return SessionGroupNode(
                         id: session.id,
-                        project: workspace.id,
-                        name: session.label,
+                        project: idPrefix.isEmpty ? workspace.id : idPrefix,
+                        // `name` means "a name a human actually stored on the
+                        // panes". The projection carries no such fact, and a
+                        // row prints `name ?? label` either way.
+                        name: nil,
                         label: session.label,
                         // The host's cwd is not projected: it names a
                         // directory on the *other* Mac, and a viewer that
                         // printed it would be pointing at a path that may not
                         // exist here.
                         cwd: "",
-                        paneIDs: session.panes.sorted { $0.order < $1.order }.map(\.id),
+                        // Every pane, so the dots match the host's row…
+                        paneIDs: panes.map(\.id),
+                        // …but only a terminal has a daemon session behind it
+                        // for a viewer to attach to. An editor or browser id
+                        // handed to `Attach` names nothing the daemon knows:
+                        // the pane would open empty and never connect.
+                        terminalPaneIDs: panes
+                            .filter { $0.kind == PaneKind.terminal.rawValue }
+                            .map(\.id),
                         // "Currently on screen" is a fact about the host's
                         // focus, which is not the viewer's.
                         isCurrent: false

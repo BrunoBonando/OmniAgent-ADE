@@ -196,10 +196,14 @@ struct PaletteWorkspace: Equatable {
     let path: String?
 }
 
-/// A session another machine shares, as the palette sees it — a small
-/// struct rather than a tuple because rows are compared in tests, and
-/// tuples are not `Equatable`.
-struct PaletteRemoteSession: Equatable {
+/// One **pane** another machine shares — a terminal, since that is the only
+/// kind a viewer can attach to. A small struct rather than a tuple because
+/// rows are compared in tests, and tuples are not `Equatable`.
+///
+/// Named for the pane on purpose: `id` is a daemon session id, never the
+/// host's session-*group* id, and a row built from the wrong one attaches to
+/// nothing.
+struct PaletteRemotePane: Equatable {
     let id: String
     let title: String
 }
@@ -208,7 +212,7 @@ struct PaletteRemoteSession: Equatable {
 struct PaletteRemoteWorkspace: Equatable {
     let id: String
     let name: String
-    let sessions: [PaletteRemoteSession]
+    let panes: [PaletteRemotePane]
 }
 
 /// One online machine from the relay's device list with what it shares —
@@ -384,26 +388,27 @@ struct CommandPaletteModel: Equatable {
             }
         }
         // Another machine's shared sessions, under the same Sessions heading:
-        // one row per machine, then one per session, each saying which
-        // machine and workspace it lives on (spec §4 "Spotlight").
+        // one row per machine, then one per attachable pane, each saying
+        // which machine and workspace it lives on (spec §4 "Spotlight").
         for machine in remoteMachines {
-            let sessions = machine.workspaces.flatMap { workspace in
-                workspace.sessions.map { (workspace: workspace, session: $0) }
+            let panes = machine.workspaces.flatMap { workspace in
+                workspace.panes.map { (workspace: workspace, pane: $0) }
             }
             commands.append(
                 PaletteCommand(
                     id: "remote-machine:\(machine.deviceID)",
                     title: machine.name,
                     detail: "remote",
-                    // The machine row opens its first session — the closest
-                    // thing to "go to that Mac" a pane-shaped app has. A
-                    // machine sharing nothing is still findable; it just has
-                    // nowhere to go yet.
-                    action: sessions.first.map { first in
+                    // The machine row opens its first attachable pane — the
+                    // closest thing to "go to that Mac" a pane-shaped app
+                    // has. A machine sharing nothing (or sharing only
+                    // editors) is still findable; it just has nowhere to go
+                    // yet.
+                    action: panes.first.map { first in
                         PaletteAction.openRemoteSession(
                             deviceID: machine.deviceID,
-                            sessionID: first.session.id,
-                            title: first.session.title
+                            sessionID: first.pane.id,
+                            title: first.pane.title
                         )
                     } ?? PaletteAction.noop,
                     keywords: "remote \(machine.name)",
@@ -412,16 +417,16 @@ struct CommandPaletteModel: Equatable {
                     symbol: "desktopcomputer.and.arrow.down"
                 )
             )
-            for entry in sessions {
+            for entry in panes {
                 commands.append(
                     PaletteCommand(
-                        id: "remote:\(machine.deviceID)/\(entry.session.id)",
-                        title: entry.session.title,
+                        id: "remote:\(machine.deviceID)/\(entry.pane.id)",
+                        title: entry.pane.title,
                         detail: "remote",
                         action: .openRemoteSession(
                             deviceID: machine.deviceID,
-                            sessionID: entry.session.id,
-                            title: entry.session.title
+                            sessionID: entry.pane.id,
+                            title: entry.pane.title
                         ),
                         keywords: "remote \(machine.name) \(entry.workspace.name)",
                         section: .sessions,

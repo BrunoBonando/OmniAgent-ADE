@@ -16,10 +16,40 @@ struct SessionGroupNode: Equatable {
     /// created with one cwd and its panes normally agree; they can drift, so
     /// this picks the first rather than pretending there is no single answer.
     let cwd: String
+    /// **Every** pane of the session, whatever its kind — what the row's
+    /// status dots count, so a viewer's row has exactly as many dots as the
+    /// host's.
     let paneIDs: [String]
+    /// The subset of `paneIDs` that are terminals. Only a terminal has a
+    /// daemon session behind it, so it is the only kind a click can open —
+    /// on another Mac that is the rule the projection states outright (the
+    /// phase-2 spec's §2: editors and browsers are carried for structural
+    /// fidelity and are not openable remotely). Left unsaid at a call site
+    /// that has no kinds to hand, it is `paneIDs`.
+    let terminalPaneIDs: [String]
     /// Contains the focused pane — the session that is "currently on the
     /// screen".
     let isCurrent: Bool
+
+    init(
+        id: String,
+        project: String,
+        name: String?,
+        label: String,
+        cwd: String,
+        paneIDs: [String],
+        terminalPaneIDs: [String]? = nil,
+        isCurrent: Bool
+    ) {
+        self.id = id
+        self.project = project
+        self.name = name
+        self.label = label
+        self.cwd = cwd
+        self.paneIDs = paneIDs
+        self.terminalPaneIDs = terminalPaneIDs ?? paneIDs
+        self.isCurrent = isCurrent
+    }
 }
 
 /// One project and the sessions inside it.
@@ -89,6 +119,7 @@ enum SessionOutline {
                     label: label ?? "",
                     cwd: sessionPanes.first?.cwd ?? "",
                     paneIDs: sessionPanes.map(\.sessionID),
+                    terminalPaneIDs: sessionPanes.filter { $0.kind == .terminal }.map(\.sessionID),
                     isCurrent: focusedPaneID != nil && sessionPanes.contains { $0.sessionID == focusedPaneID }
                 )
             }

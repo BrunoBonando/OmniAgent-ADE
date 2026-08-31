@@ -618,7 +618,7 @@ final class RemotePanesTests: XCTestCase {
     /// only place a viewer can learn that two panes belong together.
     /// (`RemoteMachinesModelTests.projectionA` stays v1 on purpose — it is
     /// what pins the back-compatibility path.)
-    private static let projection = #"{"version":2,"workspaces":[{"id":"/a","name":"A","tint":null,"order":0,"sessions":[{"id":"g1","label":"Build","order":0,"panes":[{"id":"s1","title":"Build","engine":"claude","kind":"terminal","order":0},{"id":"s2","title":"Docs","engine":"codex","kind":"terminal","order":1}]}]}]}"#
+    private static let projection = #"{"version":2,"workspaces":[{"id":"/a","name":"A","tint":null,"order":0,"sessions":[{"id":"g1","label":"Build · host","order":0,"panes":[{"id":"e1","title":"Notes · host","engine":"shell","kind":"editor","order":0},{"id":"s1","title":"Build · host","engine":"claude","kind":"terminal","order":1},{"id":"s2","title":"Docs · host","engine":"codex","kind":"terminal","order":2}]}]}]}"#
 
     override func setUp() {
         super.setUp()
@@ -751,7 +751,7 @@ final class RemotePanesTests: XCTestCase {
         let pane = try XCTUnwrap(controller.workspaceView.descriptor(for: "s1"))
         XCTAssertEqual(pane.remoteDeviceID, "d1")
         XCTAssertEqual(pane.project, "remote:d1")
-        XCTAssertEqual(pane.label, "Build")
+        XCTAssertEqual(pane.label, "Build · host", "the host's own title for the pane, not the caller's")
         XCTAssertEqual(pane.group, "g1", "panes of one remote session share its host group")
         XCTAssertEqual(pane.engine, .claude, "the engine badge is the host's")
         XCTAssertEqual(pane.kind, .terminal)
@@ -790,10 +790,43 @@ final class RemotePanesTests: XCTestCase {
         let second = try XCTUnwrap(controller.workspaceView.descriptor(for: "s2"))
         XCTAssertEqual(first.group, "g1", "the host's session group, not the pane id")
         XCTAssertEqual(second.group, first.group, "two panes of one host session share a grid here too")
-        XCTAssertEqual(first.groupLabel, "Build", "and the session is named what the host names it")
+        // The fixture's names differ from the `title:` arguments above on
+        // purpose: these assertions are about what the *host* calls things,
+        // and would pass on the caller's string by accident otherwise.
+        XCTAssertEqual(first.groupLabel, "Build · host", "and the session is named what the host names it")
         XCTAssertEqual(first.engine, .claude)
         XCTAssertEqual(second.engine, .codex, "each pane keeps the engine the host runs in it")
-        XCTAssertEqual(second.label, "Docs", "and its own title")
+        XCTAssertEqual(second.label, "Docs · host", "and its own title")
+    }
+
+    /// Only a terminal has a daemon session behind it, so only a terminal is
+    /// offered as something to open (the phase-2 spec's §2: other kinds are
+    /// projected for structural fidelity). An editor row would build a
+    /// terminal pane for an id the daemon knows nothing about — a pane that
+    /// opens empty and never attaches. The fixture's session has an editor
+    /// **first**, which is exactly the case a "first pane" rule gets wrong.
+    @MainActor
+    func testTheSpotlightOffersARemoteSessionsTerminalsAndNotItsEditor() async throws {
+        let machines = await makeMachines()
+        let controller = makeController(remoteMachines: machines)
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes([])
+
+        controller.presentCommandPalette()
+        defer { controller.palette.dismiss() }
+
+        let commands = controller.palette.model.commands
+        let ids = commands.map(\.id)
+        XCTAssertTrue(ids.contains("remote:d1/s1"), "the terminals are rows")
+        XCTAssertTrue(ids.contains("remote:d1/s2"))
+        XCTAssertFalse(ids.contains("remote:d1/e1"), "the editor is not: \(ids)")
+        XCTAssertEqual(
+            commands.first { $0.id == "remote-machine:d1" }?.action,
+            .openRemoteSession(deviceID: "d1", sessionID: "s1", title: "Build · host"),
+            "and the machine row opens its first *terminal*, not its first pane"
+        )
     }
 
     @MainActor
@@ -875,7 +908,7 @@ final class RemotePanesTests: XCTestCase {
         let card = try XCTUnwrap(controller.hoverCardModel(for: .pane("s1")))
 
         XCTAssertEqual(card.meta, "Remote · Studio")
-        XCTAssertEqual(card.title, "Build")
+        XCTAssertEqual(card.title, "Build · host", "the host's title for the pane")
     }
 
     /// The engine badge's menu switches a terminal's *local* process; a

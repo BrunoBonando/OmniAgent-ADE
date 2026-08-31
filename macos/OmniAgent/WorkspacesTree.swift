@@ -522,14 +522,16 @@ final class WorkspacesTreeView: NSView {
             tint: remote?.tint ?? lastRender.entries.first { $0.id == session.project }?.tint
         )
         if let remote {
-            row.onPress = { [weak self] in
-                self?.onOpenRemoteSession?(
-                    remote.deviceID,
-                    // The attachable id is the pane's, as the projection
-                    // schema says; the session id is the host's grouping.
-                    session.paneIDs.first ?? session.id,
-                    session.label
-                )
+            // The attachable id is a pane's, as the projection schema says —
+            // and only a *terminal* pane's: an editor or browser id names
+            // nothing the daemon has a session behind, so a press on it would
+            // open an empty pane that never attaches. A session of nothing
+            // but editors still renders, with its dots; it simply has no door
+            // in it.
+            if let paneID = session.terminalPaneIDs.first {
+                row.onPress = { [weak self] in
+                    self?.onOpenRemoteSession?(remote.deviceID, paneID, session.label)
+                }
             }
         } else {
             row.onPress = { [weak self] in self?.onSelectSession?(session) }

@@ -43,7 +43,7 @@ final class CommandPaletteTests: XCTestCase {
         let commands = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil,
             remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Studio", workspaces: [
-                PaletteRemoteWorkspace(id: "/a", name: "Alpha", sessions: [.init(id: "s1", title: "migrate")])
+                PaletteRemoteWorkspace(id: "/a", name: "Alpha", panes: [.init(id: "s1", title: "migrate")])
             ])])
         let row = try XCTUnwrap(commands.first { $0.id == "remote:d1/s1" })
         XCTAssertEqual(row.title, "migrate")
