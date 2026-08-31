@@ -329,13 +329,20 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
     // MARK: - Answering
 
     /// Opens whatever is selected — the one path Return, a double-click and
-    /// the Open button share. A list with nothing openable in it closes
-    /// instead of beeping: there is no answer to give.
+    /// the Open button share.
+    ///
+    /// A list with nothing openable in it closes rather than beeping: there
+    /// is no answer to give, and the button on that sheet says Close. A list
+    /// that *has* something openable but nothing selected — the click that
+    /// landed in the empty space under the rows — beeps and stays up, which
+    /// is the difference between "there is nothing here" and "you have not
+    /// picked one yet".
     func activateSelection() {
         guard !isAnswered else { return }
-        guard
-            case let .session(deviceID, paneID, label, _)? = selectedRow()
-        else { return cancel() }
+        guard case let .session(deviceID, paneID, label, _)? = selectedRow() else {
+            guard openableRowIndexes.isEmpty else { return NSSound.beep() }
+            return cancel()
+        }
         isAnswered = true
         onOpen?(deviceID, paneID, label)
     }
@@ -361,6 +368,11 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
     /// empty state are not.
     func canSelectRow(_ index: Int) -> Bool { openableRowIndexes.contains(index) }
 
+    /// What a click in the empty space under the last row leaves behind —
+    /// reachable only through the mouse in production, which a test has no
+    /// window focus to drive.
+    func clearSelectionForTesting() { tableView.deselectAll(nil) }
+
     var numberOfRowsForTesting: Int { rows.count }
 
     /// Where the card ended up, for the layout test — a modal that goes up
@@ -374,8 +386,12 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
         return rows[selected]
     }
 
+    /// A double-click opens the row that was *clicked*, and only if it is a
+    /// session. Without the second half, double-clicking a heading — which
+    /// cannot take the selection — would open whatever happened to be
+    /// selected somewhere else in the list.
     @objc private func rowDoubleClicked() {
-        guard tableView.clickedRow >= 0 else { return }
+        guard canSelectRow(tableView.clickedRow) else { return }
         activateSelection()
     }
 
@@ -636,9 +652,8 @@ final class RemoteSessionPickerController {
     private(set) var view: RemoteSessionPickerView?
 
     /// Returns whether the sheet actually went up: `false` when one is
-    /// already showing, or the window has no content view yet. A caller that
-    /// must do *something* (the menu item) can then fall back rather than
-    /// appearing to have been ignored.
+    /// already showing — a second click on the menu item must not stack two
+    /// sheets of glass — or the window has no content view yet.
     @discardableResult
     func present(
         over window: NSWindow?,

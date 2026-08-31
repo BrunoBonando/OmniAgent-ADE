@@ -304,6 +304,25 @@ final class RemoteSessionPickerTests: XCTestCase {
         XCTAssertNil(controller.view, "Return on a picker with nothing in it closes it")
     }
 
+    /// Return with a list that has sessions in it but nothing selected — the
+    /// click that landed under the last row — beeps and stays up, rather
+    /// than closing the picker the user is still choosing from.
+    func testReturnWithNothingSelectedKeepsTheSheetUp() throws {
+        let window = testWindow()
+        let controller = RemoteSessionPickerController()
+        var opened = 0
+        controller.present(
+            over: window,
+            rows: RemoteSessionPickerModel.rows(machines: [studioWithTwoSessions()], signedIn: true)
+        ) { _, _, _ in opened += 1 }
+        let view = try XCTUnwrap(controller.view)
+
+        view.clearSelectionForTesting()
+        view.activateSelection()
+        XCTAssertEqual(opened, 0)
+        XCTAssertNotNil(controller.view, "still choosing is not the same as nothing to choose")
+    }
+
     /// One sheet at a time — a second request while one is up is dropped
     /// rather than stacking two sets of glass over the window.
     func testASecondPresentWhileOneIsUpIsDropped() throws {
