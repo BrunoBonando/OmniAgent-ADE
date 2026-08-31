@@ -1,4 +1,4 @@
-use crate::connections::{ConnectionRegistry, ViewerIdentity};
+use crate::connections::{ConnectionRegistry, PresenceFeed, ViewerIdentity};
 use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, write_frame, AttachPayload,
     BrainGetContextPayload, BrainSearchPayload, DisconnectViewerPayload, ErrorPayload, Frame,
@@ -535,8 +535,8 @@ where
     // refused, and the guard is what takes it back out however this function
     // ends — including an early `?` and an aborted task.
     let cancel = CancellationToken::new();
-    let connection =
-        ConnectionGuard::register(&connections, trust, Arc::clone(&writer), cancel.clone());
+    let connection = ConnectionGuard::register(&connections, trust, cancel.clone());
+    let viewer_id = identity.viewer_id.clone();
     let named_itself = match identity.viewer_id {
         Some(viewer_id) => connections.set_viewer(
             connection.id,
@@ -551,15 +551,34 @@ where
         ),
         None => false,
     };
+    // The kick's other half. A `DisconnectViewer` that lands between the check
+    // above and this registration would write the blocklist row and find
+    // nothing to cancel, and this connection would then sit there kicked-but-
+    // connected. Re-reading the row once we are visible to `cancel_viewer`
+    // closes that sliver from the other side: either the kick sees us, or we
+    // see the kick.
+    if trust == ClientTrust::Remote {
+        if let Some(viewer_id) = viewer_id.as_deref() {
+            if blocked_viewers(&settings).contains(viewer_id) {
+                send_error(
+                    &writer,
+                    hello.header.request_or_sequence,
+                    anyhow!("viewer {viewer_id} was disconnected while connecting"),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
     // A host is told the roster on its own `Hello`, so an app that has just
-    // opened is immediately correct rather than correct at the next change —
-    // but only when there is something to tell it. An empty roster is what a
-    // client already believes, and sending it anyway would put an unsolicited
-    // frame between every local `Hello` and the reply to its first request,
-    // for the overwhelmingly common case of nobody watching at all.
-    let nobody_is_watching = connections.viewers().is_empty();
-    if (trust == ClientTrust::Local && !nobody_is_watching) || named_itself {
-        connections.broadcast_presence().await;
+    // opened is immediately correct rather than correct at the next change.
+    // The feed writes it to this one connection — never a broadcast to all —
+    // and only when it is news; see `PresenceFeed::spawn`.
+    let _presence = connections
+        .presence_updates(trust)
+        .map(|updates| PresenceFeed::spawn(updates, Arc::clone(&writer)));
+    if named_itself {
+        connections.notify_presence();
     }
 
     let mut attachments = HashMap::<String, Attachment>::new();
@@ -686,8 +705,7 @@ where
                                 .cloned()
                                 .chain([attach.id.clone()])
                                 .collect(),
-                        )
-                        .await;
+                        );
                         // The grid before the screen drawn on it: a viewer
                         // scales the host's size rather than imposing its own
                         // (phase 2 §1), so it must know that size to lay the
@@ -1077,9 +1095,8 @@ where
                 match blocked {
                     Ok(()) => {
                         connections.cancel_viewer(&payload.viewer_id);
-                        let replied = send_response(&writer, request).await;
-                        connections.broadcast_presence().await;
-                        replied
+                        connections.notify_presence();
+                        send_response(&writer, request).await
                     }
                     Err(error) => send_error(&writer, request, error).await,
                 }
@@ -1103,8 +1120,7 @@ where
             &connections,
             connection.id,
             attachments.keys().cloned().collect(),
-        )
-        .await;
+        );
     }
 
     if cancel.is_cancelled() {
@@ -1114,9 +1130,6 @@ where
         // the viewer only notices a beat later is a kick that looks broken.
         let _ = writer.lock().await.shutdown().await;
     }
-    // Leave the registry here, where the roster push can be awaited, rather
-    // than in the guard's `Drop`, where it cannot.
-    connection.close().await;
     Ok(())
 }
 
@@ -1136,36 +1149,21 @@ impl ConnectionGuard {
     fn register(
         connections: &ConnectionRegistry,
         trust: ClientTrust,
-        writer: SharedWriter,
         cancel: CancellationToken,
     ) -> Self {
         Self {
             connections: connections.clone(),
-            id: connections.register(trust, writer, cancel),
-        }
-    }
-
-    /// The orderly exit: remove the entry and, if that changed the roster,
-    /// wait for the hosts to be told. Idempotent — `Drop` then finds nothing.
-    async fn close(&self) {
-        if self.connections.remove(self.id) {
-            self.connections.broadcast_presence().await;
+            id: connections.register(trust, cancel),
         }
     }
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        if !self.connections.remove(self.id) {
-            return;
-        }
-        // Only the disorderly exits reach here (`close` already ran on the
-        // orderly one). `Drop` cannot await, so the push is fire-and-forget;
-        // if the runtime is already gone there is nobody left to tell, and a
-        // host that missed it is corrected by its next roster.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let connections = self.connections.clone();
-            handle.spawn(async move { connections.broadcast_presence().await });
+        // Publishing is synchronous and cannot block, so `Drop` — which cannot
+        // await — is a complete place to do this rather than a partial one.
+        if self.connections.remove(self.id) {
+            self.connections.notify_presence();
         }
     }
 }
@@ -1173,13 +1171,9 @@ impl Drop for ConnectionGuard {
 /// Mirrors one connection's attachments into the registry, telling the hosts
 /// when that changed what they are shown. The single call-site pattern for
 /// "this viewer is now watching a different set of panes".
-async fn sync_attached(
-    connections: &ConnectionRegistry,
-    connection: u64,
-    attached: HashSet<String>,
-) {
+fn sync_attached(connections: &ConnectionRegistry, connection: u64, attached: HashSet<String>) {
     if connections.set_attached(connection, attached) {
-        connections.broadcast_presence().await;
+        connections.notify_presence();
     }
 }
 
@@ -1222,12 +1216,7 @@ async fn next_frame<R: AsyncRead + Unpin>(
                 attachments.retain(|id, _| allowed.contains(id));
                 // The host's roster follows the prune here rather than at this
                 // viewer's next frame — a passive viewer may not send one.
-                sync_attached(
-                    connections,
-                    connection,
-                    attachments.keys().cloned().collect(),
-                )
-                .await;
+                sync_attached(connections, connection, attachments.keys().cloned().collect());
             }
         }
     }

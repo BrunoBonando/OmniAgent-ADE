@@ -474,50 +474,14 @@ async fn a_shared_pane_with_no_session_behind_it_cannot_be_attached() {
     );
 }
 
-/// Phase 2 §7 invariant 3: `RemoteViewers` goes to local connections only —
-/// a viewer must never learn that another viewer exists. The local resize is
-/// the positive control: frames really are flowing on this connection while
-/// the roster is not.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_viewer_is_never_told_about_other_viewers() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
-    client
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::SessionResized
-    );
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
-
-    ctx.registry
-        .get("s1")
-        .unwrap()
-        .resize(90, 20, 0, 0)
-        .unwrap();
-
-    let mut saw_the_resize = false;
-    let settled = tokio::time::Instant::now() + Duration::from_millis(500);
-    while let Some(frame) = client
-        .try_read(settled.saturating_duration_since(tokio::time::Instant::now()))
-        .await
-    {
-        assert_ne!(
-            frame.header.message_kind,
-            MessageKind::RemoteViewers,
-            "a viewer must never learn about other viewers"
-        );
-        saw_the_resize |= frame.header.message_kind == MessageKind::SessionResized;
-    }
-    assert!(saw_the_resize, "the connection was live throughout");
-}
+// Phase 2 §7 invariant 3 — `RemoteViewers` reaches local connections only —
+// is pinned in `remote_presence.rs`, by
+// `a_viewer_is_never_told_about_other_viewers`. It has to live there: proving
+// a viewer is not told requires roster pushes to actually happen while its
+// stream is watched, which needs a *named* viewer (an anonymous one is never
+// listed, so nothing is ever published) and a local connection subscribed to
+// the feed. This file's clients are anonymous, so the same test written here
+// would pass against a daemon that pushed the roster to everybody.
 
 #[test]
 fn authorize_remote_checks_the_raw_input_session_id() {

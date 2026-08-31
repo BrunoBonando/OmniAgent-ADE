@@ -75,6 +75,28 @@ impl Duplex {
         while self.try_read(Duration::from_millis(200)).await.is_some() {}
     }
 
+    /// The reply to one request, skipping any server push that interleaves
+    /// with it.
+    ///
+    /// This is what a real client does, and here it is what keeps the test
+    /// honest rather than lucky: a host's roster pushes are written by its own
+    /// `PresenceFeed` task, so they race the dispatch loop's replies for the
+    /// connection's writer. "The next frame" is not a claim the protocol
+    /// makes; "the reply to request N" is.
+    async fn read_reply(&mut self, request: u64) -> Frame {
+        loop {
+            let frame = self.read().await;
+            if frame.header.request_or_sequence == request
+                && matches!(
+                    frame.header.message_kind,
+                    MessageKind::Response | MessageKind::Error
+                )
+            {
+                return frame;
+            }
+        }
+    }
+
     /// Whether the daemon closes this connection within `wait` — frames still
     /// in flight are drained, EOF is the answer.
     async fn read_eof_within(&mut self, wait: Duration) -> bool {
@@ -163,22 +185,29 @@ async fn a_local_client_learns_who_is_watching_and_can_disconnect_them() {
         .await;
     drain_until(&mut viewer, MessageKind::Snapshot).await;
 
-    host.send(MessageKind::ListViewers, serde_json::json!({}))
+    // The pane is already on the roster by the time the viewer has its
+    // snapshot: the registry learns of an attachment before the client is
+    // told about it, so this cannot disagree with what the viewer can see.
+    let request = host
+        .send(MessageKind::ListViewers, serde_json::json!({}))
         .await;
-    // Either the presence push the attach caused or the `ListViewers` reply,
-    // whichever the host reads first: both carry the same roster, because the
-    // registry learns of an attachment before the viewer is told about it.
-    let roster: RemoteViewersPayload = serde_json::from_slice(&host.read().await.payload).unwrap();
+    let reply = host.read_reply(request).await;
+    assert_eq!(reply.header.message_kind, MessageKind::Response);
+    let roster: RemoteViewersPayload = serde_json::from_slice(&reply.payload).unwrap();
     assert_eq!(roster.viewers.len(), 1);
     assert_eq!(roster.viewers[0].machine_name, "Air");
     assert_eq!(roster.viewers[0].sessions, vec!["s1".to_string()]);
 
-    host.send(
-        MessageKind::DisconnectViewer,
-        serde_json::json!({"viewer_id": "v-air"}),
-    )
-    .await;
-    assert_eq!(host.read().await.header.message_kind, MessageKind::Response);
+    let request = host
+        .send(
+            MessageKind::DisconnectViewer,
+            serde_json::json!({"viewer_id": "v-air"}),
+        )
+        .await;
+    assert_eq!(
+        host.read_reply(request).await.header.message_kind,
+        MessageKind::Response
+    );
 
     // The viewer's connection is gone, and it is blocked from coming back.
     assert!(
@@ -223,6 +252,142 @@ async fn a_blocked_viewer_cannot_say_hello() {
         )
         .await;
     assert_eq!(blocked.read().await.header.message_kind, MessageKind::Error);
+}
+
+/// Spec §7 invariant 3: `RemoteViewers` reaches **local** connections only —
+/// a viewer never learns that another viewer exists.
+///
+/// The whole test is arranged so that real roster frames are written while the
+/// viewers' streams are watched, because otherwise it proves nothing: an
+/// anonymous remote connection is never listed, so no roster is ever
+/// published, and a "no `RemoteViewers` arrived" assertion would hold against
+/// a daemon that pushed the roster to every writer it had. So both viewers
+/// name themselves and attach, and the host's stream is checked first to
+/// confirm the pushes really happened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_viewer_is_never_told_about_other_viewers() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, mut air, ctx, _stop) = local_and_remote_clients(root.path()).await;
+
+    air.send(
+        MessageKind::Attach,
+        serde_json::json!({"id": "s1", "after_sequence": null}),
+    )
+    .await;
+    drain_until(&mut air, MessageKind::Snapshot).await;
+
+    // A second machine, so there is another viewer to be told about at all.
+    let mut studio = connect(&ctx, ClientTrust::Remote)
+        .hello(serde_json::json!({
+            "client": "omniagent-native-macos",
+            "viewer_id": "v-studio",
+            "machine_name": "Studio"}))
+        .await;
+    studio
+        .send(
+            MessageKind::Attach,
+            serde_json::json!({"id": "s1", "after_sequence": null}),
+        )
+        .await;
+    drain_until(&mut studio, MessageKind::Snapshot).await;
+
+    // The host really is being pushed rosters — without this the assertions
+    // below would pass on a daemon that never published anything at all.
+    let mut both_machines = false;
+    while let Some(frame) = host.try_read(Duration::from_millis(500)).await {
+        assert_eq!(frame.header.message_kind, MessageKind::RemoteViewers);
+        let roster: RemoteViewersPayload = serde_json::from_slice(&frame.payload).unwrap();
+        both_machines |= roster.viewers.len() == 2;
+    }
+    assert!(
+        both_machines,
+        "the host must have been pushed a roster naming both machines"
+    );
+
+    // A local resize is the positive control: server pushes really are
+    // reaching these two connections while the roster is not.
+    ctx.registry
+        .get("s1")
+        .unwrap()
+        .resize(90, 20, 0, 0)
+        .unwrap();
+
+    for (name, viewer) in [("Air", &mut air), ("Studio", &mut studio)] {
+        let mut saw_the_resize = false;
+        while let Some(frame) = viewer.try_read(Duration::from_millis(500)).await {
+            assert_ne!(
+                frame.header.message_kind,
+                MessageKind::RemoteViewers,
+                "{name} was told about another viewer"
+            );
+            saw_the_resize |= frame.header.message_kind == MessageKind::SessionResized;
+        }
+        assert!(saw_the_resize, "{name}'s connection was live throughout");
+    }
+}
+
+/// One local client that stops draining its socket must wedge only itself.
+///
+/// Presence used to be written by a loop that held a registry-wide lock across
+/// every client's `write_frame` in turn, awaited inline in the dispatch loops.
+/// A same-UID client that simply stopped reading — a hung app, a stopped
+/// process — would then pend that write forever and take presence bookkeeping,
+/// and with it the attach/detach dispatch of every other connection including
+/// remote viewers, down with it. Each connection now owns its feed task, so
+/// this is structurally impossible rather than merely unlikely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_client_that_stops_reading_cannot_wedge_anyone_else() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, mut viewer, ctx, _stop) = local_and_remote_clients(root.path()).await;
+
+    // A second host with a tiny socket buffer that never reads a byte after
+    // its `Hello`, so its feed blocks inside `write_frame` almost at once.
+    let (stalled_client, server_side) = tokio::io::duplex(256);
+    tokio::spawn(serve_client(server_side, ctx.clone(), ClientTrust::Local));
+    let mut stalled = Duplex {
+        stream: stalled_client,
+        request: 0,
+    };
+    stalled
+        .send(
+            MessageKind::Hello,
+            serde_json::json!({"client": "omniagent-native-macos"}),
+        )
+        .await;
+
+    // Churn the roster hard enough to fill that 256-byte pipe several times
+    // over. Every one of these attach/detach round trips is a dispatch that
+    // the old design would have run through the stalled client's writer.
+    for _ in 0..8 {
+        viewer
+            .send(
+                MessageKind::Attach,
+                serde_json::json!({"id": "s1", "after_sequence": null}),
+            )
+            .await;
+        drain_until(&mut viewer, MessageKind::Snapshot).await;
+        let request = viewer
+            .send(MessageKind::Detach, serde_json::json!({"id": "s1"}))
+            .await;
+        assert_eq!(
+            viewer.read_reply(request).await.header.message_kind,
+            MessageKind::Response,
+            "the viewer's dispatch must not wait on a stalled local client"
+        );
+    }
+
+    // And the healthy host is still served, presence included.
+    let request = host
+        .send(MessageKind::ListViewers, serde_json::json!({}))
+        .await;
+    let reply = host.read_reply(request).await;
+    assert_eq!(reply.header.message_kind, MessageKind::Response);
+    let roster: RemoteViewersPayload = serde_json::from_slice(&reply.payload).unwrap();
+    assert_eq!(
+        roster.viewers.len(),
+        1,
+        "still exactly one machine watching"
+    );
 }
 
 /// Spec §7 invariant 2: `ListViewers`/`DisconnectViewer` are local-only. They
