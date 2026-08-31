@@ -25,19 +25,25 @@ struct WorkspaceTreeEntry: Equatable {
     /// call site keeps compiling and reads "not shared", which is the truth
     /// for a workspace nobody has enabled.
     let remoteControl: Bool
+    /// The machines watching a pane of this workspace right now (the phase 2
+    /// spec's §5) — the count beside the globe, and the tooltip's list.
+    /// Empty is the overwhelmingly common case and wears no badge at all.
+    let viewerNames: [String]
 
     init(
         id: String,
         label: String,
         sessions: [SessionGroupNode],
         tint: NSColor? = nil,
-        remoteControl: Bool = false
+        remoteControl: Bool = false,
+        viewerNames: [String] = []
     ) {
         self.id = id
         self.label = label
         self.sessions = sessions
         self.tint = tint
         self.remoteControl = remoteControl
+        self.viewerNames = viewerNames
     }
 }
 
@@ -81,6 +87,11 @@ final class WorkspaceRowView: ShellRowView {
     /// Held (not conditionally added) so a test can read the fact off the
     /// row the way `folderGlyph` reads the fold.
     private(set) var remoteGlyph: NSImageView
+    /// How many other Macs are watching a pane of this workspace, beside the
+    /// globe (the phase 2 spec's §5). Hidden at zero, which is nearly always
+    /// — presence is news, and a permanent "0" would be noise on every row.
+    /// Pressing it is what opens the list; the row itself only folds.
+    private(set) var viewerBadge: WorkspaceViewerBadgeView
     /// The row's context menu, built fresh per right-click by whoever can
     /// resolve the workspace — the menu reads live state (the GitHub
     /// remote, the stored customization) this row never holds.
@@ -96,12 +107,14 @@ final class WorkspaceRowView: ShellRowView {
         expanded: Bool,
         tint: NSColor? = nil,
         remoteControl: Bool = false,
-        mark: RemoteMark = .shared
+        mark: RemoteMark = .shared,
+        viewerNames: [String] = []
     ) {
         workspaceID = id
         self.mark = mark
         isExpanded = expanded
         chevron = ShellGlyphView(.chevronRight, color: ShellPalette.chevron, size: 15, lineWidth: 1.8)
+        viewerBadge = WorkspaceViewerBadgeView(count: viewerNames.count)
         remoteGlyph = NSImageView(
             image: NSImage(
                 systemSymbolName: mark.rawValue,
@@ -135,7 +148,25 @@ final class WorkspaceRowView: ShellRowView {
             ? "Remote Control is on for this workspace"
             : "This workspace lives on another Mac"
 
-        for view in [chevron, folderGlyph, titleField, remoteGlyph] { addSubview(view) }
+        // Only a workspace *this* Mac shares can be watched — a `.viewing`
+        // row is somebody else's workspace, and its viewers are their
+        // business, not something this sidebar has a roster for.
+        viewerBadge.isHidden = mark != .shared || viewerNames.isEmpty
+        viewerBadge.toolTip = viewerNames.isEmpty
+            ? nil
+            : "Watched by \(viewerNames.joined(separator: ", "))"
+
+        // A stack rather than a chain of constraints: the badge comes and
+        // goes with the roster, and `NSStackView` takes a hidden arranged
+        // subview out of the layout, so the name reclaims the space instead
+        // of stopping short of a badge that is not there.
+        let marks = NSStackView(views: [viewerBadge, remoteGlyph])
+        marks.orientation = .horizontal
+        marks.alignment = .centerY
+        marks.spacing = 5
+        marks.translatesAutoresizingMaskIntoConstraints = false
+
+        for view in [chevron, folderGlyph, titleField, marks] { addSubview(view) }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 28),
 
@@ -146,14 +177,15 @@ final class WorkspaceRowView: ShellRowView {
             folderGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             titleField.leadingAnchor.constraint(equalTo: folderGlyph.trailingAnchor, constant: 6),
-            // The title stops short of the globe whether or not it is shown:
-            // a hidden view still holds its frame, so one pair of constraints
-            // serves both states and the name never slides under the mark.
-            titleField.trailingAnchor.constraint(lessThanOrEqualTo: remoteGlyph.leadingAnchor, constant: -6),
+            // The title stops short of the marks whether or not the globe is
+            // shown: a hidden view still holds its frame, so one pair of
+            // constraints serves both states and the name never slides under
+            // the mark.
+            titleField.trailingAnchor.constraint(lessThanOrEqualTo: marks.leadingAnchor, constant: -6),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
 
-            remoteGlyph.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            remoteGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
+            marks.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            marks.centerYAnchor.constraint(equalTo: centerYAnchor),
             remoteGlyph.widthAnchor.constraint(equalToConstant: 16),
             remoteGlyph.heightAnchor.constraint(equalToConstant: 16),
         ])
@@ -167,6 +199,67 @@ final class WorkspaceRowView: ShellRowView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         onContextMenu?() ?? super.menu(for: event)
+    }
+}
+
+/// The "somebody is watching this" mark on a shared workspace row: a screen
+/// glyph and the number of machines attached to one of its panes (the phase 2
+/// spec's §5 "Host UI").
+///
+/// A control, not decoration — pressing it opens the list of machines, each
+/// with a Disconnect. It takes the click itself so the row underneath does not
+/// fold: `WorkspaceRowView` acts on `mouseUp`, and AppKit sends both halves of
+/// a click to whichever view took the `mouseDown`.
+final class WorkspaceViewerBadgeView: NSView {
+    var onPress: (() -> Void)?
+
+    /// What the badge prints — held readable so a test can check the count
+    /// without measuring a text field.
+    private(set) var countText: String
+
+    private let glyph = NSImageView(
+        image: NSImage(systemSymbolName: "display", accessibilityDescription: "Viewers") ?? NSImage()
+    )
+    private let countField: NSTextField
+
+    init(count: Int) {
+        countText = String(count)
+        countField = ShellFont.label(
+            countText,
+            font: ShellFont.ui(11, .semibold),
+            color: ShellPalette.accentBright
+        )
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = ShellPalette.accentSoft.cgColor
+
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        glyph.contentTintColor = ShellPalette.accentBright
+
+        addSubview(glyph)
+        addSubview(countField)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 16),
+            glyph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            glyph.centerYAnchor.constraint(equalTo: centerYAnchor),
+            glyph.widthAnchor.constraint(equalToConstant: 11),
+            glyph.heightAnchor.constraint(equalToConstant: 11),
+            countField.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 3),
+            countField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            countField.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(count == 1 ? "1 machine watching" : "\(count) machines watching")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func mouseDown(with event: NSEvent) {
+        onPress?()
     }
 }
 
@@ -278,6 +371,11 @@ final class WorkspacesTreeView: NSView {
     /// A remote session row's click — the machine's device id, the daemon
     /// session id and its title, for `openRemoteSession` on the controller.
     var onOpenRemoteSession: ((_ deviceID: String, _ sessionID: String, _ title: String) -> Void)?
+    /// The viewer count on a workspace row was pressed: whoever mounts the
+    /// tree opens the list of machines watching it (the phase 2 spec's §5).
+    /// Routed up like `workspaceMenuProvider` — the roster lives on the
+    /// controller, and the row holds only the names it was drawn with.
+    var onShowViewers: ((String) -> Void)?
 
     /// Collapsed workspace ids, persisted so the fold survives a relaunch.
     /// Stored inverted — absent means expanded — so a brand new workspace
@@ -397,10 +495,12 @@ final class WorkspacesTreeView: NSView {
                 label: entry.label,
                 expanded: expanded,
                 tint: entry.tint,
-                remoteControl: entry.remoteControl
+                remoteControl: entry.remoteControl,
+                viewerNames: entry.viewerNames
             )
             workspaceRow.onPress = { [weak self] in self?.toggle(entry.id) }
             workspaceRow.onContextMenu = { [weak self] in self?.workspaceMenuProvider?(entry.id) }
+            workspaceRow.viewerBadge.onPress = { [weak self] in self?.onShowViewers?(entry.id) }
             add(workspaceRow)
 
             guard expanded else { continue }
@@ -579,4 +679,190 @@ final class WorkspacesTreeView: NSView {
         guard case .session(let id) = target else { return nil }
         return rows.arrangedSubviews.first { ($0 as? SessionRowView)?.session.id == id }
     }
+
+    /// What the viewer popover hangs off — looked up live for `rowView`'s
+    /// reason. `nil` in Status and Last-updated mode, which draw no workspace
+    /// rows at all; the caller falls back to the tree itself rather than
+    /// leaving the click unanswered.
+    func viewerBadge(forWorkspace id: String) -> NSView? {
+        let row = rows.arrangedSubviews.first { ($0 as? WorkspaceRowView)?.workspaceID == id }
+        return (row as? WorkspaceRowView)?.viewerBadge
+    }
+}
+
+/// The list behind the viewer count: every machine watching this workspace,
+/// what it is attached to, how long it has been there, and a Disconnect —
+/// the phase 2 spec's §5 "Host UI" popover.
+///
+/// Plain AppKit in the app's own palette rather than the liquid-glass ask
+/// overlay: this is a list you can dismiss by clicking away, not a modal
+/// question, and `NSPopover` already supplies the anchoring, the arrow, the
+/// dark material and the click-away for free.
+final class RemoteViewersView: NSView {
+    /// One machine, already resolved: the daemon's roster carries pane *ids*,
+    /// and only the window controller can turn those into the titles a person
+    /// recognises.
+    struct Row: Equatable {
+        let viewerID: String
+        let machineName: String
+        /// RFC 3339, from the daemon.
+        let since: String
+        let paneTitles: [String]
+    }
+
+    static let footer = "Blocked until you turn Remote Control off and on again."
+
+    /// Readable so a test can check the list without walking the stack view.
+    private(set) var machineNames: [String] = []
+    private(set) var paneLines: [String] = []
+    private(set) var disconnectButtons: [NSButton] = []
+    var footerText: String { footerField.stringValue }
+
+    private let footerField = ShellFont.label(
+        RemoteViewersView.footer,
+        font: ShellFont.ui(10.5),
+        color: ShellPalette.inkFaint
+    )
+    private let onDisconnect: (String) -> Void
+
+    init(rows: [Row], now: Date = Date(), onDisconnect: @escaping (String) -> Void) {
+        self.onDisconnect = onDisconnect
+        super.init(frame: .zero)
+
+        let list = NSStackView()
+        list.orientation = .vertical
+        list.alignment = .leading
+        list.spacing = 10
+        list.translatesAutoresizingMaskIntoConstraints = false
+
+        let heading = ShellFont.label(
+            rows.count == 1 ? "1 machine watching" : "\(rows.count) machines watching",
+            font: ShellFont.ui(12, .semibold),
+            color: ShellPalette.ink
+        )
+        list.addArrangedSubview(heading)
+
+        for row in rows {
+            machineNames.append(row.machineName)
+            // "Not attached" rather than an empty line: a viewer that has
+            // opened the machine but no session is connected and kickable,
+            // and a blank second line would read as a rendering bug.
+            let panes = row.paneTitles.isEmpty ? "Not attached" : row.paneTitles.joined(separator: ", ")
+            paneLines.append(panes)
+
+            let name = ShellFont.label(
+                row.machineName,
+                font: ShellFont.ui(12.5, .semibold),
+                color: ShellPalette.inkFile
+            )
+            let connected = Self.connectedText(since: row.since, now: now)
+            let where_ = ShellFont.label(
+                connected.isEmpty ? panes : "\(panes) · \(connected)",
+                font: ShellFont.ui(11),
+                color: ShellPalette.inkTertiary
+            )
+            let text = NSStackView(views: [name, where_])
+            text.orientation = .vertical
+            text.alignment = .leading
+            text.spacing = 1
+
+            let button = NSButton(title: "Disconnect", target: self, action: #selector(disconnect(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = ShellFont.ui(11, .medium)
+            // The viewer id travels on the button rather than in a captured
+            // closure, so which machine a press kicks is a fact the button
+            // carries and a test can read.
+            button.identifier = NSUserInterfaceItemIdentifier(row.viewerID)
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            disconnectButtons.append(button)
+
+            let line = NSStackView(views: [text, NSView(), button])
+            line.orientation = .horizontal
+            line.alignment = .centerY
+            line.spacing = 12
+            line.translatesAutoresizingMaskIntoConstraints = false
+            list.addArrangedSubview(line)
+            line.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true
+        }
+
+        list.addArrangedSubview(footerField)
+
+        addSubview(list)
+        NSLayoutConstraint.activate([
+            list.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            list.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            list.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            list.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 300),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    @objc private func disconnect(_ sender: NSButton) {
+        guard let viewerID = sender.identifier?.rawValue else { return }
+        onDisconnect(viewerID)
+    }
+
+    /// How long a machine has been watching, said plainly. Hand-rolled rather
+    /// than `RelativeDateTimeFormatter`, whose output is locale- and
+    /// version-dependent — this is one short line beside a machine name, and
+    /// a test may as well be able to assert it.
+    ///
+    /// An unparseable `since` prints nothing at all: a wrong duration is
+    /// worse than no duration.
+    static func connectedText(since: String, now: Date) -> String {
+        guard let start = iso8601.date(from: since) ?? iso8601Fractional.date(from: since) else { return "" }
+        let seconds = max(0, now.timeIntervalSince(start))
+        if seconds < 60 { return "Just connected" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes) min" }
+        let hours = minutes / 60
+        let rest = minutes % 60
+        return rest == 0 ? "\(hours) hr" : "\(hours) hr \(rest) min"
+    }
+
+    private static let iso8601 = ISO8601DateFormatter()
+    private static let iso8601Fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+}
+
+/// The popover that carries `RemoteViewersView` — `HomeDropdown.show`'s
+/// shape, for its reasons: one retained popover, dark vibrancy over the
+/// system's own rounded material, transient dismissal.
+enum RemoteViewersPopover {
+    private static var current: NSPopover?
+
+    @discardableResult
+    static func show(
+        rows: [RemoteViewersView.Row],
+        from anchor: NSView,
+        onDisconnect: @escaping (String) -> Void
+    ) -> RemoteViewersView {
+        current?.performClose(nil)
+        let popover = NSPopover()
+        current = popover
+        let content = RemoteViewersView(rows: rows, onDisconnect: onDisconnect)
+        let controller = NSViewController()
+        controller.view = content
+        popover.contentViewController = controller
+        popover.behavior = .transient
+        popover.appearance = NSAppearance(named: .vibrantDark)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxX)
+        return content
+    }
+
+    static func dismiss() {
+        current?.performClose(nil)
+        current = nil
+    }
+
+    /// Whether a viewer list is on screen right now — what tells a roster
+    /// change whether it has a popover to refresh.
+    static var isShown: Bool { current?.isShown == true }
 }

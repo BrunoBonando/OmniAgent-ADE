@@ -169,4 +169,22 @@ enum SettingsKey {
     /// hash, so this row is the only copy. Deleting the server-side row
     /// revokes the machine everywhere.
     static let relayDeviceToken = "relay_device_token"
+
+    /// **A contract with the Rust daemon, written from both sides** — the
+    /// phase 2 spec's §5 "Disconnect = kick and block"
+    /// (docs/superpowers/specs/2026-08-31-remote-session-control-phase-2-design.md).
+    /// The viewer ids this Mac refuses, as a JSON array of strings.
+    ///
+    /// The daemon *adds* to it (it is the enforcer, and a kick has to hold
+    /// with the app closed) and refuses a `Hello` carrying a listed viewer
+    /// id. The app only ever *clears* it — one `"[]"` whenever Remote Control
+    /// is switched on for any workspace, which is the deliberate act that
+    /// forgives every kicked machine. Global rather than per-workspace: it
+    /// answers "which machines may not reach this Mac".
+    ///
+    /// Both sides writing one small array is safe here — the two writes are a
+    /// human action apart — but the clear must bypass `write(_:to:)`'s
+    /// no-change suppression, since the app having last written `"[]"` is no
+    /// evidence that the row on disk still is.
+    static let remoteControlBlocked = "remote_control_blocked"
 }

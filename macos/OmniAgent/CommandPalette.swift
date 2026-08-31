@@ -68,9 +68,40 @@ enum PaletteAction: Equatable {
     /// A Help page — the privacy policy or the third-party notices — opened
     /// in the default browser.
     case openLegal(LegalDocument)
+    /// One of the View menu's three remote-pane zoom items. Zoom is what a
+    /// viewer has *instead* of a resize (the phase 2 spec's §1), so these
+    /// rows exist only while a remote pane has focus — which is also why they
+    /// are here at all: the standing "Spotlight finds everything" rule, over
+    /// a command with no other home than a menu the pane may not have raised.
+    case zoomRemotePane(RemoteZoom)
     /// An informational row with nothing to run ("No matches…") — a
     /// no-op rather than reusing an unrelated action for "does nothing".
     case noop
+}
+
+/// The three zoom steps a remote pane has, each one the View menu item of the
+/// same name. Named rather than `in`/`out` because `in` is a keyword and a
+/// backticked case would read worse everywhere it is used.
+enum RemoteZoom: String, CaseIterable, Equatable {
+    case magnify
+    case shrink
+    case fit
+
+    var title: String {
+        switch self {
+        case .magnify: return "Zoom In"
+        case .shrink: return "Zoom Out"
+        case .fit: return "Actual Fit"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .magnify: return "plus.magnifyingglass"
+        case .shrink: return "minus.magnifyingglass"
+        case .fit: return "1.magnifyingglass"
+        }
+    }
 }
 
 /// The heading a row sits under, in the order the sections appear. Spotlight
@@ -353,7 +384,11 @@ struct CommandPaletteModel: Equatable {
         /// What the relay reports online right now — every machine and each
         /// of its shared sessions becomes a row (the remote-session-control
         /// spec's §4 "Spotlight").
-        remoteMachines: [PaletteRemoteMachine] = []
+        remoteMachines: [PaletteRemoteMachine] = [],
+        /// Whether the focused pane is another Mac's terminal, which decides
+        /// whether the View menu's zoom items are rows — the same
+        /// one-row-only-where-it-can-be-taken rule the account rows follow.
+        remotePaneFocused: Bool = false
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -667,6 +702,28 @@ struct CommandPaletteModel: Equatable {
                     symbol: "person.crop.circle.badge.minus"
                 )
             )
+        }
+        // The View menu's zoom items, while there is a remote pane to zoom.
+        // A viewer never resizes the host's grid — it draws all of it, scaled
+        // — so these three are the only size control a watched session has,
+        // and the standing rule says every one of them is findable. Absent on
+        // a local pane for the reason `validateMenuItem` greys them there:
+        // there is no scale to change.
+        if remotePaneFocused {
+            for zoom in RemoteZoom.allCases {
+                commands.append(
+                    PaletteCommand(
+                        id: "view:zoom:\(zoom.rawValue)",
+                        title: zoom.title,
+                        detail: nil,
+                        action: .zoomRemotePane(zoom),
+                        keywords: "zoom remote scale magnify fit view pane",
+                        section: .places,
+                        subtitle: "View",
+                        symbol: zoom.symbol
+                    )
+                )
+            }
         }
         // The Help menu's two pages. Everything navigable is findable, and a
         // privacy policy nobody can locate is the same as not having one.

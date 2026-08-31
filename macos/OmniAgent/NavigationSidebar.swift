@@ -993,6 +993,10 @@ final class NavigationSidebarView: NSView {
     /// picker of the other Macs' shared sessions
     /// (`RemoteSessionPickerController`).
     var onResumeRemoteSession: (() -> Void)?
+    /// A workspace row's viewer count was pressed — the controller opens the
+    /// list of machines watching it (the phase 2 spec's §5). Same contract as
+    /// `workspaceMenuProvider`: the roster lives on the controller.
+    var onShowViewers: ((String) -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
@@ -1074,6 +1078,7 @@ final class NavigationSidebarView: NSView {
         workspacesTree.onOpenRemoteSession = { [weak self] deviceID, sessionID, title in
             self?.onOpenRemoteSession?(deviceID, sessionID, title)
         }
+        workspacesTree.onShowViewers = { [weak self] id in self?.onShowViewers?(id) }
 
         // The ground first, so every row above sits on it. Sized in `layout`
         // rather than by an autoresizing mask: the mask scales from this
@@ -1181,7 +1186,11 @@ final class NavigationSidebarView: NSView {
         customizations: [String: WorkspaceCustomization] = [:],
         sessionMeta: [String: SessionMeta] = [:],
         remoteControlWorkspaceIDs: Set<String> = [],
-        remoteMachines: [RemoteMachineTreeEntry] = []
+        remoteMachines: [RemoteMachineTreeEntry] = [],
+        /// Which machines are watching each workspace right now, workspace
+        /// id -> machine names (the phase 2 spec's §5). Empty for all but the
+        /// rare shared workspace with a viewer on it.
+        remoteViewerNames: [String: [String]] = [:]
     ) {
         let grouped = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
         var entries: [WorkspaceTreeEntry] = []
@@ -1195,7 +1204,8 @@ final class NavigationSidebarView: NSView {
                     label: custom?.displayName ?? workspace.label,
                     sessions: grouped.first { $0.project == workspace.id }?.sessions ?? [],
                     tint: custom?.color?.tint,
-                    remoteControl: remoteControlWorkspaceIDs.contains(workspace.id)
+                    remoteControl: remoteControlWorkspaceIDs.contains(workspace.id),
+                    viewerNames: remoteViewerNames[workspace.id] ?? []
                 )
             )
         }
@@ -1208,7 +1218,8 @@ final class NavigationSidebarView: NSView {
                         ?? SessionOutline.projectLabel(node.project, labels: projectLabels),
                     sessions: node.sessions,
                     tint: custom?.color?.tint,
-                    remoteControl: remoteControlWorkspaceIDs.contains(node.project)
+                    remoteControl: remoteControlWorkspaceIDs.contains(node.project),
+                    viewerNames: remoteViewerNames[node.project] ?? []
                 )
             )
         }
