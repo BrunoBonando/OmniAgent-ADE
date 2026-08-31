@@ -200,9 +200,14 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
     private var pendingDrawSequence: UInt64 = 0
     private var pendingResize: PendingResize?
 
+    /// The container a remote pane's terminal is scaled by; `nil` for a local
+    /// pane, which is the flag every branch below tests. See "The host's grid".
+    private let scaleHost: NSView?
+
     init(connection: SessionConnection, sessionID: String) {
         self.connection = connection
         self.sessionID = sessionID
+        self.scaleHost = connection.isRemote ? NSView(frame: .zero) : nil
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(
@@ -260,6 +265,22 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
         // the value it already holds — so the newest pane would have been the
         // one blinking on its own until it lost focus once.
         applyCursorBlink()
+        if let scaleHost {
+            // A remote pane draws the host's grid scaled (§1): the terminal and
+            // the echo overlay above it move into a container whose *bounds*
+            // are that grid at its true size and whose *frame* is the box it is
+            // drawn in. AppKit's own scale, not a raw layer transform: a
+            // transform is invisible to `hitTest` and to `convert(_:from:)`, so
+            // every click and drag selection would land in the wrong cell.
+            // The wash stays on the pane so it covers the letterbox too.
+            scaleHost.addSubview(terminalView)
+            scaleHost.addSubview(echoOverlay, positioned: .above, relativeTo: terminalView)
+            addSubview(scaleHost, positioned: .below, relativeTo: wash)
+            // Zoomed past the fit the grid is bigger than the pane; the
+            // overflow belongs to this pane and stops at its edge.
+            layer?.masksToBounds = true
+            listenForHostGrid()
+        }
     }
 
     private func applyCursorBlink() {
@@ -298,6 +319,13 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
     /// terminal in the same turn the pointer moved, not on the next layout pass.
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
+        // A remote pane's terminal is the host's grid, not this pane's: only
+        // the scale it is drawn at changes when the pane resizes.
+        guard scaleHost == nil else {
+            wash.frame = bounds
+            applyRemoteFit()
+            return
+        }
         terminalView.frame = bounds
         echoOverlay.frame = bounds
         wash.frame = bounds
@@ -310,6 +338,9 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // The rasterization scale is `fit.scale × backingScaleFactor`, and the
+        // window is where the second half comes from.
+        if scaleHost != nil, window != nil { applyRemoteFit() }
         guard window != nil, !attemptedMetal else { return }
         attemptedMetal = true
         do {
@@ -323,6 +354,13 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
                 error.localizedDescription
             )
         }
+    }
+
+    /// A move between displays of different scales changes what
+    /// `metalScaleFactorOverride` has to be. No-op for a local pane.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if scaleHost != nil { applyRemoteFit() }
     }
 
     func feed(_ bytes: Data, isSnapshot: Bool, sequence: UInt64 = 0) {
@@ -396,6 +434,13 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
     /// Sends the most recent geometry, once. Intermediate sizes a drag passed
     /// through are never sent — the PTY only needs where the divider landed.
     func flushResize() {
+        // A viewer never resizes the shared grid (phase 2 §1, "The viewer
+        // never sends `Resize`"): the session belongs to the host, one grid
+        // exists, and a second Mac's smaller window collapsing the host's
+        // terminal into a column is the defect this closes. Defence in depth —
+        // `authorize_remote` refuses `Resize` from a remote client too — and
+        // the reason this is the *only* caller of `connection.resize`.
+        guard !connection.isRemote else { return }
         guard let resize = pendingResize else { return }
         pendingResize = nil
         resizeSendCount += 1
@@ -414,6 +459,206 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
             Int(resize.cols),
             Int(resize.rows)
         )
+    }
+
+    // MARK: The host's grid
+
+    /// The host's `cols × rows` for this session, from a `SessionResized`
+    /// push — `nil` until the first one lands, which the daemon sends on
+    /// attach, just before the snapshot.
+    ///
+    /// A local pane ignores it: the daemon pushes the size to local
+    /// connections too, and there the view drives the grid, not the other way
+    /// around.
+    var remoteGrid: (cols: UInt16, rows: UInt16)? {
+        didSet {
+            guard scaleHost != nil else { return }
+            guard remoteGrid?.cols != oldValue?.cols || remoteGrid?.rows != oldValue?.rows else { return }
+            applyRemoteFit()
+        }
+    }
+
+    /// What this pane is drawing right now: the host's grid at its true size,
+    /// the scale it is shown at, and where it sits. `nil` on a local pane.
+    private(set) var remoteFit: RemoteTerminalScaler.Fit?
+
+    private var scaler = RemoteTerminalScaler()
+
+    /// Pins the terminal to the host's grid and scales the container around it
+    /// into whatever space the pane has (§1, "Rendering mechanics").
+    ///
+    /// The terminal view's own frame stays the grid's *true* size, because
+    /// SwiftTerm re-derives `cols`/`rows` from `bounds ÷ cell` on every
+    /// `setFrameSize` and there is no fixed-grid mode to ask for: the way to
+    /// pin a grid is to hand the view the frame whose arithmetic yields the
+    /// host's numbers. The container's bounds/frame ratio does the scaling.
+    private func applyRemoteFit() {
+        guard let scaleHost, bounds.width > 0, bounds.height > 0 else { return }
+        // Until the host's grid lands — the daemon sends it on attach, just
+        // before the snapshot — the pane is laid out like any other terminal.
+        // Nothing is sent to the host either way; `flushResize` sees to that.
+        guard let grid = remoteGrid, let cell = swiftTermCellSize else {
+            remoteFit = nil
+            scaleHost.frame = bounds
+            scaleHost.bounds = CGRect(origin: .zero, size: bounds.size)
+            terminalView.frame = scaleHost.bounds
+            echoOverlay.frame = scaleHost.bounds
+            terminalView.metalScaleFactorOverride = nil
+            return
+        }
+        // SwiftTerm keeps `reservedScrollerWidth` for its scroll indicator
+        // *inside* the terminal's frame (`getEffectiveWidth`), so it is not
+        // part of the grid: the fit is computed on the pane minus that strip
+        // and the strip is added back onto the frame. It draws nothing, so the
+        // grid still reads as centred with it hanging off the trailing edge.
+        let chrome = reservedScrollerWidth
+        let fit = RemoteTerminalScaler.fit(
+            hostCols: Int(grid.cols),
+            hostRows: Int(grid.rows),
+            cell: cell,
+            pane: CGSize(width: max(0, bounds.width - chrome), height: bounds.height),
+            zoom: scaler.zoom
+        )
+        remoteFit = fit
+        // Half a point of slack: SwiftTerm divides the frame by the cell and
+        // truncates, and `cols × cell ÷ cell` does not always round-trip in
+        // binary floating point — a grid short by one column is the whole
+        // failure this task exists to prevent.
+        let unscaled = CGSize(
+            width: fit.terminalSize.width + chrome + 0.5,
+            height: fit.terminalSize.height + 0.5
+        )
+        let drawn = CGSize(width: unscaled.width * fit.scale, height: unscaled.height * fit.scale)
+        // `fit.origin` centres the grid at its true size; once `scale` has
+        // shrunk it, the leftover is letterboxed here so the host's screen
+        // sits in the middle of the pane rather than in a corner — never
+        // above where the fit put it, which is where a zoom past the fit
+        // (drawn wider than the pane) pins it.
+        scaleHost.frame = CGRect(
+            origin: CGPoint(
+                x: max(fit.origin.x, (bounds.width - drawn.width) / 2),
+                y: max(fit.origin.y, (bounds.height - drawn.height) / 2)
+            ),
+            size: drawn
+        )
+        // Set after the frame, and deliberately: the bounds size against a
+        // smaller frame *is* the scale, and setting the frame would otherwise
+        // rewrite it.
+        scaleHost.bounds = CGRect(origin: .zero, size: unscaled)
+        terminalView.frame = scaleHost.bounds
+        echoOverlay.frame = scaleHost.bounds
+        // This fork exposes the override for exactly this case — "client
+        // applications that apply their own view transforms" — so Metal
+        // rasterizes glyphs at the pixels they are shown at instead of
+        // rendering the grid full size and letting the compositor squash it.
+        terminalView.metalScaleFactorOverride = fit.scale * (window?.backingScaleFactor ?? 2)
+    }
+
+    /// SwiftTerm's cell, in points, read back out of the frame it says its
+    /// current grid wants: `cellDimension` is internal, but
+    /// `getOptimalFrameSize` is `cell × grid` plus the scroller strip.
+    private var swiftTermCellSize: CGSize? {
+        let terminal: Terminal = terminalView.terminal
+        let cols = CGFloat(terminal.cols)
+        let rows = CGFloat(terminal.rows)
+        guard cols > 0, rows > 0 else { return nil }
+        let optimal = terminalView.getOptimalFrameSize().size
+        let cell = CGSize(
+            width: (optimal.width - reservedScrollerWidth) / cols,
+            height: optimal.height / rows
+        )
+        guard cell.width > 0, cell.height > 0 else { return nil }
+        return cell
+    }
+
+    /// The width SwiftTerm holds back for its scroll indicator inside the
+    /// terminal's own frame — the same arithmetic as its private
+    /// `reservedScrollerWidth`, which the grid must not be charged for.
+    private var reservedScrollerWidth: CGFloat {
+        NSScroller.scrollerWidth(for: .regular, scrollerStyle: terminalView.scrollerStyle)
+    }
+
+    /// Takes `SessionResized` off the machine's connection.
+    ///
+    /// `onSessionSize` is one closure and a machine's connection is shared by
+    /// every pane open on it, so the surfaces register against the connection
+    /// and the closure — reinstalled by each registration, identical every
+    /// time — hands each push to whichever pane owns that session id. Held
+    /// weakly, so a closed pane drops out on its own. `remoteGrid` stays
+    /// settable from outside for the day the window controller routes this
+    /// push the way it routes `onTerminalData`.
+    private func listenForHostGrid() {
+        let key = ObjectIdentifier(connection)
+        var listeners = (Self.hostGridListeners[key] ?? []).filter { $0.surface != nil }
+        listeners.append(WeakSurface(surface: self))
+        Self.hostGridListeners[key] = listeners
+        // Captures the key — a bare address — and not the connection, which
+        // owns this closure.
+        connection.onSessionSize = { id, cols, rows in
+            let live = (Self.hostGridListeners[key] ?? []).filter { $0.surface != nil }
+            Self.hostGridListeners[key] = live
+            for entry in live where entry.surface?.sessionID == id {
+                entry.surface?.remoteGrid = (cols: cols, rows: rows)
+            }
+        }
+    }
+
+    private struct WeakSurface {
+        weak var surface: TerminalSurfaceView?
+    }
+
+    /// Main-thread only, like every callback `SessionConnection` delivers.
+    private static var hostGridListeners: [ObjectIdentifier: [WeakSurface]] = [:]
+
+    // MARK: Zoom (remote panes only)
+
+    /// ⌘+ — magnify past the fit. Never a resize: the grid is the host's
+    /// whatever this pane shows it at.
+    @objc func zoomInRemoteTerminal(_ sender: Any?) {
+        stepRemoteZoom(by: Self.zoomStep)
+    }
+
+    /// ⌘−
+    @objc func zoomOutRemoteTerminal(_ sender: Any?) {
+        stepRemoteZoom(by: 1 / Self.zoomStep)
+    }
+
+    /// ⌘0 — back to the whole screen, fitted.
+    @objc func resetRemoteTerminalZoom(_ sender: Any?) {
+        guard scaleHost != nil else { return }
+        scaler.resetZoom()
+        applyRemoteFit()
+    }
+
+    private static let zoomStep: CGFloat = 1.25
+
+    private func stepRemoteZoom(by factor: CGFloat) {
+        guard scaleHost != nil else { return }
+        scaler.stepZoom(by: factor, from: remoteFit?.scale ?? 1)
+        applyRemoteFit()
+    }
+
+    /// The zoom chords, taken here rather than from a menu: nothing in the
+    /// main menu binds ⌘+ / ⌘− and ⌘0 is Pane 10, and a remote pane that has
+    /// focus wants all three for the screen it is showing. Only ever for a
+    /// focused remote pane — a local pane never sees this and keeps ⌘0.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard scaleHost != nil,
+              window?.firstResponder === terminalView,
+              event.modifierFlags.intersection([.command, .option, .control]) == .command,
+              let action = Self.zoomAction(for: event.charactersIgnoringModifiers)
+        else { return super.performKeyEquivalent(with: event) }
+        action(self)
+        return true
+    }
+
+    private static func zoomAction(for characters: String?) -> ((TerminalSurfaceView) -> Void)? {
+        switch characters {
+        case "+", "=": return { $0.zoomInRemoteTerminal(nil) }
+        case "-", "_": return { $0.zoomOutRemoteTerminal(nil) }
+        case "0": return { $0.resetRemoteTerminalZoom(nil) }
+        default: return nil
+        }
     }
 
     /// Whether anything has been typed at this terminal. What decides if
@@ -929,6 +1174,13 @@ final class TerminalSurfaceView: NSView, TerminalViewDelegate, NSMenuItemValidat
         switch menuItem.action {
         case #selector(killSession(_:)):
             return !connection.isRemote
+        case #selector(zoomInRemoteTerminal(_:)),
+             #selector(zoomOutRemoteTerminal(_:)),
+             #selector(resetRemoteTerminalZoom(_:)):
+            // Zoom is what a viewer has *instead* of a resize (§1). A local
+            // pane has no scale to change — it is already 1:1 — so the items
+            // grey out rather than doing nothing.
+            return scaleHost != nil
         default:
             return true
         }
