@@ -289,7 +289,7 @@ async fn un_sharing_an_attached_session_stops_its_output_without_a_frame_from_th
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_remote_client_may_not_resize_a_shared_session() {
     let root = tempfile::tempdir().unwrap();
-    let (mut client, _ctx, _stop) = remote_client(root.path(), "cat").await;
+    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
     client
         .send(
             MessageKind::Resize,
@@ -301,6 +301,14 @@ async fn a_remote_client_may_not_resize_a_shared_session() {
         reply.header.message_kind,
         MessageKind::Error,
         "the host owns the grid: a viewer's window must never resize it"
+    );
+    // The reply is only half the claim. Sessions are created 80×24
+    // (`command_session`), so an unchanged grid is what proves the deny
+    // happened before the registry rather than alongside it.
+    assert_eq!(
+        ctx.registry.get("s1").unwrap().size(),
+        (80, 24),
+        "the deny must mean the grid did not move"
     );
 }
 

@@ -176,8 +176,14 @@ impl ConnectionRegistry {
     /// `HashSet` order — successive pushes would otherwise reshuffle the
     /// host's list under the pointer.
     pub fn viewers(&self) -> Vec<ViewerSummaryPayload> {
+        Self::roster_of(&self.entries())
+    }
+
+    /// [`Self::viewers`], but off a guard the caller already holds — so a
+    /// snapshot and the publish that follows it can be one atomic section.
+    fn roster_of(entries: &HashMap<u64, ConnectionEntry>) -> Vec<ViewerSummaryPayload> {
         let mut machines: HashMap<String, (String, SystemTime, BTreeSet<String>)> = HashMap::new();
-        for entry in self.entries().values() {
+        for entry in entries.values() {
             let Some(viewer) = entry.viewer.as_ref().filter(|_| entry.is_listed_viewer()) else {
                 continue;
             };
@@ -212,11 +218,28 @@ impl ConnectionRegistry {
     /// `watch` channel and returns. Nothing here can wait on a client, so no
     /// connection — local or remote — can have its presence bookkeeping, or
     /// its attach/detach dispatch, held up by a peer that has stopped reading.
+    ///
+    /// **Snapshot and publish happen together, under the entries lock.** They
+    /// used to be two steps with the lock dropped in between, which let two
+    /// concurrent publishers — the realistic pair being a dying socket's
+    /// removal racing its replacement's attach during a reconnect — read in
+    /// one order and publish in the other, leaving the channel's *final*
+    /// value the older roster until something else changed. Holding the guard
+    /// across `send_replace` makes the section atomic, so the last value
+    /// published is always the newest state read. Both halves are synchronous
+    /// and non-blocking, and no watch receiver ever calls back into the
+    /// registry, so there is no lock cycle to deadlock on.
+    ///
+    /// Delivery to each feed remains latest-wins: a receiver observes the
+    /// current roster, not a backlog, and rapid changes may collapse into one
+    /// frame.
     pub fn notify_presence(&self) {
+        let entries = self.entries();
         let roster = Arc::new(RemoteViewersPayload {
-            viewers: self.viewers(),
+            viewers: Self::roster_of(&entries),
         });
         self.roster.send_replace(roster);
+        drop(entries);
     }
 
     /// The roster feed for one connection, or `None` when it must never have
@@ -232,19 +255,27 @@ impl ConnectionRegistry {
         (trust == ClientTrust::Local).then(|| self.roster.subscribe())
     }
 
-    /// Drops every connection with this viewer id, returning whether there was
-    /// one. The entries go here, not when each `serve_client` notices its
-    /// token — so the roster published straight after a kick is already
-    /// correct.
+    /// Drops every **remote** connection with this viewer id, returning
+    /// whether there was one. The entries go here, not when each
+    /// `serve_client` notices its token — so the roster published straight
+    /// after a kick is already correct.
+    ///
+    /// The trust filter is structural, not decorative: `serve_client` calls
+    /// [`Self::set_viewer`] for local connections too (a host may name
+    /// itself), so matching on viewer id alone would let a
+    /// `DisconnectViewer` naming the host's own id drop the local app's
+    /// connection. Nothing sends that today; the way to keep it that way is
+    /// for the kick to be unable to reach a local entry at all.
     pub fn cancel_viewer(&self, viewer_id: &str) -> bool {
         let mut entries = self.entries();
         let kicked: Vec<u64> = entries
             .iter()
             .filter(|(_, entry)| {
-                entry
-                    .viewer
-                    .as_ref()
-                    .is_some_and(|viewer| viewer.viewer_id == viewer_id)
+                entry.trust == ClientTrust::Remote
+                    && entry
+                        .viewer
+                        .as_ref()
+                        .is_some_and(|viewer| viewer.viewer_id == viewer_id)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -254,17 +285,6 @@ impl ConnectionRegistry {
             }
         }
         !kicked.is_empty()
-    }
-
-    /// Whether this viewer id is currently connected — the post-registration
-    /// half of the kick's race check (`server.rs`).
-    pub fn is_connected(&self, viewer_id: &str) -> bool {
-        self.entries().values().any(|entry| {
-            entry
-                .viewer
-                .as_ref()
-                .is_some_and(|viewer| viewer.viewer_id == viewer_id)
-        })
     }
 }
 
@@ -280,11 +300,13 @@ impl ConnectionRegistry {
 /// unlikely.
 ///
 /// **The ordering that is kept** is the one that matters: a client's *last*
-/// roster is always the newest one published, because `watch` hands the task
-/// the latest value rather than a backlog. Intermediate rosters may be skipped
-/// when changes arrive faster than a client drains — which is right, since a
-/// roster states the present rather than recording an event — and every frame
-/// written is internally consistent.
+/// roster is the newest state any publisher read, because
+/// [`ConnectionRegistry::notify_presence`] snapshots and publishes atomically
+/// under the entries lock, and `watch` then hands this task the latest value
+/// rather than a backlog. Intermediate rosters may be skipped when changes
+/// arrive faster than a client drains — which is right, since a roster states
+/// the present rather than recording an event — and every frame written is
+/// internally consistent.
 pub struct PresenceFeed(JoinHandle<()>);
 
 impl Drop for PresenceFeed {
@@ -391,9 +413,7 @@ mod tests {
         assert_eq!(viewers[0].sessions, ["s1".to_string(), "s2".to_string()]);
 
         // And one Disconnect ends both, which is why they are one row.
-        assert!(registry.is_connected("v-air"));
         assert!(registry.cancel_viewer("v-air"));
-        assert!(!registry.is_connected("v-air"));
         assert!(registry.viewers().is_empty());
         assert!(!registry.cancel_viewer("v-air"), "nothing left to kick");
     }
@@ -419,6 +439,29 @@ mod tests {
         );
     }
 
+    /// A kick reaches viewers only. `serve_client` calls `set_viewer` for
+    /// local connections too, so a `DisconnectViewer` naming the host's own
+    /// viewer id must find nothing to cancel rather than dropping the app.
+    #[test]
+    fn a_kick_cannot_reach_a_local_connection_sharing_the_viewer_id() {
+        let registry = ConnectionRegistry::default();
+        let host_cancel = CancellationToken::new();
+        let host = registry.register(ClientTrust::Local, host_cancel.clone());
+        registry.set_viewer(host, viewer("v-shared", "Studio"));
+
+        assert!(
+            !registry.cancel_viewer("v-shared"),
+            "a local connection is not a viewer, so there was nothing to kick"
+        );
+        assert!(!host_cancel.is_cancelled(), "the host's socket survives");
+
+        // And the same id on a remote connection still goes, host or no host.
+        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        registry.set_viewer(air, viewer("v-shared", "Air"));
+        assert!(registry.cancel_viewer("v-shared"));
+        assert!(!host_cancel.is_cancelled(), "and the host still survives");
+    }
+
     /// Publishing is non-blocking even with nobody listening, and a feed that
     /// subscribes later still opens on the current roster rather than an empty
     /// one.
@@ -431,5 +474,45 @@ mod tests {
 
         let updates = registry.presence_updates(ClientTrust::Local).unwrap();
         assert_eq!(updates.borrow().viewers.len(), 1);
+    }
+
+    /// The published value is the newest state, never a stale snapshot.
+    ///
+    /// This is the observable half of the fix in `notify_presence`. The
+    /// *interleaving* half — two publishers reading in one order and
+    /// publishing in the other — is not something a test can pin without
+    /// scheduling both threads by hand; it is closed structurally instead, by
+    /// snapshotting and calling `send_replace` under one entries guard, so
+    /// there is no window between the read and the publish for another
+    /// publisher to slip into. What this asserts is the property that window
+    /// used to break: after a sequence of changes, the channel's final value
+    /// describes the final state.
+    #[test]
+    fn the_last_published_roster_is_the_newest_one() {
+        let registry = ConnectionRegistry::default();
+        let updates = registry.presence_updates(ClientTrust::Local).unwrap();
+
+        let old = registry.register(ClientTrust::Remote, CancellationToken::new());
+        registry.set_viewer(old, viewer("v-air", "Air"));
+        registry.notify_presence();
+        assert_eq!(updates.borrow().viewers.len(), 1);
+
+        // The reconnect: the replacement attaches, the dead socket is reaped.
+        let new = registry.register(ClientTrust::Remote, CancellationToken::new());
+        registry.set_viewer(new, viewer("v-mini", "Mini"));
+        registry.notify_presence();
+        registry.remove(old);
+        registry.notify_presence();
+
+        let roster = updates.borrow().clone();
+        assert_eq!(
+            roster
+                .viewers
+                .iter()
+                .map(|v| &v.viewer_id)
+                .collect::<Vec<_>>(),
+            ["v-mini"],
+            "the value left in the channel is the roster after the last change"
+        );
     }
 }
