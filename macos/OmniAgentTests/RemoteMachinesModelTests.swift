@@ -55,8 +55,36 @@ private final class FakeRemoteConnection: RemoteConnection {
     var projectionJSON: String? = RemoteMachinesModelTests.projectionA
     /// `nil` answers every read with `.failure` — a socket that is not up yet.
     var readError: Error?
+    /// What this socket does when the model dials it. Silence by default —
+    /// a dial that neither lands nor fails, which is every test written
+    /// before the state of the socket mattered.
+    private var dialOutcome: (() -> Void)?
 
-    func connect() { connectCalls += 1 }
+    /// The relay refusing the upgrade *without* refusing the bearer — its
+    /// 403 for "that device's control channel is not registered yet", the
+    /// race a viewer loses whenever it polls before the host's daemon has
+    /// opened its control socket. The real connection reports `.disconnected`
+    /// and keeps retrying on its own backoff (`SessionConnection`'s
+    /// `isTokenRefusal`), so the model sees a socket that is simply down.
+    func simulateRefusedDial() {
+        dialOutcome = { [weak self] in self?.onStateChange?(.disconnected) }
+    }
+
+    /// A real 401: the relay looked at the bearer and refused it. The
+    /// connection closes — `.disconnected` first, then the error, the order
+    /// `closeConnection(error:)` reports them in — and stops retrying.
+    func simulateTokenRefusal() {
+        dialOutcome = { [weak self] in
+            self?.onStateChange?(.disconnected)
+            self?.onError?(SessionConnectionError.unauthorized)
+        }
+    }
+
+    func connect() {
+        connectCalls += 1
+        dialOutcome?()
+    }
+
     func disconnect() { disconnectCalls += 1 }
 
     func getSetting(key: String, completion: @escaping (Result<String?, Error>) -> Void) {
@@ -374,6 +402,59 @@ final class RemoteMachinesModelTests: XCTestCase {
         await model.refresh()
 
         XCTAssertEqual(fake.connectCalls, 1, "same bearer, same refusal — do not dial")
+    }
+
+    /// Phase 1's loudest defect: the relay answers **403** while the host's
+    /// daemon is still registering its control channel, and "re-dial only
+    /// when the bearer changed" — which in-session it does not for fifteen
+    /// minutes — left that one early refusal stranding the machine until the
+    /// app was relaunched. An online device whose socket is down is dialled
+    /// again by every poll; the connection's own backoff owns the rate.
+    func testAnOnlineDeviceWithNoLiveConnectionIsAlwaysRedialled() async throws {
+        answer(Self.studioOnline)
+        let fake = FakeRemoteConnection()
+        fake.simulateRefusedDial()
+        let model = RemoteMachinesModel(
+            relay: makeRelay(),
+            makeConnection: { _ in fake },
+            isSignedIn: { true },
+            currentBearer: { "same-token" }
+        )
+
+        await model.refresh()
+        XCTAssertEqual(fake.connectCalls, 1)
+        await model.refresh()
+
+        XCTAssertEqual(fake.connectCalls, 2, "a refusal must not strand the machine forever")
+        XCTAssertFalse(model.didRequestTokenRefresh, "the bearer was never the problem")
+    }
+
+    /// The negative twin, and the one refusal re-dialling cannot mend: a
+    /// real 401 is parked on the bearer that was refused — but a fresh one
+    /// is asked for on the spot, rather than waiting the quarter hour for
+    /// `listDevices()` to meet the same 401 itself.
+    func testATokenRefusalStillWaitsForANewTokenAndAsksForOneAtOnce() async throws {
+        answer(Self.studioOnline)
+        let fake = FakeRemoteConnection()
+        fake.simulateTokenRefusal()
+        var refreshes = 0
+        let model = RemoteMachinesModel(
+            relay: makeRelay(),
+            makeConnection: { _ in fake },
+            isSignedIn: { true },
+            refreshSession: { refreshes += 1 },
+            currentBearer: { "same-token" }
+        )
+
+        await model.refresh()
+        await model.refresh()
+
+        XCTAssertEqual(fake.connectCalls, 1, "a refused token is not retried with the same token")
+        XCTAssertTrue(model.didRequestTokenRefresh, "…but a fresh one is asked for immediately")
+        for _ in 0..<200 where refreshes == 0 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(refreshes, 1, "the socket's 401 refreshes the session itself")
     }
 
     /// `stop()` (or a log-out) while a poll's relay request is in flight:

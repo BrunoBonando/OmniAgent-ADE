@@ -36,6 +36,15 @@ struct RemoteMachine: Equatable {
 ///   at once, and its projection is read — on the spot (a test double
 ///   answers synchronously) and again on every `.connected` transition, since
 ///   the real socket is not up yet when the first read goes out.
+/// - A device that is online but whose socket is **down** is `connect()`ed
+///   again by every poll — the connection's own backoff owns the rate.
+///   Phase 1 re-dialled only when the bearer had *changed*, which in-session
+///   it does not for fifteen minutes, so the relay's 403 for "that device's
+///   control channel is not registered yet" (the race a viewer loses the
+///   moment the host enables sharing) stranded that Mac until the app was
+///   relaunched: with no live connection the projection read can never
+///   succeed, and a machine with no projection is not in `machines` at all.
+///   Only a refused *token* still parks a connection, keyed on the bearer.
 /// - A device that goes offline is `disconnect()`ed and leaves `machines`,
 ///   but its connection object is **retained**: panes opened on it keep
 ///   routing through that object (`retainedConnection(for:)`), so when the
@@ -70,6 +79,11 @@ final class RemoteMachinesModel {
     var onConnectionError: ((String, Error) -> Void)?
 
     private(set) var isRunning = false
+    /// Whether a socket-side token refusal has asked for a fresh session
+    /// since the last sign-in — the observable half of "a 401 on the
+    /// upgrade refreshes the token at once rather than waiting for
+    /// `listDevices()` to meet the same 401 a quarter of an hour later".
+    private(set) var didRequestTokenRefresh = false
 
     /// This Mac's own relay device id — the one device on the account this
     /// viewer must never list or dial: it would be a WebSocket to its own
@@ -102,7 +116,17 @@ final class RemoteMachinesModel {
     /// bearer has *changed* — a REST call succeeding proves nothing about a
     /// WebSocket upgrade the same relay just refused, and re-dialling on it
     /// would be the four-times-a-second loop `.unauthorized` exists to end.
+    /// A 401 is the *only* refusal that parks a device this way: everything
+    /// else keeps retrying (`SessionConnection.isTokenRefusal`) and is
+    /// re-dialled by the next poll.
     private var unauthorized: [String: String?] = [:]
+    /// The last state each connection reported. A device the relay lists as
+    /// online whose socket last said `.disconnected` is dialled again;
+    /// `.connecting` is a dial already in flight and a device that has said
+    /// nothing yet was dialled moments ago by this very poll — neither is
+    /// worth a second `connect()`, which would only reset the backoff of an
+    /// attempt already under way.
+    private var connectionStates: [String: ConnectionState] = [:]
     private var timer: Timer?
     private var refreshInFlight = false
     /// A poke that arrived while a poll was in flight. Honoured once that
@@ -268,6 +292,7 @@ final class RemoteMachinesModel {
             connections[deviceID]?.disconnect()
             projections.removeValue(forKey: deviceID)
             unauthorized.removeValue(forKey: deviceID)
+            connectionStates.removeValue(forKey: deviceID)
         }
         for device in online {
             let deviceID = device.deviceID
@@ -277,10 +302,20 @@ final class RemoteMachinesModel {
                     // as it is now.
                     unauthorized.removeValue(forKey: deviceID)
                     existing.connect()
-                } else if let refused = unauthorized[deviceID], refused != currentBearer() {
-                    // Refused before, and there is a different bearer to
-                    // offer now. The same one would only be refused again.
-                    unauthorized.removeValue(forKey: deviceID)
+                } else if let refused = unauthorized[deviceID] {
+                    // A refused token is the one failure another dial cannot
+                    // mend: the same bearer would only be refused again. Wait
+                    // for a different one — the 401 asked for it already.
+                    if refused != currentBearer() {
+                        unauthorized.removeValue(forKey: deviceID)
+                        existing.connect()
+                    }
+                } else if connectionStates[deviceID] == .disconnected {
+                    // Online to the relay, down to us: dial it again. Every
+                    // other refusal is transient — the 403 while the host's
+                    // control channel registers, a relay restart, an outage —
+                    // and leaving it to the bearer changing was what stranded
+                    // a machine until the app was relaunched.
                     existing.connect()
                 }
             } else {
@@ -301,6 +336,7 @@ final class RemoteMachinesModel {
     private func install(_ connection: RemoteConnection, for deviceID: String) {
         connection.onStateChange = { [weak self] state in
             guard let self else { return }
+            connectionStates[deviceID] = state
             // A fresh socket — first connect or a reconnect after an outage —
             // is when the projection is actually readable.
             if state == .connected { readProjection(for: deviceID) }
@@ -310,6 +346,14 @@ final class RemoteMachinesModel {
             guard let self else { return }
             if case SessionConnectionError.unauthorized = error {
                 unauthorized[deviceID] = currentBearer()
+                // The relay refused this bearer on the upgrade, so it is
+                // stale *now* — asking here rather than waiting for
+                // `listDevices()` to meet the same 401 saves the viewer the
+                // rest of the token's fifteen minutes blind to this machine.
+                // Coalesced with the REST path's refresh, whose cookie it
+                // shares; the next poll dials on whatever it produces.
+                didRequestTokenRefresh = true
+                Task { [weak self] in await self?.refreshSessionIfStale() }
             }
             onConnectionError?(deviceID, error)
         }
@@ -346,6 +390,8 @@ final class RemoteMachinesModel {
         onlineIDs.removeAll()
         projections.removeAll()
         unauthorized.removeAll()
+        connectionStates.removeAll()
+        didRequestTokenRefresh = false
         rebuildMachines()
     }
 
@@ -358,6 +404,7 @@ final class RemoteMachinesModel {
         onlineIDs.remove(deviceID)
         projections.removeValue(forKey: deviceID)
         unauthorized.removeValue(forKey: deviceID)
+        connectionStates.removeValue(forKey: deviceID)
         rebuildMachines()
     }
 
