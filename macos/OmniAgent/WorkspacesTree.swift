@@ -756,12 +756,12 @@ final class RemoteViewersView: NSView {
                 color: ShellPalette.inkFile
             )
             let connected = Self.connectedText(since: row.since, now: now)
-            let where_ = ShellFont.label(
+            let detail = ShellFont.label(
                 connected.isEmpty ? panes : "\(panes) · \(connected)",
                 font: ShellFont.ui(11),
                 color: ShellPalette.inkTertiary
             )
-            let text = NSStackView(views: [name, where_])
+            let text = NSStackView(views: [name, detail])
             text.orientation = .vertical
             text.alignment = .leading
             text.spacing = 1
@@ -777,7 +777,13 @@ final class RemoteViewersView: NSView {
             button.setContentHuggingPriority(.required, for: .horizontal)
             disconnectButtons.append(button)
 
-            let line = NSStackView(views: [text, NSView(), button])
+            // The slack goes here, not into the machine's name: a spacer that
+            // hugs less than anything else is what keeps Disconnect pinned to
+            // the trailing edge whatever the name's length.
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+            spacer.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+            let line = NSStackView(views: [text, spacer, button])
             line.orientation = .horizontal
             line.alignment = .centerY
             line.spacing = 12

@@ -3396,7 +3396,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // Zoom is what a remote pane has instead of a resize; on a
                 // local pane there is nothing to scale, so the rows stay
                 // away rather than appearing and doing nothing.
-                remotePaneFocused: focusedRemoteTerminal() != nil
+                remotePaneFocused: focusedRemoteTerminal() != nil,
+                // And who is watching this Mac right now — the popover the
+                // sidebar's count opens, by name (phase 2 §5).
+                watchedWorkspaces: watchedPaletteWorkspaces()
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
@@ -3504,6 +3507,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             case .shrink: surface.zoomOutRemoteTerminal(nil)
             case .fit: surface.resetRemoteTerminalZoom(nil)
             }
+        case let .showRemoteViewers(workspaceID):
+            showRemoteViewers(forWorkspace: workspaceID)
         case .noop:
             break
         }
@@ -4206,11 +4211,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             )
         }
         guard !rows.isEmpty else { return }
-        viewerPopoverWorkspaceID = id
         // The badge itself when the tree is drawing workspace rows; the tree
-        // otherwise, so a click in Status mode still lands somewhere sensible.
-        let anchor = shellSidebar.workspacesTree.viewerBadge(forWorkspace: id)
-            ?? shellSidebar.workspacesTree
+        // otherwise (Status and Last-updated mode draw none), and the window
+        // as the floor. `NSPopover` raises rather than shrugs when handed a
+        // view that is off screen or in no window at all, and this can be
+        // reached from the spotlight with the sidebar collapsed.
+        let candidates: [NSView?] = [
+            shellSidebar.workspacesTree.viewerBadge(forWorkspace: id),
+            shellSidebar.workspacesTree,
+            window?.contentView,
+        ]
+        guard let anchor = candidates.compactMap({ $0 }).first(where: {
+            $0.window != nil && !$0.isHiddenOrHasHiddenAncestor
+        }) else { return }
+        viewerPopoverWorkspaceID = id
         RemoteViewersPopover.show(rows: rows, from: anchor) { [weak self] viewerID in
             self?.disconnectViewer(viewerID)
         }
@@ -4239,6 +4253,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             }
         }
         return names
+    }
+
+    /// The same, as spotlight rows — named and ordered, since a dictionary
+    /// has no order and a palette that reshuffles between opens is one
+    /// nobody's fingers can learn.
+    func watchedPaletteWorkspaces() -> [PaletteWatchedWorkspace] {
+        workspaceViewerNames()
+            .map { id, names in
+                PaletteWatchedWorkspace(
+                    id: id,
+                    label: sidebarDisplayLabel(for: id),
+                    viewerNames: names
+                )
+            }
+            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
     }
 
     /// The roster grouped by workspace, for the sidebar's count badges.

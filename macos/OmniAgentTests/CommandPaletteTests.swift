@@ -977,6 +977,47 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
+    /// The standing rule over the other new surface in this phase: the list
+    /// of machines watching a shared workspace, which the sidebar only offers
+    /// behind a small glyph. A row per watched workspace, none when nobody is
+    /// watching — the popover of an empty list has nothing to show.
+    func testTheViewerListIsASpotlightRowForEveryWatchedWorkspace() {
+        let none = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        XCTAssertTrue(none.filter { $0.id.hasPrefix("viewers:") }.isEmpty, "nobody watching, no row")
+
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil,
+            watchedWorkspaces: [
+                PaletteWatchedWorkspace(id: "/b", label: "beta", viewerNames: ["Air", "MBP"]),
+                PaletteWatchedWorkspace(id: "/a", label: "alpha", viewerNames: ["Air"]),
+                PaletteWatchedWorkspace(id: "/c", label: "gamma", viewerNames: []),
+            ]
+        )
+        let rows = commands.filter { $0.id.hasPrefix("viewers:") }
+        XCTAssertEqual(rows.map(\.id), ["viewers:/b", "viewers:/a"], "and only the watched ones")
+        XCTAssertEqual(rows.map(\.title), ["Viewers of beta", "Viewers of alpha"])
+        XCTAssertEqual(rows.map(\.detail), ["2 machines", "1 machine"])
+        XCTAssertEqual(
+            rows.map(\.action),
+            [.showRemoteViewers(workspaceID: "/b"), .showRemoteViewers(workspaceID: "/a")]
+        )
+        XCTAssertEqual(rows.map(\.subtitle), ["Remote Control", "Remote Control"])
+        XCTAssertEqual(rows.map(\.section), [.places, .places])
+
+        // Found by the machine's name, which is what someone types when a
+        // particular Mac has to go.
+        var model = CommandPaletteModel(commands: commands)
+        model.update(query: "MBP")
+        XCTAssertEqual(model.matches.first?.id, "viewers:/b")
+        // "disconnect" also fits the GitHub row's own vocabulary, so this
+        // asks only that both viewer rows are among what it finds.
+        model.update(query: "disconnect")
+        XCTAssertEqual(
+            model.matches.map(\.id).filter { $0.hasPrefix("viewers:") }.sorted(),
+            ["viewers:/a", "viewers:/b"]
+        )
+    }
+
     // MARK: - fixtures
 
     private let sample: [PaletteCommand] = [

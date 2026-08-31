@@ -187,6 +187,34 @@ final class RemotePresenceTests: XCTestCase {
         XCTAssertEqual(controller.lastWrittenSetting(SettingsKey.remoteControlBlocked), "[]")
     }
 
+    /// The standing "Spotlight finds everything" rule over the popover: the
+    /// controller offers a row per watched workspace, named as the sidebar
+    /// names it, and none at all while nobody is watching.
+    func testTheViewerListIsFindableFromTheSpotlight() {
+        let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
+        XCTAssertTrue(controller.watchedPaletteWorkspaces().isEmpty)
+
+        controller.applyRemoteViewers([
+            .init(viewerID: "v1", machineName: "Air", sessions: ["s1"], since: "…"),
+        ])
+        XCTAssertEqual(controller.watchedPaletteWorkspaces().map(\.id), ["/a"])
+        XCTAssertEqual(controller.watchedPaletteWorkspaces().map(\.viewerNames), [["Air"]])
+    }
+
+    /// `NSPopover` raises rather than shrugs when handed a view in no window,
+    /// and the spotlight can reach this with the window closed. Asking for a
+    /// list there must do nothing at all.
+    func testAskingForTheListWithNoWindowIsQuiet() {
+        let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
+        controller.applyRemoteViewers([
+            .init(viewerID: "v1", machineName: "Air", sessions: ["s1"], since: "…"),
+        ])
+        controller.close()
+        // The assertion is that this does not raise.
+        controller.showRemoteViewers(forWorkspace: "/a")
+        controller.run(.showRemoteViewers(workspaceID: "/a"))
+    }
+
     // MARK: - Helpers
 
     private func pane(

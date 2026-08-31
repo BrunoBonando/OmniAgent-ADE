@@ -74,6 +74,11 @@ enum PaletteAction: Equatable {
     /// are here at all: the standing "Spotlight finds everything" rule, over
     /// a command with no other home than a menu the pane may not have raised.
     case zoomRemotePane(RemoteZoom)
+    /// The list of machines watching one of this Mac's shared workspaces,
+    /// each with a Disconnect (the phase 2 spec's §5) — the popover the count
+    /// beside the globe opens, reached by name instead. A row only while
+    /// somebody is actually watching, since an empty list is a dead end.
+    case showRemoteViewers(workspaceID: String)
     /// An informational row with nothing to run ("No matches…") — a
     /// no-op rather than reusing an unrelated action for "does nothing".
     case noop
@@ -225,6 +230,16 @@ struct PaletteWorkspace: Equatable {
     let id: String
     let label: String
     let path: String?
+}
+
+/// One of this Mac's shared workspaces with a machine on it right now (the
+/// phase 2 spec's §5), for the "Viewers of …" row. The names travel with it
+/// so the row can be found by typing the machine's name, which is what a
+/// person reaches for when they want to disconnect one.
+struct PaletteWatchedWorkspace: Equatable {
+    let id: String
+    let label: String
+    let viewerNames: [String]
 }
 
 /// One **pane** another machine shares — a terminal, since that is the only
@@ -388,7 +403,10 @@ struct CommandPaletteModel: Equatable {
         /// Whether the focused pane is another Mac's terminal, which decides
         /// whether the View menu's zoom items are rows — the same
         /// one-row-only-where-it-can-be-taken rule the account rows follow.
-        remotePaneFocused: Bool = false
+        remotePaneFocused: Bool = false,
+        /// This Mac's shared workspaces that somebody is watching right now,
+        /// for the "Viewers of …" rows.
+        watchedWorkspaces: [PaletteWatchedWorkspace] = []
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -724,6 +742,30 @@ struct CommandPaletteModel: Equatable {
                     )
                 )
             }
+        }
+        // Who is watching this Mac, and the Disconnect that goes with it —
+        // the same standing rule: the popover behind the sidebar's count is a
+        // place, so it is findable by name rather than only by knowing which
+        // glyph to click. Only workspaces with somebody on them, since the
+        // popover of an empty list has nothing to show.
+        for watched in watchedWorkspaces where !watched.viewerNames.isEmpty {
+            commands.append(
+                PaletteCommand(
+                    id: "viewers:\(watched.id)",
+                    title: "Viewers of \(watched.label)",
+                    detail: watched.viewerNames.count == 1
+                        ? "1 machine"
+                        : "\(watched.viewerNames.count) machines",
+                    action: .showRemoteViewers(workspaceID: watched.id),
+                    // Found by the machine's own name too: "disconnect Air"
+                    // is what someone types when a Mac has to go.
+                    keywords: "viewers watching remote disconnect "
+                        + watched.viewerNames.joined(separator: " "),
+                    section: .places,
+                    subtitle: "Remote Control",
+                    symbol: "display"
+                )
+            )
         }
         // The Help menu's two pages. Everything navigable is findable, and a
         // privacy policy nobody can locate is the same as not having one.

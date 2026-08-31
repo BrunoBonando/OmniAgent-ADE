@@ -227,12 +227,12 @@ final class PaneFilmstripItemView: NSView {
                 .foregroundColor: Self.labelColor,
             ]
         )
-        let detail = detailText
-        guard !detail.isEmpty else { return }
+        let secondLine = detailText
+        guard !secondLine.isEmpty else { return }
         // The machines start after the remote mark `layout` seats; the engine
         // has the whole line to itself.
         let detailIndent = viewerNames.isEmpty ? 0 : Self.viewerGlyphSize + Self.viewerGlyphGap
-        (detail as NSString).draw(
+        (secondLine as NSString).draw(
             in: CGRect(
                 x: textX + detailIndent,
                 y: contentTop + Self.labelHeight,
