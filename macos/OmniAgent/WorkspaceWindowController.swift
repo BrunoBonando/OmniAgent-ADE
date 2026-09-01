@@ -1557,6 +1557,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // The launch read ran before the daemon was up and failed;
                 // this is the first time the rows can actually be read.
                 refreshAccountSection()
+                // And the sharing model's own restore, if its first attempt
+                // failed: `configure(store:)` runs once, off
+                // `runWhenConnected`, so without this a single failed read
+                // left `RemoteSharingModel.shared` at its fail-closed
+                // defaults for the life of the process. A no-op once a
+                // restore has actually completed.
+                remoteSharing.connectionDidComeUp()
                 didConnect = true
                 presentOnboardingIfNeeded()
                 let work = pendingConnectedWork

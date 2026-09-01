@@ -88,6 +88,11 @@ final class RemoteSharingModel {
     /// below fails closed — same as an unreachable daemon — while it is.
     private var store: SettingsStore?
     private var restoreDispatched = false
+    /// Whether a restore has ever finished — both rows read, not just
+    /// dispatched. `connectionDidComeUp()` is what re-arms a restore that
+    /// never did, and this is how it tells "already restored" from "tried
+    /// once and failed".
+    private var restoreCompleted = false
 
     /// The test / explicit-construction path: a store is already known, so
     /// this restores immediately (synchronously, against the fakes every
@@ -209,6 +214,25 @@ final class RemoteSharingModel {
         }
     }
 
+    /// The production re-arm for a restore that failed.
+    ///
+    /// `configure(store:)` runs once, off `runWhenConnected`, so before this
+    /// existed a single failed read after connect stranded `.shared` at its
+    /// fail-closed defaults for the life of the process: sharing would read
+    /// as off with no way back short of relaunching, and `restoreDispatched
+    /// = false` in `restore()`'s failure arm had no trigger to re-arm *for*.
+    /// `WorkspaceWindowController` now calls this on every `.connected`,
+    /// which is exactly when a retry can succeed.
+    ///
+    /// A no-op once a restore has actually completed — a reconnect does not
+    /// re-read rows this model already holds, and cannot race a write in
+    /// flight.
+    func connectionDidComeUp() {
+        guard !restoreCompleted else { return }
+        restoreDispatched = false
+        restore()
+    }
+
     /// Rewrites `remote_control_blocked` without `viewerID` — the only way
     /// the app ever removes an entry from it. A no-op, with no write and no
     /// `onChange`, when the id was not blocked to begin with.
@@ -261,6 +285,7 @@ final class RemoteSharingModel {
                     switch result {
                     case let .success(raw):
                         blockedViewerIDs = RemoteControlProjection.decodeEnabled(raw).sorted()
+                        restoreCompleted = true
                         onChange?()
                     case .failure:
                         restoreDispatched = false

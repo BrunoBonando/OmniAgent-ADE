@@ -277,4 +277,38 @@ final class RemoteSharingModelTests: XCTestCase {
         model.configure(store: SettingsStore(client: recoveredClient))
         XCTAssertTrue(model.isSharing, "a later configure(store:) retries, since restoreDispatched was re-armed")
     }
+
+    /// …and the trigger that re-arm never had in production.
+    ///
+    /// `configure(store:)` is called exactly once, off `runWhenConnected`, so
+    /// before `connectionDidComeUp()` existed a single failed read after
+    /// connect stranded `.shared` at its fail-closed defaults for the life of
+    /// the process: sharing read as off, with no way back short of
+    /// relaunching. `WorkspaceWindowController` now calls this on every
+    /// `.connected`.
+    func testAFailedRestoreIsRetriedTheNextTimeTheConnectionComesUp() throws {
+        let client = FakeSettingsClient(rows: ["remote_sharing": #"{"enabled":true}"#])
+        client.failing = [SettingsKey.remoteSharing]
+        let model = RemoteSharingModel(store: SettingsStore(client: client))
+        XCTAssertFalse(model.isSharing, "the failed read leaves the fail-closed default")
+
+        client.failing = []
+        model.connectionDidComeUp()
+
+        XCTAssertTrue(model.isSharing, "the reconnect is the retry")
+    }
+
+    /// And it costs nothing once a restore has actually landed: a reconnect
+    /// does not re-read rows the model already holds, so it cannot race a
+    /// write in flight.
+    func testAReconnectAfterASuccessfulRestoreReadsNothingAgain() throws {
+        let client = FakeSettingsClient(rows: ["remote_sharing": #"{"enabled":true}"#])
+        let model = RemoteSharingModel(store: SettingsStore(client: client))
+        XCTAssertTrue(model.isSharing)
+        let reads = client.getCalls.count
+
+        model.connectionDidComeUp()
+
+        XCTAssertEqual(client.getCalls.count, reads, "nothing re-read")
+    }
 }
