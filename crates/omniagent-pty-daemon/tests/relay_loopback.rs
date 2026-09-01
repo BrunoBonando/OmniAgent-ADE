@@ -3,8 +3,9 @@
 //! relay. The daemon must dial the control socket with the device token, send
 //! its hello, dial a data socket for every `{"open": id}`, and run the real
 //! `serve_client(…, ClientTrust::Remote)` over that data socket — so a viewer
-//! gets `HelloAck`, an `Attach` on a shared session gets `Snapshot`, and a
-//! `Kill` is refused. Turning sharing off closes the control socket, a `401`
+//! gets `HelloAck`, an `Attach` gets `Snapshot`, a `Kill` goes through (phase
+//! 3 §3: the lease holder drives the machine) and a `ListViewers` still does
+//! not. Turning sharing off closes the control socket, a `401`
 //! stops the daemon dialling until the token row changes, and a relay that
 //! goes silent is dropped and re-dialled.
 
@@ -186,6 +187,28 @@ where
     }
 }
 
+/// Sends one frame and returns the daemon's **reply** to it.
+///
+/// An attached viewer's socket carries pushes too (`SessionStatus`, `Output`,
+/// and — now that a remote `Kill` goes through — `SessionExited`), so the
+/// reply is picked out by kind rather than by skipping a list of pushes that
+/// grows every time the allowlist does: a control frame is answered with
+/// `Response` or `Error`, and nothing else is an answer.
+async fn reply_over_ws(ws: &mut WebSocketStream<TcpStream>, frame: Frame) -> Frame {
+    ws.send(Message::Binary(frame.encode().unwrap().into()))
+        .await
+        .unwrap();
+    loop {
+        let frame = read_frame_from_ws(ws).await;
+        if matches!(
+            frame.header.message_kind,
+            MessageKind::Response | MessageKind::Error
+        ) {
+            return frame;
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
     let root = tempfile::tempdir().unwrap();
@@ -247,26 +270,27 @@ async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
         MessageKind::Snapshot
     );
 
-    let kill = Frame::new(
-        MessageKind::Kill,
-        3,
-        serde_json::to_vec(&serde_json::json!({"id": "s1"})).unwrap(),
-    );
-    data.send(Message::Binary(kill.encode().unwrap().into()))
-        .await
-        .unwrap();
-    // The attachment above streams pushes (`SessionStatus`, `Output`) on the
-    // same socket; the first *reply* after `Kill` must be the refusal.
-    let reply = loop {
-        let frame = read_frame_from_ws(&mut data).await;
-        if !matches!(
-            frame.header.message_kind,
-            MessageKind::SessionStatus | MessageKind::Output
-        ) {
-            break frame;
-        }
-    };
-    assert_eq!(reply.header.message_kind, MessageKind::Error);
+    // The boundary still applies over the relay: `ListViewers` is the host's
+    // view of who is watching it, and never a viewer's to ask for.
+    let refused = reply_over_ws(
+        &mut data,
+        Frame::new(MessageKind::ListViewers, 3, b"{}".to_vec()),
+    )
+    .await;
+    assert_eq!(refused.header.message_kind, MessageKind::Error);
+
+    // ... and the phase-3 widening reaches through it too. `Kill` was refused
+    // here in phase 2; a lease holder drives the machine (spec §3).
+    let killed = reply_over_ws(
+        &mut data,
+        Frame::new(
+            MessageKind::Kill,
+            4,
+            serde_json::to_vec(&serde_json::json!({"id": "s1"})).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(killed.header.message_kind, MessageKind::Response);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

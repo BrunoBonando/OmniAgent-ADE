@@ -38,10 +38,11 @@ pub fn peer_uid_allowed(peer_uid: u32, runtime_owner_uid: u32) -> bool {
 /// `Local` is the unix-socket path: the accept loop has already checked
 /// the peer UID, and the client may do everything the protocol offers.
 /// `Remote` is a connection relayed from another device
-/// (`docs/superpowers/specs/2026-08-30-remote-session-control-design.md`
-/// §2): it never took the peer-UID path, so every frame passes
-/// [`authorize_remote`] before dispatch and is confined to the sessions
-/// the `remote_control` projection row shares.
+/// (`docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`
+/// §3): it never took the peer-UID path, so every frame passes
+/// [`authorize_remote`] before dispatch. Since phase 3 that is a boundary
+/// around *kinds* and the protected settings rows, not around a set of
+/// sessions — the lease holder drives the whole machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientTrust {
     Local,
@@ -70,8 +71,14 @@ pub struct ClientContext {
 /// and every attachment's forwarding task.
 pub type SharedWriter = Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>;
 
-/// The settings row holding the remote-control projection — the only
-/// workspaces (and their sessions) a remote client may ever see.
+/// The settings row holding the remote-control projection: the host's tree of
+/// workspaces, session groups and panes.
+///
+/// It was the phase-1/2 authorization boundary — the only sessions a remote
+/// client could see or attach to. **It is not any more** (phase 3 spec §3):
+/// [`authorize_remote`] does not read it, and the lease holder reaches every
+/// session on the host. The row survives only because the viewer's sidebar
+/// still renders from it, and it goes with that sidebar in a later task.
 pub const REMOTE_CONTROL_KEY: &str = "remote_control";
 
 /// The settings row holding the machine-wide sharing switch (spec §2):
@@ -125,9 +132,13 @@ fn block_viewer(store: &Store, viewer_id: &str) -> Result<()> {
         .map_err(Into::into)
 }
 
-/// The session ids the `remote_control` projection currently shares — the
-/// allowlist every remote `Attach`/`Input`/`Interrupt` is checked against.
-/// Missing row, unparsable JSON or an unexpected shape all mean "nothing".
+/// The session ids the `remote_control` projection names. Missing row,
+/// unparsable JSON or an unexpected shape all mean "nothing".
+///
+/// **No longer an authorization input** (phase 3 spec §3): this was the
+/// allowlist every remote `Attach`/`Input`/`Interrupt` was checked against,
+/// and session-id confinement is gone. It is kept for the viewer's sidebar,
+/// which still renders the projection, and goes with it in a later task.
 ///
 /// Two projection shapes are read, because a Mac that has not updated yet
 /// still writes the first one (phase 2 spec §2, "Compatibility"):
@@ -213,52 +224,46 @@ pub fn protected_setting_key(key: &str) -> bool {
     ) || key.starts_with(AUTH_KEY_PREFIX)
 }
 
-/// The one field every session-bound control payload (`AttachPayload`,
-/// `ResizePayload`, `SessionIdPayload`) has in common.
-#[derive(serde::Deserialize)]
-struct SessionRef {
-    id: String,
-}
-
-/// The trust boundary for relayed clients (spec §2). `Err(reason)` means
-/// "answer with `Error`, skip dispatch". Allowed: `Hello`, `ListSessions`
-/// (the dispatch arm filters the list), `Detach`, and `Attach`/`Input`/
-/// `Interrupt` whose session id is in `allowed`; `GetSetting`
-/// only for the projection row itself. Everything else — `Kill`,
-/// `CreateSession`, `SetSetting`, `Resize`, every Brain/Roots RPC — is
-/// refused.
-pub fn authorize_remote(frame: &Frame, allowed: &HashSet<String>) -> Result<(), String> {
-    let shared = |id: &str| {
-        allowed
-            .contains(id)
-            .then_some(())
-            .ok_or_else(|| format!("session {id} is not shared"))
-    };
+/// The trust boundary for relayed clients (phase 3 spec §3). `Err(reason)`
+/// means "answer with `Error`, skip dispatch".
+///
+/// Still an **explicit allowlist**, and it must stay one: the standing repo
+/// rule is that nothing becomes remote-reachable merely by being added to the
+/// dispatch, so a kind nobody has thought about falls into the deny arm at the
+/// bottom rather than through a hole. Never invert this into a denylist.
+///
+/// What phase 3 changed is its length and the loss of session-id confinement.
+/// The lease holder is driving the whole machine — it may create and kill
+/// sessions — so confining it to a projection of a few of them would be
+/// confining it to nothing. `Resize` comes back with the same reasoning
+/// (§5: whoever drives owns the grid, and under exclusive takeover that is
+/// the viewer).
+///
+/// The line that is *not* redrawn is [`protected_setting_key`], consulted on
+/// both the get and the set arm: whatever else a lease holder may do, it may
+/// not grant itself access, unblock itself, or read the host's credentials.
+pub fn authorize_remote(frame: &Frame) -> Result<(), String> {
+    use MessageKind::*;
     match frame.header.message_kind {
-        MessageKind::Hello | MessageKind::ListSessions | MessageKind::Detach => Ok(()),
-        // `Resize` is deliberately absent: the host owns the grid (phase 2
-        // spec §1). One session is one screen buffer, so honouring a
-        // viewer's window size would collapse the host's terminal — and
-        // any viewer being able to resize any shared session was a
-        // trust-boundary hole besides. It falls through to the deny arm.
-        MessageKind::Attach | MessageKind::Interrupt => shared(
-            &parse_json::<SessionRef>(&frame.payload)
-                .map_err(|error| error.to_string())?
-                .id,
-        ),
-        MessageKind::Input => shared(
-            decode_raw_payload(&frame.payload)
-                .map_err(|error| error.to_string())?
-                .0,
-        ),
-        MessageKind::GetSetting => {
+        Hello | ListSessions | Attach | Detach | Input | Resize | Interrupt | CreateSession
+        | Kill | ListDirectory | RootsStartIngest | RootsIngestionStatus | RootsList
+        | RootsBiggestProject | RootsAddProject | RootsRenameProject | RootsPausedProjects
+        | RootsSetPaused | RootsStaleness | RootsReingestProject | RootsRebuild
+        | BrainListProjects | BrainGetContext | BrainSearch => Ok(()),
+
+        // One struct reads both payloads: `SetSetting`'s carries a `value`
+        // alongside the `key`, which serde ignores. A malformed payload is a
+        // refusal rather than a pass — there is no key to check, so there is
+        // no way to know the row is not a protected one.
+        GetSetting | SetSetting => {
             let key = parse_json::<SettingKey>(&frame.payload)
                 .map_err(|error| error.to_string())?
                 .key;
-            (key == REMOTE_CONTROL_KEY)
+            (!protected_setting_key(&key))
                 .then_some(())
-                .ok_or_else(|| format!("setting {key} is not readable remotely"))
+                .ok_or_else(|| format!("setting {key} is not reachable remotely"))
         }
+
         other => Err(format!("{other:?} is not allowed for remote clients")),
     }
 }
@@ -619,30 +624,17 @@ where
             // here the stream is being torn down, so there is nothing left to
             // desynchronise.
             _ = cancel.cancelled() => break,
-            frame = next_frame(
-                &mut reader,
-                trust,
-                &settings,
-                &settings_changed,
-                &mut attachments,
-                &connections,
-                connection.id,
-            ) => match frame {
+            frame = read_frame(&mut reader) => match frame {
                 Ok(frame) => frame,
                 Err(_) => break,
             },
         };
         let request = frame.header.request_or_sequence;
-        // The remote trust boundary: a point read of the projection per
-        // frame (microseconds; nothing to cache or invalidate), then the
-        // authorizer. `None` for local clients, so the dispatch below is
-        // byte-for-byte the local path unless it consults `allowed`.
-        let allowed = (trust == ClientTrust::Remote).then(|| shared_sessions(&settings));
-        if let Some(allowed) = &allowed {
-            // A session un-shared since this client attached stops streaming
-            // here too, in case `next_frame`'s wake was consumed elsewhere.
-            attachments.retain(|id, _| allowed.contains(id));
-            if let Err(reason) = authorize_remote(&frame, allowed) {
+        // The remote trust boundary. The dispatch below is byte-for-byte the
+        // local path: nothing in it consults trust, which is what keeps the
+        // decision in one readable place.
+        if trust == ClientTrust::Remote {
+            if let Err(reason) = authorize_remote(&frame) {
                 if send_error(&writer, request, reason).await.is_err() {
                     break;
                 }
@@ -684,15 +676,16 @@ where
         let result = match frame.header.message_kind {
             MessageKind::ListSessions => {
                 decode_payload!(serde_json::Value);
-                let mut sessions = registry.list();
-                if let Some(allowed) = &allowed {
-                    sessions.retain(|id| allowed.contains(id));
-                }
+                // Unfiltered for every trust level since phase 3: a lease
+                // holder is driving this machine, not peering at a projection
+                // of part of it.
                 send_json(
                     &writer,
                     MessageKind::SessionList,
                     request,
-                    &SessionListPayload { sessions },
+                    &SessionListPayload {
+                        sessions: registry.list(),
+                    },
                 )
                 .await
             }
@@ -1254,50 +1247,16 @@ fn list_directory(request: &ListDirectoryPayload) -> Result<Vec<DirectoryEntryPa
     Ok(entries)
 }
 
-/// The session ids the projection shares right now — empty when the store
-/// cannot be read, so a remote client is refused rather than let through.
-fn shared_sessions(settings: &std::sync::Mutex<Store>) -> HashSet<String> {
-    lock_store(settings)
-        .map(|store| remote_session_ids(&store))
-        .unwrap_or_default()
-}
-
-/// Reads the client's next frame.
-///
-/// A `Remote` client also wakes on `settings_changed`: the projection is
-/// re-read and every attachment whose session it no longer shares is
-/// dropped — closing its subscription and aborting its forwarding task —
-/// so a passive viewer that sends no frames stops receiving output the
-/// moment a workspace is un-shared (spec §2), not at its next `Detach`.
-/// The read future is polled across those wakes rather than recreated:
-/// `read_exact` is not cancel-safe, and dropping it mid-frame would
-/// desynchronise the stream. `Local` clients take the plain read.
-async fn next_frame<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    trust: ClientTrust,
-    settings: &std::sync::Mutex<Store>,
-    settings_changed: &Notify,
-    attachments: &mut HashMap<String, Attachment>,
-    connections: &ConnectionRegistry,
-    connection: u64,
-) -> io::Result<Frame> {
-    let mut read = std::pin::pin!(read_frame(reader));
-    if trust == ClientTrust::Local {
-        return read.await;
-    }
-    loop {
-        tokio::select! {
-            frame = &mut read => return frame,
-            _ = settings_changed.notified() => {
-                let allowed = shared_sessions(settings);
-                attachments.retain(|id, _| allowed.contains(id));
-                // The host's roster follows the prune here rather than at this
-                // viewer's next frame — a passive viewer may not send one.
-                sync_attached(connections, connection, attachments.keys().cloned().collect());
-            }
-        }
-    }
-}
+// Phase 2 read the client's next frame through a `next_frame` helper that
+// also woke on `settings_changed`, re-read the `remote_control` projection,
+// and dropped every attachment whose session it no longer shared — so a
+// passive viewer stopped receiving output the moment a workspace was
+// un-shared. It went with session-id confinement in phase 3 (spec §3): the
+// projection no longer decides anything, and pruning against it would have
+// silently killed attachments the authorizer had just allowed. Sharing is one
+// machine-wide switch now, and turning it off closes the relay connection
+// itself (`relay.rs`), so there is no longer a mid-connection narrowing to
+// enforce. Both trust levels take the plain `read_frame`.
 
 /// Decodes a control frame's JSON payload.
 ///
