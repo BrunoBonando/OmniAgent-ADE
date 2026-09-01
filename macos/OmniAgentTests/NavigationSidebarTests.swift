@@ -189,9 +189,23 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(dot.height, SidebarNavRowView.badgeDiameter, accuracy: 0.5)
         XCTAssertEqual(dot.maxX, row.bounds.maxX - 10, accuracy: 0.5, "10pt inside the trailing edge")
         XCTAssertEqual(dot.midY, row.bounds.midY, accuracy: 0.5)
+        // The title's wall moves with the dot: its −8 used to run past the
+        // dot's −10, so a long title truncated underneath it.
+        XCTAssertLessThanOrEqual(
+            row.titleFrameForTesting.maxX,
+            dot.minX - 6,
+            "the title stops short of the dot while it is showing"
+        )
 
         row.isBadged = false
+        sidebar.layoutSubtreeIfNeeded()
         XCTAssertFalse(row.isBadged)
+        XCTAssertEqual(
+            row.titleFrameForTesting.maxX,
+            row.bounds.maxX - 8,
+            accuracy: 0.5,
+            "and takes the row's own edge back when the dot goes"
+        )
     }
 
     // MARK: - System stats

@@ -72,14 +72,32 @@ final class SidebarNavRowView: ShellRowView {
     private let badge = NSView()
     static let badgeDiameter: CGFloat = 7
 
-    /// Whether the row is wearing its dot.
+    /// Whether the row is wearing its dot. The title's right-hand wall moves
+    /// with it: unbadged the title runs to the row's own edge, badged it
+    /// stops 6pt short of the dot — otherwise a long title truncates *under*
+    /// the dot, which is where the two used to overlap (the title's −8 ran
+    /// past the badge's −10).
     var isBadged: Bool {
         get { !badge.isHidden }
-        set { badge.isHidden = !newValue }
+        set {
+            badge.isHidden = !newValue
+            titleTrailingToEdge?.isActive = !newValue
+            titleTrailingToBadge?.isActive = newValue
+        }
     }
+
+    private var titleTrailingToEdge: NSLayoutConstraint?
+    private var titleTrailingToBadge: NSLayoutConstraint?
 
     /// Where the dot sits in the row — for the tests, which cannot see it.
     var badgeFrameForTesting: NSRect { badge.frame }
+
+    /// Where the label ends — the other half of the same test, since the
+    /// point of the badged wall is that these two no longer overlap. The
+    /// *alignment* rect, not the frame: an `NSTextField`'s frame is a couple
+    /// of points wider than the box its constraints are pinned to, so a test
+    /// reading the frame would be off by that much at both edges.
+    var titleFrameForTesting: NSRect { titleField.alignmentRect(forFrame: titleField.frame) }
 
     convenience init(item: SidebarNavItem) {
         self.init(title: item.title, symbol: item.symbol, item: item)
@@ -128,7 +146,6 @@ final class SidebarNavRowView: ShellRowView {
             icon.heightAnchor.constraint(equalToConstant: 18),
 
             titleField.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
-            titleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
@@ -136,6 +153,13 @@ final class SidebarNavRowView: ShellRowView {
             badge.widthAnchor.constraint(equalToConstant: Self.badgeDiameter),
             badge.heightAnchor.constraint(equalToConstant: Self.badgeDiameter),
         ])
+        // Exactly one of these is live at a time — see `isBadged`.
+        titleTrailingToEdge = titleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8)
+        titleTrailingToBadge = titleField.trailingAnchor.constraint(
+            equalTo: badge.leadingAnchor,
+            constant: -6
+        )
+        titleTrailingToEdge?.isActive = true
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         refreshBackground()
         setAccessibilityLabel(title)

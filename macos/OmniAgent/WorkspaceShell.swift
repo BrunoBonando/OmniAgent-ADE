@@ -619,11 +619,6 @@ final class ShellDotsView: NSView {
 /// under the window's title strip — the fade then starts at the window's
 /// very top edge — while its content still rests below the strip.
 final class ShellScrollView: NSScrollView {
-    /// The strip a page's fade should cover, plus the room past it in which
-    /// content finishes dissolving — generous, so the dissolve is a thing
-    /// you see, not a hairline (2026-08-28: 26pt read as nothing).
-    static let pageFade = WorkspaceTitleBarView.height + 96
-
     private let topFade: CGFloat
     private let topInset: CGFloat
     private var fadeMask: CAGradientLayer?

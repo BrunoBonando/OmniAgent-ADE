@@ -573,7 +573,6 @@ final class HomeSurfaceView: NSView {
         column.addSubview(composerGlow, positioned: .above, relativeTo: composer)
         column.setCustomSpacing(32, after: composer)
         buildSuggestions()
-        buildExtend()
 
         // Up next and What's new take half the row each (spec §7): a section
         // header over a card, equal widths from `fillEqually` and equal
@@ -599,7 +598,12 @@ final class HomeSurfaceView: NSView {
         for (header, next) in zip(rowHalfHeaders, rowHalfHeaders.dropFirst()) {
             header.heightAnchor.constraint(equalTo: next.heightAnchor).isActive = true
         }
-        column.setCustomSpacing(40, after: highlights)
+        // The user's own work above the marketing cards: Up next / What's new
+        // comes before "Extend your experience", which is why the 32 sits
+        // here and the 40 that opens the footer's air went with the section
+        // that is now last.
+        column.setCustomSpacing(32, after: highlights)
+        buildExtend(spacingAfter: 40)
         buildFooter()
     }
 
@@ -1102,7 +1106,7 @@ final class HomeSurfaceView: NSView {
         column.setCustomSpacing(32, after: row)
     }
 
-    /// The left half of the last row — the header over the empty state.
+    /// The left half of the 2-up row — the header over the empty state.
     private func buildUpNext() -> NSView {
         let header = sectionHeader(
             "Up next",
@@ -1134,7 +1138,10 @@ final class HomeSurfaceView: NSView {
         return rowHalf(header: header, card: card)
     }
 
-    private func buildExtend() {
+    /// - Parameter spacingAfter: the air between this section and whatever
+    ///   follows it. An argument because the section is last in the column
+    ///   now, and the gap before the footer is not the gap between sections.
+    private func buildExtend(spacingAfter: CGFloat) {
         addSectionHeader(
             "Extend your experience",
             sub: "Find new ways to work with the app, from connecting your tools to growing its memory."
@@ -1186,10 +1193,10 @@ final class HomeSurfaceView: NSView {
         for card in cards.dropFirst() {
             card.heightAnchor.constraint(equalTo: cards[0].heightAnchor).isActive = true
         }
-        column.setCustomSpacing(32, after: row)
+        column.setCustomSpacing(spacingAfter, after: row)
     }
 
-    /// The right half of the last row — the release column, the rule, and
+    /// The right half of the 2-up row — the release column, the rule, and
     /// what changed.
     private func buildWhatsNew() -> NSView {
         let header = sectionHeader("What's new", sub: "Explore the changes included in the latest release.")

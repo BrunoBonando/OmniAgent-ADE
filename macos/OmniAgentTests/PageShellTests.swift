@@ -48,6 +48,17 @@ final class PageShellTests: XCTestCase {
         XCTAssertFalse(fired)
     }
 
+    /// A tabless page (Home) has no strip, so it has no underline either —
+    /// it used to get one anyway, added to the header with no constraints at
+    /// all: an ambiguous, invisible subview marking a tab that is not there.
+    func testATablessShellCarriesNoUnderline() {
+        let shell = makeShell(title: "Home", tabs: [])
+        layout(shell)
+        XCTAssertNil(shell.underline.superview, "no strip, no mark")
+        XCTAssertFalse(shell.header.hasAmbiguousLayout)
+        XCTAssertTrue(shell.tabButtons.isEmpty)
+    }
+
     func testTheAccessorySitsFortyPointsInFromTheHeadersTrailingEdge() {
         let shell = makeShell()
         let accessory = NSView()

@@ -411,6 +411,35 @@ final class HomeViewTests: XCTestCase {
         )
     }
 
+    /// The user's own work sits above the marketing cards: the 2-up Up next
+    /// / What's new row comes before "Extend your experience", and the gaps
+    /// are the ones the design asks for — 32 between the sections, 40 before
+    /// the footer.
+    func testTheHighlightsRowComesBeforeExtendYourExperience() throws {
+        let home = makeHome()
+        let laid = layOut(home, width: 1280, height: 1900)
+        defer { laid.window.close() }
+
+        let half = try XCTUnwrap(home.upNextCard.superview)
+        let highlights = try XCTUnwrap(half.superview)
+        let column = try XCTUnwrap(highlights.superview as? NSStackView)
+        let sections = column.arrangedSubviews
+        let highlightsIndex = try XCTUnwrap(sections.firstIndex(of: highlights))
+        let extendIndex = try XCTUnwrap(
+            sections.firstIndex { section in
+                allLabels(in: section).contains("Extend your experience")
+            }
+        )
+        XCTAssertLessThan(highlightsIndex, extendIndex, "the user's own work first")
+
+        XCTAssertEqual(column.customSpacing(after: highlights), 32, accuracy: 0.5)
+        // The section after Extend's header is its card row, and that is what
+        // holds the 40 before the footer.
+        XCTAssertLessThan(extendIndex + 1, sections.count, "Extend's header has a card row under it")
+        let extendRow = sections[extendIndex + 1]
+        XCTAssertEqual(column.customSpacing(after: extendRow), 40, accuracy: 0.5)
+    }
+
     /// The screen laid out inside a window, over the real pane ground —
     /// what every layout assertion here needs before it can read a frame.
     private func layOut(

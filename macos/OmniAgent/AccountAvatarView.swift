@@ -3,14 +3,11 @@ import AppKit
 /// The signed-in account's circle: its picture, or its initials, or a
 /// generic glyph when there is no account at all.
 ///
-/// Lifted out of the sidebar's account row (2026-09-01) when the flow layout
-/// put the same circle in the title bar, rather than keeping two copies of
-/// "which of the three layers is showing" — exactly the kind of duplicate
-/// that drifts, one of them keeping the last account after a log-out. The
-/// sidebar row itself went in the same pass (the spec's §3), so this is now
-/// the only place the three modes live. The layers are stacked rather than
-/// swapped so nothing is rebuilt on a re-`apply`, and `mode` names which of
-/// them is on.
+/// The app's one avatar circle, worn by the title bar's account button
+/// (`TitleBarAccountButton`) — the flow layout's §1 and §3 moved the account
+/// out of the sidebar's foot and up into the bar, and this is where the three
+/// modes live. The layers are stacked rather than swapped so nothing is
+/// rebuilt on a re-`apply`, and `mode` names which of them is on.
 final class AccountAvatarView: NSView {
     /// What the circle is currently showing. Named for what it is for:
     /// three mutually exclusive layers share the circle, and this is the one

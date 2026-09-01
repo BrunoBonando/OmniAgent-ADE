@@ -97,7 +97,7 @@ final class InsightsKPICardView: NSView {
 /// `PageShellView(title: "Insights", tabs: ["Usage", "Activity"])` over two
 /// bodies, of which exactly one is on screen. The view holds no clock, reads
 /// no store and asks the daemon nothing: everything it draws arrives through
-/// `applyInsights`, `applyUsage` and `activity.apply` from the controller.
+/// `applyInsights`, `applyUsage` and `applyActivity` from the controller.
 final class InsightsSurfaceView: NSView {
     /// What a card shows before any data has been applied — an em dash, not
     /// a zero: "no numbers yet" and "zero sessions" are different facts.
@@ -106,12 +106,15 @@ final class InsightsSurfaceView: NSView {
     /// so this is how much of the page the charts are given, not how tall
     /// they are.
     static let usageCardHeight: CGFloat = 360
-    /// The Activity tape's height. `ReviewPanelInsightsView` lays itself out
+    /// The Activity tape's *floor*. `ReviewPanelInsightsView` lays itself out
     /// top-down in manual frames and has no intrinsic size, so the page has
-    /// to state one: room for the header, ~15 lanes, the axis and the
-    /// time-by-status bars. Past that it clips, exactly as the review panel's
-    /// own copy does when a session has more panes than the panel is tall.
-    static let activityHeight: CGFloat = 520
+    /// to state a height — but a fixed one silently stops drawing lanes past
+    /// the count it was guessed for, on the one page whose whole point is
+    /// every session's panes. So this is only the empty/short case's room,
+    /// and `applyActivity` grows the tape past it from the tape's own
+    /// `fittingHeight`. The page scrolls (`PageShellView.scroll`), so the
+    /// extra height costs nothing but a longer scroll.
+    static let activityMinimumHeight: CGFloat = 520
 
     /// The page frame — title, tab strip, hairline, scrolling body.
     let shell: PageShellView
@@ -136,6 +139,9 @@ final class InsightsSurfaceView: NSView {
     private var usageHost: NSView?
     private var usageBodyBottom: NSLayoutConstraint?
     private var activityBottom: NSLayoutConstraint?
+    /// The tape's stated height — re-set on every `applyActivity` from the
+    /// lane count, since nothing else can tell the page how tall the tape is.
+    private var activityHeight: NSLayoutConstraint?
     /// Grouped thousands, no fraction: the counts are `Double` only because
     /// the store's JSON oracle has no integers. Grouped in the *viewer's*
     /// locale — a Mac set to German reads "8.783" here the way its other
@@ -207,7 +213,9 @@ final class InsightsSurfaceView: NSView {
                 view.topAnchor.constraint(equalTo: container.topAnchor),
             ])
         }
-        activity.heightAnchor.constraint(equalToConstant: Self.activityHeight).isActive = true
+        let tapeHeight = activity.heightAnchor.constraint(equalToConstant: Self.activityMinimumHeight)
+        tapeHeight.isActive = true
+        activityHeight = tapeHeight
         usageBodyBottom = usageBody.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         activityBottom = activity.bottomAnchor.constraint(equalTo: container.bottomAnchor)
 
@@ -267,6 +275,20 @@ final class InsightsSurfaceView: NSView {
             host.bottomAnchor.constraint(equalTo: usageCard.bottomAnchor),
         ])
         usageHost = host
+    }
+
+    /// The Activity tape, and the room it needs — one call, because the two
+    /// cannot be allowed to disagree: the tape draws its lanes in manual
+    /// frames inside whatever height the page states, so lanes past that
+    /// height are simply not drawn. Every route into the tape goes through
+    /// here rather than through `activity.apply` directly.
+    func applyActivity(
+        lanes: [ReviewPanelInsightsView.Lane],
+        activities: [PaneActivity],
+        now: Double
+    ) {
+        activity.apply(lanes: lanes, activities: activities, now: now)
+        activityHeight?.constant = max(Self.activityMinimumHeight, activity.fittingHeight)
     }
 
     private func count(_ value: Double) -> String {

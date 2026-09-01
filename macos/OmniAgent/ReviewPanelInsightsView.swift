@@ -253,6 +253,24 @@ final class ReviewPanelInsightsView: NSView {
     /// Six halvings of the full span — past that the window is a sliver.
     static let maximumZoomLevel = 6
 
+    // The manual layout's metrics. Named constants rather than literals
+    // inside `applyLayout` because a host that has to *state* a height for
+    // this view — the Insights page's Activity tape, which scrolls and so
+    // cannot simply be given the room it has — derives one from them
+    // (`fittingHeight`). Two copies of these numbers would silently clip.
+    /// The gap above the first section header, and below the last row.
+    static let contentInset: CGFloat = 12
+    /// A section header ("TIMELINE", "TIME BY STATUS") and the air under it.
+    static let sectionHeaderStride: CGFloat = 20
+    static let laneRowHeight: CGFloat = 18
+    /// One lane row plus the gap to the next.
+    static let laneRowStride: CGFloat = 22
+    static let statusRowHeight: CGFloat = 16
+    /// One status bar plus the gap to the next.
+    static let statusRowStride: CGFloat = 20
+    /// The air between the time axis and the section under it.
+    static let axisGap: CGFloat = 14
+
     /// One pane's worth of timeline — what the controller assembles from the
     /// recorder plus the pane's display label.
     struct Lane: Equatable {
@@ -572,16 +590,16 @@ final class ReviewPanelInsightsView: NSView {
 
         let inset: CGFloat = 10
         let width = max(0, contentContainer.bounds.width - inset * 2)
-        var y: CGFloat = 12
+        var y: CGFloat = Self.contentInset
 
         timelineHeader.frame = NSRect(
             x: inset, y: y, width: width,
             height: timelineHeader.intrinsicContentSize.height
         )
-        y += 20
+        y += Self.sectionHeaderStride
         for row in laneRows {
-            row.frame = NSRect(x: inset, y: y, width: width, height: 18)
-            y += 22
+            row.frame = NSRect(x: inset, y: y, width: width, height: Self.laneRowHeight)
+            y += Self.laneRowStride
         }
         // The axis, aligned under the lane track — start flush left, the
         // midpoint centred, the end flush right.
@@ -599,16 +617,39 @@ final class ReviewPanelInsightsView: NSView {
         axisEndField.frame = NSRect(
             x: trackX + trackWidth - endWidth, y: y, width: endWidth, height: axisHeight
         )
-        y += axisHeight + 14
+        y += axisHeight + Self.axisGap
 
         statusHeader.frame = NSRect(
             x: inset, y: y, width: width,
             height: statusHeader.intrinsicContentSize.height
         )
-        y += 20
+        y += Self.sectionHeaderStride
         for row in statusRows {
-            row.frame = NSRect(x: inset, y: y, width: width, height: 16)
-            y += 20
+            row.frame = NSRect(x: inset, y: y, width: width, height: Self.statusRowHeight)
+            y += Self.statusRowStride
         }
+    }
+
+    /// The height this view needs to draw everything it is currently holding,
+    /// bar for bar — `applyLayout`'s own arithmetic, run without laying
+    /// anything out.
+    ///
+    /// It exists because this view has no intrinsic size (it lays itself out
+    /// top-down in manual frames), so a host inside a *scroll view* has to
+    /// state a height for it, and any fixed number silently stops drawing
+    /// lanes past the count it was guessed for. The review panel needs none
+    /// of this — it gives the tab the panel's whole height and clips — but
+    /// the Insights page's Activity tab scrolls, so it asks
+    /// (`InsightsSurfaceView.applyActivity`). Empty (no segments anywhere),
+    /// the answer is the empty state's, which the caller floors anyway.
+    var fittingHeight: CGFloat {
+        guard !laneRows.isEmpty else { return Self.headerHeight + Self.contentInset * 2 }
+        var height = Self.contentInset
+        height += Self.sectionHeaderStride
+        height += CGFloat(laneRows.count) * Self.laneRowStride
+        height += axisStartField.intrinsicContentSize.height + Self.axisGap
+        height += Self.sectionHeaderStride
+        height += CGFloat(statusRows.count) * Self.statusRowStride
+        return Self.headerHeight + height + Self.contentInset
     }
 }

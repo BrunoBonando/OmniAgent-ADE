@@ -109,6 +109,49 @@ final class InsightsViewTests: XCTestCase {
         XCTAssertEqual(reported, [.activity])
     }
 
+    // MARK: - The Activity tape's room
+
+    /// The tape draws its lanes in manual frames inside whatever height the
+    /// page states, so a fixed height silently stops drawing past the count
+    /// it was guessed for — on the one page whose point is every session's
+    /// panes. 25 lanes: the last row's foot has to be inside the tape.
+    func testTheActivityTapeGrowsToHoldEveryLane() throws {
+        let view = InsightsSurfaceView()
+        view.select(.activity)
+
+        let now: Double = 1_000_000
+        view.applyActivity(lanes: lanes(count: 25, now: now), activities: [], now: now)
+        layout(view)
+
+        XCTAssertEqual(view.activity.laneRows.count, 25)
+        let last = try XCTUnwrap(view.activity.laneRows.last)
+        let foot = last.convert(last.bounds, to: view.activity).maxY
+        XCTAssertGreaterThan(foot, 0)
+        XCTAssertLessThanOrEqual(
+            foot,
+            view.activity.bounds.maxY,
+            "the 25th lane is drawn inside the tape, not past its foot"
+        )
+    }
+
+    /// The height is derived, not fixed: more lanes, more tape. Below the
+    /// floor it stays at the floor — an empty tape still has room for its
+    /// empty state.
+    func testTheTapesHeightFollowsTheLaneCount() {
+        let view = InsightsSurfaceView()
+        view.select(.activity)
+        let now: Double = 1_000_000
+
+        view.applyActivity(lanes: [], activities: [], now: now)
+        layout(view)
+        let empty = view.activity.frame.height
+        XCTAssertEqual(empty, InsightsSurfaceView.activityMinimumHeight, accuracy: 0.5)
+
+        view.applyActivity(lanes: lanes(count: 40, now: now), activities: [], now: now)
+        layout(view)
+        XCTAssertGreaterThan(view.activity.frame.height, empty, "40 lanes need more than the floor")
+    }
+
     // MARK: - The hosted charts
 
     /// The SwiftUI usage view is hosted inside the card under the KPI row,
@@ -170,6 +213,18 @@ final class InsightsViewTests: XCTestCase {
     private func layout(_ view: InsightsSurfaceView, width: CGFloat = 1_200, height: CGFloat = 900) {
         view.frame = NSRect(x: 0, y: 0, width: width, height: height)
         view.layoutSubtreeIfNeeded()
+    }
+
+    /// `count` lanes, each with one real segment — real because a tape whose
+    /// lanes are all empty draws the empty state instead of any rows.
+    private func lanes(count: Int, now: Double) -> [ReviewPanelInsightsView.Lane] {
+        (0..<count).map { index in
+            ReviewPanelInsightsView.Lane(
+                paneID: "pane-\(index)",
+                title: "Session \(index) · Claude",
+                segments: [PaneStatusSegment(status: .thinking, start: now - 60_000, end: now)]
+            )
+        }
     }
 
     private func insights(

@@ -67,8 +67,20 @@ final class WorkspaceTitleBarView: NSView {
     /// Whether there is a session for the review panel to review. Absent, not
     /// disabled: a greyed-out control invites a click that will never work.
     var isReviewToggleVisible: Bool = false {
-        didSet { reviewButton.isHidden = !isReviewToggleVisible }
+        didSet {
+            reviewButton.isHidden = !isReviewToggleVisible
+            applyTrailingClearance()
+        }
     }
+
+    /// The span the top-right cluster occupies, whichever controls are in it
+    /// — a guide rather than any one button's anchor, because the innermost
+    /// control *changes*: the review toggle comes and goes, and pinning to
+    /// the bell alone would let the session's name run under the toggle
+    /// whenever there is a session to review.
+    private let clearanceGuide = NSLayoutGuide()
+    private var clearanceFromReview: NSLayoutConstraint?
+    private var clearanceFromBell: NSLayoutConstraint?
 
     init() {
         super.init(frame: .zero)
@@ -151,7 +163,24 @@ final class WorkspaceTitleBarView: NSView {
             constraints.append(light.widthAnchor.constraint(equalToConstant: PaneHeaderButton.iconSize))
             constraints.append(light.heightAnchor.constraint(equalToConstant: PaneHeaderButton.iconSize))
         }
+        addLayoutGuide(clearanceGuide)
+        constraints.append(contentsOf: [
+            clearanceGuide.topAnchor.constraint(equalTo: topAnchor),
+            clearanceGuide.bottomAnchor.constraint(equalTo: bottomAnchor),
+            clearanceGuide.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
         NSLayoutConstraint.activate(constraints)
+        clearanceFromReview = clearanceGuide.leadingAnchor.constraint(equalTo: reviewButton.leadingAnchor)
+        clearanceFromBell = clearanceGuide.leadingAnchor.constraint(
+            equalTo: notificationsButton.leadingAnchor
+        )
+        applyTrailingClearance()
+    }
+
+    /// Points the guide at whichever control is currently innermost.
+    private func applyTrailingClearance() {
+        clearanceFromReview?.isActive = isReviewToggleVisible
+        clearanceFromBell?.isActive = !isReviewToggleVisible
     }
 
     @available(*, unavailable)
@@ -194,6 +223,12 @@ final class WorkspaceTitleBarView: NSView {
     /// column reaches the window's left edge and would take the name under
     /// these buttons — this is what the name's own constraint holds it clear of.
     var titleClearanceAnchor: NSLayoutXAxisAnchor { sidebarButton.trailingAnchor }
+
+    /// The rightmost edge the session's name may claim — the leading edge of
+    /// the top-right cluster, review toggle included when it is showing. The
+    /// name has a leading anchor and a centre; without this a long session
+    /// name simply drew under the bell and the avatar.
+    var trailingClearanceAnchor: NSLayoutXAxisAnchor { clearanceGuide.leadingAnchor }
 
     /// Test seam: the controls in the order they are laid out, so a test can
     /// assert what the bar carries without reaching into private storage.

@@ -1383,11 +1383,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
         // Only now: the name is in the content column and the bar is the
         // overlay, so this is the first moment the two share an ancestor —
-        // activating it any earlier throws for having none.
+        // activating it any earlier throws for having none. Both ends: a long
+        // session name used to run straight under the review toggle, the bell
+        // and the avatar, since the field had a leading edge and a centre but
+        // no right-hand wall.
+        sessionTitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         NSLayoutConstraint.activate([
             sessionTitleField.leadingAnchor.constraint(
                 greaterThanOrEqualTo: titleBar.titleClearanceAnchor,
                 constant: 12
+            ),
+            sessionTitleField.trailingAnchor.constraint(
+                lessThanOrEqualTo: titleBar.trailingClearanceAnchor,
+                constant: -12
             ),
         ])
     }
@@ -5042,7 +5050,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             for session in node.sessions { sessionLabels[session.id] = session.label }
         }
         let paneIDs = panes.filter { $0.kind == .terminal }.map(\.sessionID)
-        insightsView.activity.apply(
+        insightsView.applyActivity(
             lanes: insightsLanes(for: paneIDs, now: now) { id in
                 guard let pane = workspace.descriptor(for: id) else { return id }
                 let session = sessionLabels[pane.group] ?? pane.group
@@ -5524,7 +5532,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // `refreshAccountSection`. That is the point on the log-out path: a
         // name left standing over a signed-out account is worse than a
         // moment of "Not signed in" over a signed-in one.
-        applyAccountRow(name: nil, pictureURL: "")
+        applyAccountIdentity(name: nil, pictureURL: "")
         if !signedIn { accountDisplayLabel = "" }
     }
 
@@ -5536,13 +5544,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private var avatarFetchesInFlight: Set<String> = []
     /// Who the chip is currently for — what a picture arriving late is
     /// checked against before it is allowed on screen.
-    private var accountRowName: String?
-    private var accountRowPictureURL = ""
+    private var accountName: String?
+    private var accountPictureURL = ""
     /// The account's email, kept from the same `auth_account_email` read the
     /// Settings section already makes — the account popover prints it, and a
     /// second read of a row this one already has in hand would be one more
     /// place for the two to disagree.
-    private var accountRowEmail: String?
+    private var accountEmail: String?
 
     /// Hands the title bar's avatar — the one place the account shows since
     /// the sidebar's chip was removed (the flow layout spec's §3) — its
@@ -5551,10 +5559,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// An empty URL, an unparseable one, or bytes that are not an image all
     /// leave the avatar on its initials-or-glyph circle — a complete state
     /// rather than a placeholder, so nothing here needs to fail loudly.
-    private func applyAccountRow(name: String?, pictureURL: String) {
+    private func applyAccountIdentity(name: String?, pictureURL: String) {
         let url = pictureURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        accountRowName = name
-        accountRowPictureURL = url
+        accountName = name
+        accountPictureURL = url
         titleBar.accountButton.apply(name: name, picture: avatarCache[url])
         guard avatarCache[url] == nil, !url.isEmpty, !avatarFetchesInFlight.contains(url),
               let parsed = URL(string: url)
@@ -5569,8 +5577,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 self.avatarCache[url] = image
                 // The avatar may have moved on while the bytes were in flight
                 // — a log-out, or a different account signed in behind it.
-                guard self.accountRowPictureURL == url else { return }
-                self.titleBar.accountButton.apply(name: self.accountRowName, picture: image)
+                guard self.accountPictureURL == url else { return }
+                self.titleBar.accountButton.apply(name: self.accountName, picture: image)
             }
         }.resume()
     }
@@ -5607,7 +5615,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let signedIn = signedInRaw == "true"
             settingsStore.get(SettingsKey.authAccountEmail) { [weak self] emailResult in
                 guard let self, case .success(let email) = emailResult else { return }
-                accountRowEmail = signedIn ? email : nil
+                accountEmail = signedIn ? email : nil
                 settingsStore.get(SettingsKey.authGithubLogin) { [weak self] githubResult in
                     guard let self, case .success(let githubLogin) = githubResult else { return }
                     settingsView.applyAccount(email: email, signedIn: signedIn, githubLogin: githubLogin)
@@ -5622,7 +5630,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                                 .first { !$0.isEmpty }
                             accountDisplayLabel = signedIn ? (display ?? "") : ""
-                            applyAccountRow(
+                            applyAccountIdentity(
                                 name: signedIn ? display : nil,
                                 pictureURL: signedIn ? (picture ?? "") : ""
                             )
@@ -5726,7 +5734,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     @discardableResult
     func presentAccountMenu() -> HomeDropdownView {
-        let email = accountRowEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
         let signedIn = settingsView.accountSignedIn
         var identity: [HomeDropdown.Row] = []
         if let email, !email.isEmpty {
@@ -5739,7 +5747,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             )
         }
         let sections: [HomeDropdown.Section] = [
-            HomeDropdown.Section(header: accountRowName ?? "Not signed in", rows: identity),
+            HomeDropdown.Section(header: accountName ?? "Not signed in", rows: identity),
             HomeDropdown.Section(rows: [
                 HomeDropdown.Row(
                     icon: HomeDropdown.symbol("person.crop.circle"),
@@ -6388,10 +6396,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the spotlight's "Help" are the same act. `NSApp.helpMenu` is built by
     /// `AppDelegate`, so under the test host there is none and this is a
     /// no-op rather than a crash.
+    ///
+    /// With the sidebar collapsed that row is inside a hidden split item, and
+    /// a menu popped from a hidden view appears in the window's bottom-left
+    /// corner or not at all — so the spotlight's "Help", which works whatever
+    /// the sidebar is doing, falls back to the title bar's account button.
     func showHelpMenu() {
         guard let menu = NSApp.helpMenu else { return }
         let row = shellSidebar.helpRow
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: row.bounds.maxY), in: row)
+        guard row.isHiddenOrHasHiddenAncestor else {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: row.bounds.maxY), in: row)
+            return
+        }
+        // The bar's buttons are unflipped, so `y: 0` is the button's bottom
+        // edge — the menu falls out of the title bar rather than over it.
+        let button = titleBar.accountButton
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: button)
     }
 
     /// Settings, opened on a particular section.

@@ -37,7 +37,9 @@ final class PageShellView: NSView {
     /// header is the page's own boundary now.
     let scroll: ShellScrollView
     /// 2pt, `ShellPalette.ink`, under the selected tab. A test seam as much
-    /// as a control: its frame is how a test confirms a press moved it.
+    /// as a control: its frame is how a test confirms a press moved it. It
+    /// joins the header only when there *are* tabs — on a tabless page it
+    /// stays superview-less rather than sitting there unconstrained.
     let underline = NSView()
     /// The title/tabs/rule block, pinned to the shell's own top edge and
     /// spanning its full width — `trailingAccessory` and the hairline rule
@@ -76,8 +78,6 @@ final class PageShellView: NSView {
         underline.translatesAutoresizingMaskIntoConstraints = false
         underline.wantsLayer = true
         underline.layer?.backgroundColor = ShellPalette.ink.cgColor
-        underline.isHidden = tabs.isEmpty
-        header.addSubview(underline)
 
         let rule = ShellSeparator()
         header.addSubview(rule)
@@ -90,6 +90,11 @@ final class PageShellView: NSView {
                 header.bottomAnchor.constraint(equalTo: rule.bottomAnchor),
             ])
         } else {
+            // The underline belongs to the strip, so it is only added when
+            // there is a strip: a tabless page that adopted it got an
+            // unconstrained subview — ambiguous layout, and a stray view in
+            // the tree — for a mark it would never draw.
+            header.addSubview(underline)
             // Rows go straight into `header` — not an `NSStackView` — so a
             // tab's frame and `underline`'s share one coordinate space. The
             // underline is pinned to the selected row's own leading/width

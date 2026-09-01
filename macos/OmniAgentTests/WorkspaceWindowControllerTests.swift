@@ -1470,6 +1470,32 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// The session's name stops at the top-right cluster instead of drawing
+    /// under it. The field had a leading edge and a centre and no right-hand
+    /// wall, so a long name ran straight through the bell and the avatar.
+    func testALongSessionNameStopsShortOfTheTitleBarsControls() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 900), display: true)
+
+        controller.sessionTitleField.stringValue = String(repeating: "A", count: 200)
+        window.layoutIfNeeded()
+
+        let root = try XCTUnwrap(window.contentView)
+        // The alignment rect, not the frame: an `NSTextField`'s frame is a
+        // couple of points wider than the box its constraints are pinned to.
+        let field = controller.sessionTitleField
+        let name = field.convert(field.alignmentRect(forFrame: field.bounds), to: root)
+        let bell = controller.titleBar.notificationsButton.convert(
+            controller.titleBar.notificationsButton.bounds, to: root
+        )
+        XCTAssertGreaterThan(name.width, 0, "the name is on screen at all")
+        XCTAssertLessThanOrEqual(name.maxX, bell.minX - 12, "and stops 12pt short of the bell")
+        XCTAssertEqual(controller.sessionTitleField.lineBreakMode, .byTruncatingTail)
+    }
+
     /// Insights is a real page now (flow-layout spec §6), so it shows its own
     /// screen and every other destination — the To Do placeholder it used to
     /// borrow included — goes away under it.
