@@ -258,7 +258,11 @@ final class MenuBarControllerTests: XCTestCase {
     /// is switched on from Settings, not only the next time the menu opens.
     @MainActor
     func testRefreshShareIconReflectsTheWorkspacesSharingState() throws {
-        let store = SettingsStore(client: FakeSettingsClient())
+        // The account row is what makes sharing switchable on at all
+        // (`RemoteSharingModel.setSharing`).
+        let store = SettingsStore(client: FakeSettingsClient(
+            rows: ["auth_account_email": "bruno@bonando.com"]
+        ))
         let controller = WorkspaceWindowController(
             connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-menubar-share-test.sock")),
             panes: [],
@@ -278,6 +282,70 @@ final class MenuBarControllerTests: XCTestCase {
             menuBar.statusItem.button?.image?.isTemplate, false,
             "the icon turns non-template — tinted — the moment sharing goes on, without opening the menu"
         )
+    }
+
+    /// The blue state (spec §2, Task 16): the icon goes blue for exactly as
+    /// long as somebody is driving this Mac — the same span the takeover
+    /// panel is up for, because both are one reading of
+    /// `RemoteSharingModel.liveConnection`. `.connected` was unreachable
+    /// until this landed: nothing set it.
+    @MainActor
+    func testTheIconGoesBlueForExactlyAsLongAsAMachineIsConnected() throws {
+        let store = SettingsStore(client: FakeSettingsClient(
+            rows: ["auth_account_email": "bruno@bonando.com"]
+        ))
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-menubar-blue-test.sock")),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: store),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+        let menuBar = MenuBarController(workspace: controller)
+
+        controller.toggleRemoteSharing()
+        menuBar.refreshShareIcon()
+        let green = try tint(of: XCTUnwrap(menuBar.statusItem.button?.image))
+        XCTAssertGreaterThan(green.green, green.blue, "sharing and idle is green")
+
+        controller.applyRemoteViewers([RemoteViewer(
+            viewerID: "v-air",
+            machineName: "Air",
+            sessions: ["s1"],
+            since: "2026-09-01T09:00:00Z",
+            accountEmail: "bruno@bonando.com"
+        )])
+        XCTAssertNotNil(controller.liveRemoteConnection)
+        XCTAssertNotNil(controller.takeoverPanel, "and the panel is up for the same span")
+        menuBar.refreshShareIcon()
+        let blue = try tint(of: XCTUnwrap(menuBar.statusItem.button?.image))
+        XCTAssertGreaterThan(blue.blue, blue.green, "somebody is driving this Mac")
+
+        controller.applyRemoteViewers([])
+        XCTAssertNil(controller.takeoverPanel, "and it goes with them")
+        menuBar.refreshShareIcon()
+        let again = try tint(of: XCTUnwrap(menuBar.statusItem.button?.image))
+        XCTAssertGreaterThan(again.green, again.blue, "back to green, still sharing")
+    }
+
+    /// The colour of the most opaque pixel in a status icon — the mark is
+    /// filled `.sourceAtop` with one flat tint, so this is that tint.
+    private func tint(of image: NSImage) throws -> (red: CGFloat, green: CGFloat, blue: CGFloat) {
+        let data = try XCTUnwrap(image.tiffRepresentation)
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: data))
+        var best: NSColor?
+        var bestAlpha: CGFloat = 0
+        for x in 0..<rep.pixelsWide {
+            for y in 0..<rep.pixelsHigh {
+                guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                if color.alphaComponent > bestAlpha {
+                    bestAlpha = color.alphaComponent
+                    best = color
+                }
+            }
+        }
+        let color = try XCTUnwrap(best)
+        return (color.redComponent, color.greenComponent, color.blueComponent)
     }
 
     /// A suite of its own, torn down after — never the real app's defaults,

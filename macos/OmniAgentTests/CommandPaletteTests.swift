@@ -22,7 +22,11 @@ final class CommandPaletteTests: XCTestCase {
 
     func testAnEmptyWorkspaceStillOffersThePlaces() {
         XCTAssertEqual(
-            CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+            // Signed in, so the sharing switch is among them — signed out it
+            // is not (`testTheSharingRowIsNotOfferedWhileSignedOut`).
+            CommandPaletteModel.build(
+                panes: [], paneOrder: [], focusedPaneID: nil, canShareEnvironment: true
+            )
                 .map(\.id),
             [
                 "session:new-branch",
@@ -30,7 +34,7 @@ final class CommandPaletteTests: XCTestCase {
                 "settings:general", "settings:accounts", "settings:remote", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "settings:accounts:signin", "settings:accounts:github:connect",
-                "settings:remote:toggle-sharing",
+                "settings:remote:toggle-sharing", "settings:remote:blocked",
                 // Idle offers the check; a found or downloaded update swaps
                 // this row for the one that can actually be taken.
                 "update:check",
@@ -391,7 +395,9 @@ final class CommandPaletteTests: XCTestCase {
     /// control — the sharing switch — is a row of its own, the standing
     /// rule reaching *inside* the section exactly as it does for Accounts.
     func testRemoteSettingsRowsExist() {
-        let commands = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, canShareEnvironment: true
+        )
         let titles = commands.map(\.title)
         XCTAssertTrue(titles.contains("Remote"), "the section itself")
         XCTAssertTrue(titles.contains("Share this environment"))
@@ -405,6 +411,70 @@ final class CommandPaletteTests: XCTestCase {
         for typed in ["remote", "share", "sharing", "screen", "access", "connect"] {
             XCTAssertTrue(toggleRow.keywords?.contains(typed) == true, "someone would type \"\(typed)\"")
         }
+    }
+
+    /// The switch is offered only where it can be taken (carried over,
+    /// 2026-09-02): a Mac nobody is signed in to has no account to share
+    /// with — no device registration, and a daemon that refuses every viewer
+    /// — so the row stays away rather than appearing and failing. Same rule
+    /// the account pair follows, and `RemoteSharingModel.setSharing` refuses
+    /// the write besides.
+    func testTheSharingRowIsNotOfferedWhileSignedOut() {
+        let commands = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        XCTAssertNil(
+            commands.first { $0.id == "settings:remote:toggle-sharing" },
+            "nothing to share with, so nothing to offer"
+        )
+        XCTAssertNotNil(
+            commands.first { $0.id == "settings:remote:blocked" },
+            "the blocked list is still a place, signed in or out"
+        )
+    }
+
+    /// Settings › Remote's blocked list, and the takeover panel's two verbs
+    /// (spec §7, §10). Terminate and Block exist for exactly as long as
+    /// somebody is connected — there is nothing to terminate otherwise — and
+    /// the blocked list is a row whether or not anything is on it, because
+    /// "nothing is blocked" is an answer somebody types this to get.
+    func testBlockedMachinesAndTheTakeoverVerbsAreSpotlightRows() {
+        let idle = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, blockedMachineCount: 2
+        )
+        let blocked = try! XCTUnwrap(idle.first { $0.id == "settings:remote:blocked" })
+        XCTAssertEqual(blocked.title, "Blocked machines")
+        XCTAssertEqual(blocked.detail, "2 machines")
+        XCTAssertEqual(blocked.action, .showBlockedMachines)
+        XCTAssertEqual(blocked.subtitle, "Settings › Remote", "the row says where it lives")
+        XCTAssertEqual(blocked.section, .places)
+        XCTAssertEqual(blocked.symbol, "hand.raised")
+        for typed in ["blocked", "unblock", "remote", "machines"] {
+            XCTAssertTrue(blocked.keywords?.contains(typed) == true, "someone would type \"\(typed)\"")
+        }
+        XCTAssertTrue(
+            idle.filter { $0.id == "remote:terminate" || $0.id == "remote:block" }.isEmpty,
+            "nobody is connected, so there is nothing to terminate"
+        )
+
+        let live = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil, liveRemoteMachine: "MacBook Pro"
+        )
+        let terminate = try! XCTUnwrap(live.first { $0.id == "remote:terminate" })
+        XCTAssertEqual(terminate.title, "Terminate connection")
+        XCTAssertEqual(terminate.action, .terminateRemoteConnection)
+        XCTAssertEqual(terminate.detail, "MacBook Pro")
+        let block = try! XCTUnwrap(live.first { $0.id == "remote:block" })
+        XCTAssertEqual(block.title, "Block this machine")
+        XCTAssertEqual(block.action, .blockRemoteConnection)
+        XCTAssertEqual(block.subtitle, "Until you unblock it in Settings › Remote")
+        XCTAssertNil(live.first { $0.id == "settings:remote:blocked" }?.detail, "nothing blocked yet")
+
+        // Found by the machine's own name, which is what someone types when
+        // a particular Mac has to go.
+        var model = CommandPaletteModel(commands: live)
+        model.update(query: "MacBook")
+        XCTAssertEqual(
+            Set(model.matches.map(\.id)).intersection(["remote:terminate", "remote:block"]).count, 2
+        )
     }
 
     /// The two Help pages are spotlight rows too (standing rule: everything

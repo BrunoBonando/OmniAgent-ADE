@@ -337,6 +337,11 @@ final class SettingsSurfaceView: NSView {
     /// The same, for the GitHub pair: the spotlight offers "Disconnect
     /// GitHub" or "Connect GitHub…" off this one reading.
     private(set) var accountGitHubConnected = false
+    /// The address the account signs in with, `""` while there is none —
+    /// the app's own copy of the `auth_account_email` row the daemon's
+    /// account check runs on. Read by the sharing gate (`canShare`), which
+    /// is why it is stored rather than only rendered into `accountField`.
+    private(set) var accountEmail = ""
     /// The linked handle, without the `@` — `""` when not connected. Home's
     /// branch dropdown reads this to show who is actually connected instead
     /// of repeating the account bool as bare text.
@@ -355,9 +360,12 @@ final class SettingsSurfaceView: NSView {
     /// section holds only these two things, deliberately, rather than
     /// shipping empty placeholders for them.
     let shareToggle = NSButton(checkboxWithTitle: "Share this environment", target: nil, action: nil)
+    /// Seeded with the sharing copy and swapped for the sign-in copy by
+    /// `applyRemoteSharing(isSharing:canShare:)`, which init calls — the two
+    /// strings live as statics beside it so this field cannot drift from the
+    /// state that chose it.
     let shareExplanationField = ShellFont.label(
-        "Anyone signed in to your account on another Mac can use this computer as if they were "
-            + "sitting at it. You will see who is connected and everything they do.",
+        SettingsSurfaceView.shareExplanation,
         font: ShellFont.ui(12),
         color: ShellPalette.inkMuted
     )
@@ -367,10 +375,47 @@ final class SettingsSurfaceView: NSView {
     /// to the sharing switch (see `WorkspaceWindowController.registerThisMachine`).
     let thisMachineNameField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
     let thisMachineIDField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
+    /// Blocked machines (spec §7): one row per id in the daemon's
+    /// `remote_control_blocked`, each with the **Unblock** that is the only
+    /// way an entry ever leaves that row. The daemon writes the row on every
+    /// Block — a kick has to hold with the app closed — and the app only
+    /// removes from it, which is why this list is read-only apart from those
+    /// buttons.
+    let blockedHeaderField = ShellFont.label(
+        "Blocked machines",
+        font: ShellFont.ui(13, .semibold),
+        color: ShellPalette.ink
+    )
+    /// Shown in place of the list when nothing is blocked. An empty state,
+    /// not an absent section: "no machines are blocked" is an answer, and a
+    /// section that vanishes leaves the host wondering where it went.
+    let blockedEmptyField = ShellFont.label(
+        "No machines are blocked.",
+        font: ShellFont.ui(13),
+        color: ShellPalette.inkMuted
+    )
+    /// The rows themselves, rebuilt whenever the list changes.
+    let blockedList = NSStackView()
+    /// The ids as the model last reported them — one reading, so the list,
+    /// its empty state and the spotlight's row cannot disagree.
+    private(set) var blockedViewerIDs: [String] = []
+    /// Pressed on a row's Unblock; the controller does the write.
+    var onUnblock: ((String) -> Void)?
     /// `isSharing` as the model last reported it — the one reading of it, so
     /// `shareToggle.state` and the spotlight's row (Task 3, §10) can never
     /// disagree about which way the switch is thrown.
     private(set) var isSharing = false
+    /// Whether sharing *can* be switched on at all: there is an
+    /// `auth_account_email` row to share with.
+    ///
+    /// Not cosmetic. The daemon refuses every viewer whose relay-asserted
+    /// account does not match that row, and a missing row fails closed there
+    /// like any other mismatch (spec §9) — so a signed-out host could throw
+    /// this switch, watch the menu bar go green, and have every connection
+    /// refused for a reason stated nowhere near the switch. The structural
+    /// half of the answer is in `RemoteSharingModel.setSharing`, which
+    /// refuses the write; this is the half that says so before the click.
+    private(set) var canShare = false
     var onToggleRemoteSharing: (() -> Void)?
     /// General's update block: which version is running, what the updater is
     /// doing, and the one button that advances it. General rather than a
@@ -418,8 +463,13 @@ final class SettingsSurfaceView: NSView {
         shareToggle.target = self
         shareToggle.action = #selector(shareTogglePressed)
         shareToggle.translatesAutoresizingMaskIntoConstraints = false
-        applyRemoteSharing(isSharing: false)
+        blockedList.orientation = .vertical
+        blockedList.alignment = .leading
+        blockedList.spacing = 6
+        blockedList.translatesAutoresizingMaskIntoConstraints = false
+        applyRemoteSharing(isSharing: false, canShare: false)
         applyThisMachine(name: nil, deviceID: nil)
+        applyBlockedMachines([])
 
         updateButton.bezelStyle = .rounded
         updateButton.controlSize = .regular
@@ -434,7 +484,8 @@ final class SettingsSurfaceView: NSView {
         let column = NSStackView(views: [
             titleField, subtitleField, accountField, accountButton, githubField, githubButton,
             deleteAccountButton, shareToggle, shareExplanationField, thisMachineHeaderField,
-            thisMachineNameField, thisMachineIDField, updateVersionField, updateStatusField, updateButton,
+            thisMachineNameField, thisMachineIDField, blockedHeaderField, blockedEmptyField,
+            blockedList, updateVersionField, updateStatusField, updateButton,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -452,6 +503,10 @@ final class SettingsSurfaceView: NSView {
         // the switch's explanation.
         column.setCustomSpacing(22, after: shareExplanationField)
         column.setCustomSpacing(8, after: thisMachineHeaderField)
+        // The blocked list is its own fact about the Mac, not a third line
+        // of "This machine".
+        column.setCustomSpacing(22, after: thisMachineIDField)
+        column.setCustomSpacing(8, after: blockedHeaderField)
         column.setCustomSpacing(14, after: updateStatusField)
         column.translatesAutoresizingMaskIntoConstraints = false
 
@@ -517,15 +572,74 @@ final class SettingsSurfaceView: NSView {
         thisMachineHeaderField.isHidden = !isRemote
         thisMachineNameField.isHidden = !isRemote
         thisMachineIDField.isHidden = !isRemote
+        blockedHeaderField.isHidden = !isRemote
+        // Exactly one of the two is on screen at a time, and only on Remote.
+        blockedEmptyField.isHidden = !isRemote || !blockedViewerIDs.isEmpty
+        blockedList.isHidden = !isRemote || blockedViewerIDs.isEmpty
     }
 
     /// Bound to `RemoteSharingModel.isSharing` by the controller — never
     /// flipped locally on a click, since writes are non-optimistic (see
     /// `RemoteSharingModel`'s own doc comment): the switch shows only what
     /// the controller has confirmed actually landed.
-    func applyRemoteSharing(isSharing: Bool) {
+    ///
+    /// `canShare` is the sign-in gate: with no account there is nothing to
+    /// share *with* — no device registration, and a daemon that refuses every
+    /// viewer — so the switch is disabled and the copy under it says what to
+    /// do about that instead of describing a feature that cannot run.
+    func applyRemoteSharing(isSharing: Bool, canShare: Bool) {
         self.isSharing = isSharing
+        self.canShare = canShare
         shareToggle.state = isSharing ? .on : .off
+        // Never disabled while sharing is *on*: switching it off must always
+        // be possible, whatever the account rows say.
+        shareToggle.isEnabled = canShare || isSharing
+        shareExplanationField.stringValue = canShare
+            ? Self.shareExplanation
+            : Self.signInFirstExplanation
+    }
+
+    static let shareExplanation =
+        "Anyone signed in to your account on another Mac can use this computer as if they were "
+            + "sitting at it. You will see who is connected and everything they do."
+    static let signInFirstExplanation =
+        "Sign in to OmniAgent to share this environment. Sharing lets other Macs signed in to "
+            + "your account use this one, so there has to be an account first."
+
+    /// The blocked list, as the model last reported it. Rebuilt rather than
+    /// diffed: the list is a handful of rows a human curates, and a rebuild
+    /// cannot leave a stale Unblock button behind pointing at an id that is
+    /// no longer blocked.
+    func applyBlockedMachines(_ ids: [String]) {
+        blockedViewerIDs = ids
+        for view in blockedList.arrangedSubviews {
+            blockedList.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for id in ids {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 10
+            let label = ShellFont.label(id, font: ShellFont.ui(13), color: ShellPalette.inkSecondary)
+            let button = NSButton(title: "Unblock", target: self, action: #selector(unblockPressed(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = ShellFont.ui(12)
+            // The id travels on the button rather than in a captured closure,
+            // so a rebuilt list can never fire an old row's block.
+            button.identifier = NSUserInterfaceItemIdentifier(id)
+            row.addArrangedSubview(label)
+            row.addArrangedSubview(button)
+            blockedList.addArrangedSubview(row)
+        }
+        // Re-applies the section's visibility with the new emptiness.
+        select(section)
+    }
+
+    @objc private func unblockPressed(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        onUnblock?(id)
     }
 
     /// This Mac's own relay registration, read-only — `nil` for either
@@ -613,6 +727,7 @@ final class SettingsSurfaceView: NSView {
     func applyAccount(email: String?, signedIn: Bool, githubLogin: String? = nil) {
         let address = (email ?? "").trimmingCharacters(in: .whitespaces)
         accountSignedIn = signedIn
+        accountEmail = address
         accountField.stringValue = switch (signedIn, address.isEmpty) {
         case (false, _): "Not signed in"
         case (true, true): "Signed in"

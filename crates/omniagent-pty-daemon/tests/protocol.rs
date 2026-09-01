@@ -336,6 +336,10 @@ fn phase_2_payload_shapes_match_the_swift_client() {
         .unwrap(),
         serde_json::json!({"id": "sess-1", "cols": 120, "rows": 40})
     );
+    // The roster row an unrelayed or unasserted viewer produces: the four
+    // asserted fields are *absent keys*, not nulls and not empty strings, so
+    // "the relay said nothing" and "the relay said ''" stay different facts
+    // all the way to the host's panel, where the first omits the row.
     assert_eq!(
         serde_json::to_value(RemoteViewersPayload {
             viewers: vec![ViewerSummaryPayload {
@@ -343,6 +347,10 @@ fn phase_2_payload_shapes_match_the_swift_client() {
                 machine_name: "Air".into(),
                 sessions: vec!["pane-1".into()],
                 since: "2026-08-31T09:00:00+00:00".into(),
+                account_email: None,
+                ip: None,
+                country: None,
+                client: None,
             }],
         })
         .unwrap(),
@@ -351,6 +359,33 @@ fn phase_2_payload_shapes_match_the_swift_client() {
             "machine_name": "Air",
             "sessions": ["pane-1"],
             "since": "2026-08-31T09:00:00+00:00"
+        }]})
+    );
+    // And the same row once the relay has described the connection (spec §9):
+    // four more keys, snake_case, beside the two self-reported ones.
+    assert_eq!(
+        serde_json::to_value(RemoteViewersPayload {
+            viewers: vec![ViewerSummaryPayload {
+                viewer_id: "v-air".into(),
+                machine_name: "Air".into(),
+                sessions: vec![],
+                since: "2026-08-31T09:00:00+00:00".into(),
+                account_email: Some("bruno@bonando.com".into()),
+                ip: Some("203.0.113.7".into()),
+                country: Some("DE".into()),
+                client: Some("OmniAgent/1.7.22 macOS 27.0".into()),
+            }],
+        })
+        .unwrap(),
+        serde_json::json!({"viewers": [{
+            "viewer_id": "v-air",
+            "machine_name": "Air",
+            "sessions": [],
+            "since": "2026-08-31T09:00:00+00:00",
+            "account_email": "bruno@bonando.com",
+            "ip": "203.0.113.7",
+            "country": "DE",
+            "client": "OmniAgent/1.7.22 macOS 27.0"
         }]})
     );
     assert_eq!(

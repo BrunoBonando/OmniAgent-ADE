@@ -73,12 +73,51 @@ struct RemoteViewer: Codable, Equatable {
     let sessions: [String]
     /// RFC 3339, when this viewer connected.
     let since: String
+    /// Relay-asserted: the account the viewer's JWT is signed in as
+    /// (`AssertedIdentity`, daemon `connections.rs`; spec §9).
+    let accountEmail: String?
+    /// Relay-asserted: `CF-Connecting-IP`, set by Cloudflare at the edge.
+    let ip: String?
+    /// Relay-asserted: `CF-IPCountry`, same.
+    let country: String?
+    /// The viewer app's user agent as the relay saw it — relayed, but *set
+    /// by the client*, so the takeover panel shows what it carries (app
+    /// version, OS) **unmarked**, beside the self-reported machine name.
+    /// Only `accountEmail`/`ip`/`country` were checked by anybody.
+    let client: String?
+
+    /// The four asserted fields are absent on a row the relay said nothing
+    /// about — and on every row an older daemon sends, which is why they
+    /// decode as `nil` rather than failing the whole roster.
+    init(
+        viewerID: String,
+        machineName: String,
+        sessions: [String],
+        since: String,
+        accountEmail: String? = nil,
+        ip: String? = nil,
+        country: String? = nil,
+        client: String? = nil
+    ) {
+        self.viewerID = viewerID
+        self.machineName = machineName
+        self.sessions = sessions
+        self.since = since
+        self.accountEmail = accountEmail
+        self.ip = ip
+        self.country = country
+        self.client = client
+    }
 
     enum CodingKeys: String, CodingKey {
         case viewerID = "viewer_id"
         case machineName = "machine_name"
         case sessions
         case since
+        case accountEmail = "account_email"
+        case ip
+        case country
+        case client
     }
 }
 
@@ -527,15 +566,29 @@ final class SessionConnection {
         }
     }
 
-    /// Kicks one viewer: the daemon drops its data WebSocket immediately and
-    /// blocks the viewer id (in its own `remote_control_blocked` settings
-    /// row) until Remote Control is switched on again. Local-only, like
-    /// `listViewers`.
+    /// Kicks one viewer: the daemon drops its data WebSocket immediately.
+    ///
+    /// **Terminate and Block are two different verbs** (2026-09-01 remote
+    /// environment sharing spec §7, daemon Task 14). `block: false`
+    /// terminates — the socket goes and the machine is free to dial straight
+    /// back. `block: true` also appends the viewer id to the daemon's own
+    /// `remote_control_blocked` row, so it is refused at its next `Hello`
+    /// until someone unblocks it in Settings › Remote. The daemon is the only
+    /// writer of that row; the app only ever removes from it
+    /// (`RemoteSharingModel.unblock`).
+    ///
+    /// `block` defaults to `true`, which is what `DisconnectViewer` meant
+    /// before the field existed — phase 2's popover Disconnect keeps its
+    /// behaviour without naming it. Local-only, like `listViewers`.
     func disconnectViewer(
         viewerID: String,
+        block: Bool = true,
         completion: ((Result<Void, Error>) -> Void)? = nil
     ) {
-        sendCodable(kind: .disconnectViewer, value: DisconnectViewerPayload(viewerID: viewerID)) {
+        sendCodable(
+            kind: .disconnectViewer,
+            value: DisconnectViewerPayload(viewerID: viewerID, block: block)
+        ) {
             self.finishResponse($0, completion: completion)
         }
     }
@@ -1474,9 +1527,14 @@ private struct RemoteViewersPayload: Codable {
 
 private struct DisconnectViewerPayload: Codable {
     let viewerID: String
+    /// Kick and keep out (`true`) or kick only (`false`) — the daemon's
+    /// `DisconnectViewerPayload.block`. Always sent explicitly from here;
+    /// the daemon's `#[serde(default)]` covers callers older than the field.
+    let block: Bool
 
     enum CodingKeys: String, CodingKey {
         case viewerID = "viewer_id"
+        case block
     }
 }
 

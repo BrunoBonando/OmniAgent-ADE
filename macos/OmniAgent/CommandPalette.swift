@@ -56,6 +56,14 @@ enum PaletteAction: Equatable {
     /// above: sharing is a plain on/off switch with one verb, not a mode
     /// with a different one on each side.
     case toggleRemoteSharing
+    /// Settings › Remote's blocked list (spec §7, §10) — a place inside a
+    /// section, which the standing rule says is findable by name.
+    case showBlockedMachines
+    /// The takeover panel's two verbs (spec §7), reachable by typing rather
+    /// than only by finding the buttons. Present only while somebody is
+    /// actually connected — there is nothing to terminate otherwise.
+    case terminateRemoteConnection
+    case blockRemoteConnection
     /// Self-update, in its three takeable forms. Like the account rows
     /// above, only the one the current state actually allows becomes a row —
     /// offering "Restart to Update" with nothing downloaded is a dead end.
@@ -420,7 +428,18 @@ struct CommandPaletteModel: Equatable {
         watchedWorkspaces: [PaletteWatchedWorkspace] = [],
         /// What the self-update controller is doing, which decides which of
         /// the three update rows is offered.
-        updateState: UpdateState = .idle
+        updateState: UpdateState = .idle,
+        /// Whether sharing can be switched on at all — an
+        /// `auth_account_email` row exists. Defaults to `false`, fail-closed
+        /// like every other reading of this: a signed-out Mac has no device
+        /// registration to share with, and offering the switch there is
+        /// offering a button whose every outcome is a refusal.
+        canShareEnvironment: Bool = false,
+        /// The machine driving this Mac right now, by name — `nil` when
+        /// nobody is. Decides whether Terminate/Block are rows at all.
+        liveRemoteMachine: String? = nil,
+        /// How many machines are blocked, for the blocked-list row's detail.
+        blockedMachineCount: Int = 0
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -735,22 +754,74 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
-        // Settings › Remote's one control (2026-09-01 remote environment
-        // sharing spec §10) — a fixed row unconditionally, not gated on
-        // current state like the pairs above: the switch has one verb
-        // whichever way it is thrown.
+        // Settings › Remote's switch (2026-09-01 remote environment sharing
+        // spec §10). One verb whichever way it is thrown, so unlike the
+        // account pairs above there is one row rather than two — but it is
+        // offered only where it can be taken: a Mac nobody is signed in to
+        // has no account to share with, and the switch itself refuses there
+        // (`RemoteSharingModel.setSharing`).
+        if canShareEnvironment {
+            commands.append(
+                PaletteCommand(
+                    id: "settings:remote:toggle-sharing",
+                    title: "Share this environment",
+                    detail: nil,
+                    action: .toggleRemoteSharing,
+                    keywords: "remote share sharing screen access connect environment",
+                    section: .places,
+                    subtitle: "Settings › Remote",
+                    symbol: "antenna.radiowaves.left.and.right"
+                )
+            )
+        }
+        // The blocked list, which is a place inside that section — always a
+        // row, empty or not: "nothing is blocked" is an answer somebody types
+        // this to get.
         commands.append(
             PaletteCommand(
-                id: "settings:remote:toggle-sharing",
-                title: "Share this environment",
-                detail: nil,
-                action: .toggleRemoteSharing,
-                keywords: "remote share sharing screen access connect environment",
+                id: "settings:remote:blocked",
+                title: "Blocked machines",
+                detail: blockedMachineCount == 0
+                    ? nil
+                    : (blockedMachineCount == 1 ? "1 machine" : "\(blockedMachineCount) machines"),
+                action: .showBlockedMachines,
+                keywords: "blocked block unblock remote machines banned refused allow",
                 section: .places,
                 subtitle: "Settings › Remote",
-                symbol: "antenna.radiowaves.left.and.right"
+                symbol: "hand.raised"
             )
         )
+        // Terminate and Block, while there is a connection to end (spec §7,
+        // §10) — the takeover panel's two buttons, typeable. Absent
+        // otherwise, the same one-row-only-where-it-can-be-taken rule the
+        // account rows follow.
+        if let liveRemoteMachine {
+            commands.append(
+                PaletteCommand(
+                    id: "remote:terminate",
+                    title: "Terminate connection",
+                    detail: liveRemoteMachine,
+                    action: .terminateRemoteConnection,
+                    keywords: "terminate disconnect kick end remote connection "
+                        + "stop \(liveRemoteMachine)",
+                    section: .places,
+                    subtitle: "\(liveRemoteMachine) may connect again",
+                    symbol: "bolt.horizontal.circle"
+                )
+            )
+            commands.append(
+                PaletteCommand(
+                    id: "remote:block",
+                    title: "Block this machine",
+                    detail: liveRemoteMachine,
+                    action: .blockRemoteConnection,
+                    keywords: "block ban refuse kick remote connection \(liveRemoteMachine)",
+                    section: .places,
+                    subtitle: "Until you unblock it in Settings › Remote",
+                    symbol: "hand.raised.slash"
+                )
+            )
+        }
         // Self-update. One row, whichever one can be taken right now — the
         // same rule the account pair follows. `Spotlight finds everything`
         // (the repo's standing rule) is why these exist at all: the sidebar

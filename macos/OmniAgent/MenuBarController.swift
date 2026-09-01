@@ -34,9 +34,10 @@ struct MenuBarSummary: Equatable {
 }
 
 /// The status icon's three states (2026-09-01 remote environment sharing
-/// spec §2). `.off`/`.sharing` are real as of Task 4; `.connected` is
-/// reachable and correct once something sets it, but nothing does yet —
-/// that is the live remote lease, Task 16's.
+/// spec §2): template when sharing is off, **green** when this Mac is
+/// reachable and idle, **blue** for exactly as long as somebody is driving
+/// it — the same span the takeover panel is up for, since both are one
+/// reading of `RemoteSharingModel.liveConnection`.
 enum MenuBarShareState { case off, sharing, connected }
 
 /// Pure menu construction, `SessionContextMenu.build`'s pattern: no AppKit
@@ -209,11 +210,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         )
     }
 
-    /// This controller's own reading of the sharing state — `.off`/`.sharing`
-    /// off `workspace.isSharingEnvironment`; `.connected` is not wired to
-    /// anything yet (Task 16's live lease).
+    /// This controller's own reading of the sharing state.
+    ///
+    /// `.connected` wins over `.sharing`: a live connection is only possible
+    /// while sharing is on, and it is the more urgent of the two facts. It is
+    /// asked of the workspace rather than of `RemoteSharingModel` directly,
+    /// `isSharingEnvironment`'s reasoning — one seam, so nothing outside the
+    /// controller has to know the model exists.
     private var shareState: MenuBarShareState {
-        workspace?.isSharingEnvironment == true ? .sharing : .off
+        guard let workspace else { return .off }
+        if workspace.liveRemoteConnection != nil { return .connected }
+        return workspace.isSharingEnvironment ? .sharing : .off
     }
 
     /// Redraws the status item's icon from the current sharing state —

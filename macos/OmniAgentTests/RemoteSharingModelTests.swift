@@ -13,7 +13,9 @@ final class RemoteSharingModelTests: XCTestCase {
     /// `remote_control_active` (Task 1) reads this exact row and shape, and
     /// a mismatch silently disables remote sharing.
     func testSetSharingWritesTheFlagRow() throws {
-        let client = FakeSettingsClient()
+        // Sharing can only be switched *on* with an account to share with —
+        // see `testSharingCannotBeSwitchedOnWithNoAccountRow` below.
+        let client = FakeSettingsClient(rows: ["auth_account_email": "bruno@bonando.com"])
         let store = SettingsStore(client: client)
         let model = RemoteSharingModel(store: store)
 
@@ -61,7 +63,10 @@ final class RemoteSharingModelTests: XCTestCase {
     /// Do not "fix" `setSharing` to clear `remote_control_blocked` again —
     /// this is the point, not a regression.
     func testTurningSharingOnDoesNotClearTheBlockedList() throws {
-        let client = FakeSettingsClient(rows: ["remote_control_blocked": #"["mac-a"]"#])
+        let client = FakeSettingsClient(rows: [
+            "remote_control_blocked": #"["mac-a"]"#,
+            "auth_account_email": "bruno@bonando.com",
+        ])
         let store = SettingsStore(client: client)
         let model = RemoteSharingModel(store: store)
 
@@ -113,7 +118,7 @@ final class RemoteSharingModelTests: XCTestCase {
     /// toggle bound to it would show "on" forever even though the daemon
     /// never heard about it.
     func testAFailedSetSharingWriteLeavesIsSharingUnchanged() throws {
-        let client = FakeSettingsClient()
+        let client = FakeSettingsClient(rows: ["auth_account_email": "bruno@bonando.com"])
         client.failingWrites = [SettingsKey.remoteSharing]
         let store = SettingsStore(client: client)
         let model = RemoteSharingModel(store: store)
@@ -142,6 +147,115 @@ final class RemoteSharingModelTests: XCTestCase {
         XCTAssertEqual(model.blockedViewerIDs, ["mac-a"], "a failed write must not be believed")
         XCTAssertEqual(client.rows["remote_control_blocked"], #"["mac-a"]"#, "nothing reached the store")
         XCTAssertEqual(failures.count, 1)
+    }
+
+    // MARK: - No retry timer (carried over from Task 2, 2026-09-01)
+
+    // MARK: - Sharing needs an account (carried over, 2026-09-02)
+
+    /// **No `auth_account_email` row, no sharing.**
+    ///
+    /// The daemon refuses every viewer whose relay-asserted account does not
+    /// match that row, and a *missing* row fails closed there like any other
+    /// mismatch (spec §9, `viewer_owns_this_account`). Without this check a
+    /// signed-out host could switch sharing on, watch the menu bar go green,
+    /// and have every connection refused with a message that points nowhere
+    /// near the cause. The refusal belongs here rather than only in the UI:
+    /// three surfaces call this (Settings, the menu bar, the spotlight) and
+    /// each of them can be looking at a stale reading.
+    func testSharingCannotBeSwitchedOnWithNoAccountRow() throws {
+        for rows in [[:], ["auth_account_email": "   "]] as [[String: String]] {
+            let client = FakeSettingsClient(rows: rows)
+            let model = RemoteSharingModel(store: SettingsStore(client: client))
+            var failures: [Error] = []
+            model.onWriteFailed = { failures.append($0) }
+
+            model.setSharing(true)
+
+            XCTAssertFalse(model.isSharing, "\(rows)")
+            XCTAssertNil(client.rows["remote_sharing"], "nothing reached the store")
+            XCTAssertEqual(failures.count, 1)
+            XCTAssertTrue(
+                (failures.first?.localizedDescription ?? "").contains("Sign in"),
+                "the refusal has to say what to do about it: \(failures)"
+            )
+        }
+    }
+
+    /// And the other direction is never gated: a host must always be able to
+    /// stop sharing, whatever the account rows say — including a host whose
+    /// account row went away while sharing was on.
+    func testSharingCanAlwaysBeSwitchedOffEvenWithNoAccountRow() throws {
+        let client = FakeSettingsClient(rows: ["remote_sharing": #"{"enabled":true}"#])
+        let model = RemoteSharingModel(store: SettingsStore(client: client))
+        XCTAssertTrue(model.isSharing)
+
+        model.setSharing(false)
+
+        XCTAssertFalse(model.isSharing)
+        XCTAssertEqual(client.rows["remote_sharing"], #"{"enabled":false}"#)
+    }
+
+    // MARK: - The live connection (Task 15)
+
+    /// `liveConnection` is the roster, not a second source of truth: the
+    /// daemon admits one remote connection at a time, so the roster's first
+    /// entry *is* the machine driving this Mac.
+    func testTheLiveConnectionIsTheRosterAndNothingElse() throws {
+        let model = RemoteSharingModel(store: SettingsStore(client: FakeSettingsClient()))
+        var changes = 0
+        model.onChange = { changes += 1 }
+        XCTAssertNil(model.liveConnection)
+
+        model.applyRemoteViewers([RemoteViewer(
+            viewerID: "v-air",
+            machineName: "Air",
+            sessions: ["s1"],
+            since: "2026-09-01T09:00:00Z",
+            accountEmail: "bruno@bonando.com",
+            ip: "203.0.113.7",
+            country: "DE",
+            client: "OmniAgent/1.7.22 macOS 27.0"
+        )])
+
+        XCTAssertEqual(model.liveConnection?.machineName, "Air")
+        XCTAssertEqual(model.liveConnection?.ip, "203.0.113.7", "the relay's half rides along")
+        XCTAssertEqual(changes, 1)
+
+        // A push that says the same thing costs nothing — the panel must not
+        // be torn down and rebuilt on every roster repeat.
+        model.applyRemoteViewers([RemoteViewer(
+            viewerID: "v-air",
+            machineName: "Air",
+            sessions: ["s1"],
+            since: "2026-09-01T09:00:00Z",
+            accountEmail: "bruno@bonando.com",
+            ip: "203.0.113.7",
+            country: "DE",
+            client: "OmniAgent/1.7.22 macOS 27.0"
+        )])
+        XCTAssertEqual(changes, 1)
+
+        model.applyRemoteViewers([])
+        XCTAssertNil(model.liveConnection, "nobody is driving this Mac any more")
+        XCTAssertEqual(changes, 2)
+    }
+
+    /// The daemon writes `remote_control_blocked` on every Block — a kick has
+    /// to hold with the app closed — so the app's copy is stale the moment
+    /// one lands, and Settings › Remote would keep showing the old list.
+    func testRefreshBlockedListPicksUpWhatTheDaemonWrote() throws {
+        let client = FakeSettingsClient()
+        let model = RemoteSharingModel(store: SettingsStore(client: client))
+        XCTAssertEqual(model.blockedViewerIDs, [])
+
+        client.seedRow("remote_control_blocked", #"["v-air"]"#)
+        var changes = 0
+        model.onChange = { changes += 1 }
+        model.refreshBlockedList()
+
+        XCTAssertEqual(model.blockedViewerIDs, ["v-air"])
+        XCTAssertEqual(changes, 1)
     }
 
     // MARK: - No retry timer (carried over from Task 2, 2026-09-01)

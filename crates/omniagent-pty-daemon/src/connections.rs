@@ -479,27 +479,51 @@ impl ConnectionRegistry {
     /// [`Self::viewers`], but off a guard the caller already holds — so a
     /// snapshot and the publish that follows it can be one atomic section.
     fn roster_of(entries: &HashMap<u64, ConnectionEntry>) -> Vec<ViewerSummaryPayload> {
-        let mut machines: HashMap<String, (String, SystemTime, BTreeSet<String>)> = HashMap::new();
+        struct Machine {
+            machine_name: String,
+            since: SystemTime,
+            sessions: BTreeSet<String>,
+            /// The assertion carried by the **oldest** of this machine's
+            /// connections — the same one `since` is taken from, so the two
+            /// halves of the row describe one connection rather than a
+            /// composite of two. A machine holds more than one only across a
+            /// reconnect blip, where both assertions name the same account
+            /// anyway; picking deterministically is what stops the row
+            /// flickering between them.
+            asserted: AssertedIdentity,
+        }
+        let mut machines: HashMap<String, Machine> = HashMap::new();
         for entry in entries.values() {
             let Some(viewer) = entry.viewer.as_ref().filter(|_| entry.is_listed_viewer()) else {
                 continue;
             };
+            let asserted = entry.trust.asserted().cloned().unwrap_or_default();
             let machine = machines
                 .entry(viewer.viewer_id.clone())
-                .or_insert_with(|| (viewer.machine_name.clone(), entry.since, BTreeSet::new()));
-            machine.1 = machine.1.min(entry.since);
-            machine.2.extend(entry.attached.iter().cloned());
+                .or_insert_with(|| Machine {
+                    machine_name: viewer.machine_name.clone(),
+                    since: entry.since,
+                    sessions: BTreeSet::new(),
+                    asserted: asserted.clone(),
+                });
+            if entry.since < machine.since {
+                machine.since = entry.since;
+                machine.asserted = asserted;
+            }
+            machine.sessions.extend(entry.attached.iter().cloned());
         }
         let mut viewers: Vec<_> = machines
             .into_iter()
-            .map(
-                |(viewer_id, (machine_name, since, sessions))| ViewerSummaryPayload {
-                    viewer_id,
-                    machine_name,
-                    sessions: sessions.into_iter().collect(),
-                    since: rfc3339(since),
-                },
-            )
+            .map(|(viewer_id, machine)| ViewerSummaryPayload {
+                viewer_id,
+                machine_name: machine.machine_name,
+                sessions: machine.sessions.into_iter().collect(),
+                since: rfc3339(machine.since),
+                account_email: machine.asserted.account_email,
+                ip: machine.asserted.ip,
+                country: machine.asserted.country,
+                client: machine.asserted.client,
+            })
             .collect();
         viewers.sort_by(|a, b| {
             a.since

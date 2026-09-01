@@ -62,6 +62,17 @@ final class RemoteSharingModel {
 
     private(set) var isSharing = false
     private(set) var blockedViewerIDs: [String] = []
+    /// The machine driving this Mac right now, or `nil` when nobody is —
+    /// the fact the takeover panel (spec §7), the blue menu bar icon (§2)
+    /// and the Terminate/Block palette rows (§10) are all one reading of.
+    ///
+    /// Derived from the daemon's presence roster (`RemoteViewers`, phase 2
+    /// `0x8d`), which since Task 15 carries the relay-asserted half of the
+    /// identity beside the self-reported half. It is *not* a second source of
+    /// truth: the daemon admits at most one remote connection at a time (spec
+    /// §3 "The lease"), so the roster is the lease, and this is the roster's
+    /// first entry.
+    private(set) var liveConnection: RemoteConnectionInfo?
     /// Fires whenever either row actually changes — the menu bar icon and
     /// Settings › Remote both redraw off this rather than polling.
     var onChange: (() -> Void)?
@@ -120,6 +131,40 @@ final class RemoteSharingModel {
             onWriteFailed?(RemoteSharingModelError.notConfigured)
             return
         }
+        // Switching sharing **off** is always allowed — a host with no
+        // account row must still be able to stop sharing, and the daemon
+        // must always be told so.
+        guard on else {
+            write(sharing: false, through: store)
+            return
+        }
+        // Switching it **on** requires an `auth_account_email` row, checked
+        // here rather than only in whatever UI happens to be on screen.
+        //
+        // The daemon refuses every viewer whose relay-asserted account does
+        // not match the `auth_account_email` row inside the account
+        // directory it is serving (spec §9, `viewer_owns_this_account`), and
+        // a *missing* row fails closed there like any other mismatch. So a
+        // host with no row could switch sharing on, watch the menu bar go
+        // green, and have every single connection refused — for a reason
+        // stated nowhere near the switch. Making the switch itself refuse is
+        // the only place that answer can be given before the fact.
+        //
+        // Re-read at write time rather than trusted from a cached restore:
+        // signing in writes the row, and a stale "no" would outlive it.
+        store.get(SettingsKey.authAccountEmail) { [weak self] result in
+            guard let self else { return }
+            let email = (try? result.get())??.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let email, !email.isEmpty else {
+                onWriteFailed?(RemoteSharingModelError.signedOut)
+                return
+            }
+            write(sharing: true, through: store)
+        }
+    }
+
+    /// The write half of `setSharing`, once the decision is made.
+    private func write(sharing on: Bool, through store: SettingsStore) {
         store.set(SettingsKey.remoteSharing, Self.encodeSharing(on)) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -129,6 +174,38 @@ final class RemoteSharingModel {
             case let .failure(error):
                 onWriteFailed?(error)
             }
+        }
+    }
+
+    /// The roster the daemon pushes (`RemoteViewers`), turned into the one
+    /// reading of "somebody is driving this Mac right now".
+    ///
+    /// The daemon allows one remote connection at a time (spec §3), so the
+    /// list is either empty or one entry; a longer one (a reconnect blip the
+    /// registry has not reaped yet) takes the first, which is the oldest —
+    /// `roster_of` sorts by connection time.
+    ///
+    /// Fires `onChange` only when the answer actually changed, so a roster
+    /// push that reshuffles nothing does not re-present the panel.
+    func applyRemoteViewers(_ viewers: [RemoteViewer]) {
+        let live = viewers.first.map(RemoteConnectionInfo.init(viewer:))
+        guard live != liveConnection else { return }
+        liveConnection = live
+        onChange?()
+    }
+
+    /// Re-reads `remote_control_blocked`. The daemon writes that row itself
+    /// whenever a host presses **Block** (`DisconnectViewer(block: true)`),
+    /// so the app's copy is stale the moment a block lands and Settings ›
+    /// Remote would keep showing the old list until the next launch.
+    func refreshBlockedList() {
+        guard let store else { return }
+        store.get(SettingsKey.remoteControlBlocked) { [weak self] result in
+            guard let self, case let .success(raw) = result else { return }
+            let ids = RemoteControlProjection.decodeEnabled(raw).sorted()
+            guard ids != blockedViewerIDs else { return }
+            blockedViewerIDs = ids
+            onChange?()
         }
     }
 
@@ -223,6 +300,21 @@ final class RemoteSharingModel {
 /// `.shared` before `AppDelegate.applicationDidFinishLaunching` runs, which
 /// nothing in this app currently does. Every other path (`init(store:)`)
 /// always has a store.
-enum RemoteSharingModelError: Error {
+enum RemoteSharingModelError: Error, LocalizedError {
     case notConfigured
+    /// `setSharing(true)` with no `auth_account_email` row. Its message is
+    /// the whole point of the case: the daemon's own refusal names the
+    /// account check, which is nowhere near where the host would look.
+    case signedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .notConfigured:
+            return "OmniAgent is not connected to its daemon yet."
+        case .signedOut:
+            return "Sign in to OmniAgent before sharing this environment — "
+                + "sharing lets other Macs signed in to your account use this one, "
+                + "so there has to be an account first."
+        }
+    }
 }

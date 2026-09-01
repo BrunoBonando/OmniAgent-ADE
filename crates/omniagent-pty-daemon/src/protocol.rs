@@ -281,6 +281,28 @@ pub struct SessionSizePayload {
 
 /// One machine currently watching sessions on this daemon — an entry of both
 /// the `RemoteViewers` push and the `ListViewers` reply (phase 2 §5).
+///
+/// **Two halves, kept apart on the wire the way they are kept apart in the
+/// registry.** `viewer_id` and `machine_name` are what the connecting app
+/// said about itself in `Hello`
+/// ([`crate::connections::ViewerIdentity`]); the four `Option` fields below
+/// are what the *relay* asserted about the connection
+/// ([`crate::connections::AssertedIdentity`], spec §9), which is a different
+/// kind of fact and is marked as such in the host's takeover panel (§7:
+/// "A small verified glyph marks the fields the relay asserted"). A panel
+/// that could not tell the two apart would be worse than no panel, so the
+/// distinction survives the trip rather than being flattened into one bag of
+/// strings here.
+///
+/// Every asserted field is optional and omitted when absent, never
+/// stringified into `""`: the relay sends what it knows and does not invent
+/// the rest (§9, "City is omitted, not faked"), and a row with no value is
+/// omitted from the panel entirely rather than drawn blank.
+///
+/// This payload only ever reaches **local** connections
+/// ([`crate::connections::ConnectionRegistry::presence_updates`]), so
+/// carrying an identity here tells a viewer nothing about itself or anyone
+/// else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewerSummaryPayload {
     pub viewer_id: String,
@@ -289,6 +311,22 @@ pub struct ViewerSummaryPayload {
     pub sessions: Vec<String>,
     /// RFC 3339, when this viewer connected.
     pub since: String,
+    /// Relay-asserted: the account the viewer's JWT is signed in as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_email: Option<String>,
+    /// Relay-asserted: `CF-Connecting-IP` at the edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    /// Relay-asserted: `CF-IPCountry` at the edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// The viewer app's user agent as the relay saw it. Relayed, but *set by
+    /// the client* — unlike `ip`/`country` (Cloudflare's) and
+    /// `account_email` (a verified JWT's), nobody checked it. The host's
+    /// panel therefore shows what it carries (app version, OS) unmarked,
+    /// beside the self-reported machine name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 /// The presence roster: the `RemoteViewers` push payload and, on the same

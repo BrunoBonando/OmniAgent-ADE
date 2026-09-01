@@ -143,6 +143,17 @@ fn connect(ctx: &ClientContext, trust: ClientTrust) -> Duplex {
 async fn local_and_remote_clients(
     root: &std::path::Path,
 ) -> (Duplex, Duplex, ClientContext, oneshot::Sender<()>) {
+    local_and_remote_clients_asserting(root, support::remote_trust_for(support::HOST_ACCOUNT_EMAIL))
+        .await
+}
+
+/// [`local_and_remote_clients`], with the relay's assertion about the viewer
+/// chosen by the caller — the seam a test about *what the relay said* needs,
+/// since the assertion arrives with the connection and never in a frame.
+async fn local_and_remote_clients_asserting(
+    root: &std::path::Path,
+    viewer_trust: ClientTrust,
+) -> (Duplex, Duplex, ClientContext, oneshot::Sender<()>) {
     // Signed in, so the viewer below gets past the account check (spec §9)
     // to reach the presence behaviour this file is about.
     let server = DaemonServer::bind_with_data_dir(
@@ -170,7 +181,7 @@ async fn local_and_remote_clients(
     let host = connect(&ctx, ClientTrust::Local)
         .hello(serde_json::json!({"client": "omniagent-native-macos"}))
         .await;
-    let viewer = connect(&ctx, support::remote_trust_for(support::HOST_ACCOUNT_EMAIL))
+    let viewer = connect(&ctx, viewer_trust)
         .hello(serde_json::json!({
             "client": "omniagent-native-macos", "viewer_id": "v-air", "machine_name": "Air"}))
         .await;
@@ -414,4 +425,71 @@ async fn presence_is_local_only() {
             "{kind:?} must never be reachable from a viewer"
         );
     }
+}
+
+/// Spec §7/§9 (Task 15): the roster carries the **relay-asserted** identity
+/// beside the self-reported one, so the host's takeover panel can mark the
+/// two apart. The daemon has held the assertion on `ConnectionEntry.trust`
+/// since Task 12; before this it never left the process, and the panel had
+/// nothing to draw its verified rows from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_roster_carries_what_the_relay_asserted_beside_what_the_viewer_claimed() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, _viewer, _ctx, _stop) = local_and_remote_clients(root.path()).await;
+
+    let request = host
+        .send(MessageKind::ListViewers, serde_json::json!({}))
+        .await;
+    let reply = host.read_reply(request).await;
+    let roster: RemoteViewersPayload = serde_json::from_slice(&reply.payload).unwrap();
+    let row = &roster.viewers[0];
+
+    // Self-reported: what the viewer app put in its own `Hello`.
+    assert_eq!(row.viewer_id, "v-air");
+    assert_eq!(row.machine_name, "Air");
+    // Relay-asserted: what `support::asserted_as` builds, exactly as
+    // `relay.rs` builds it from the control channel's `open` message.
+    assert_eq!(
+        row.account_email.as_deref(),
+        Some(support::HOST_ACCOUNT_EMAIL)
+    );
+    assert_eq!(row.ip.as_deref(), Some("203.0.113.7"));
+    assert_eq!(row.country.as_deref(), Some("DE"));
+    assert_eq!(row.client.as_deref(), Some("OmniAgent/1.7.22 macOS 27.0"));
+}
+
+/// A relay that described the connection only partially leaves those fields
+/// **absent**, not empty — the host's panel omits a row it has no value for,
+/// and cannot be made to draw a blank one by a relay that knows less than
+/// this build expects. `account_email` is the one field that must be there:
+/// the account check refuses the connection without it, so it is never
+/// missing on an admitted viewer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_viewer_the_relay_described_partially_leaves_those_fields_absent() {
+    let root = tempfile::tempdir().unwrap();
+    let partial = ClientTrust::Remote(Box::new(omniagent_pty_daemon::AssertedIdentity {
+        account_email: Some(support::HOST_ACCOUNT_EMAIL.into()),
+        ..Default::default()
+    }));
+    let (mut host, _viewer, _ctx, _stop) =
+        local_and_remote_clients_asserting(root.path(), partial).await;
+
+    let request = host
+        .send(MessageKind::ListViewers, serde_json::json!({}))
+        .await;
+    let reply = host.read_reply(request).await;
+    let roster: RemoteViewersPayload = serde_json::from_slice(&reply.payload).unwrap();
+    let row = &roster.viewers[0];
+    assert_eq!(
+        row.account_email.as_deref(),
+        Some(support::HOST_ACCOUNT_EMAIL)
+    );
+    assert_eq!(row.ip, None);
+    assert_eq!(row.country, None);
+    assert_eq!(row.client, None);
+    let raw = serde_json::to_value(row).unwrap();
+    assert!(
+        raw.get("ip").is_none() && raw.get("country").is_none() && raw.get("client").is_none(),
+        "absent, not null: {raw}"
+    );
 }

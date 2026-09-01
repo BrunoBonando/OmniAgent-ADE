@@ -1000,6 +1000,74 @@ final class NavigationSidebarTests: XCTestCase {
         try? png.write(to: directory.appendingPathComponent("\(name).png"))
     }
 
+    // MARK: - Settings › Remote (2026-09-01 remote environment sharing spec)
+
+    /// The blocked list (§7): one row per id the daemon refuses, each with
+    /// the **Unblock** that is the only way an entry ever leaves that row —
+    /// and a real empty state rather than a section that vanishes.
+    @MainActor
+    func testTheRemoteSectionListsBlockedMachinesAndOffersUnblock() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let settings = controller.settingsView
+
+        controller.showSettings(section: .remote)
+        XCTAssertTrue(settings.subtitleField.isHidden, "Remote has a screen")
+        XCTAssertFalse(settings.shareToggle.isHidden)
+        XCTAssertFalse(settings.blockedHeaderField.isHidden)
+        XCTAssertFalse(settings.blockedEmptyField.isHidden, "an empty state, not an absent section")
+        XCTAssertEqual(settings.blockedEmptyField.stringValue, "No machines are blocked.")
+        XCTAssertTrue(settings.blockedList.isHidden)
+
+        settings.applyBlockedMachines(["v-air", "v-mbp"])
+        XCTAssertTrue(settings.blockedEmptyField.isHidden)
+        XCTAssertFalse(settings.blockedList.isHidden)
+        XCTAssertEqual(settings.blockedList.arrangedSubviews.count, 2)
+
+        var unblocked: [String] = []
+        settings.onUnblock = { unblocked.append($0) }
+        let row = try XCTUnwrap(settings.blockedList.arrangedSubviews.first as? NSStackView)
+        let button = try XCTUnwrap(row.arrangedSubviews.compactMap { $0 as? NSButton }.first)
+        XCTAssertEqual(button.title, "Unblock")
+        button.performClick(nil)
+        XCTAssertEqual(unblocked, ["v-air"], "the row's own id, not whichever row was built last")
+
+        // And nothing of Remote's leaks onto another section.
+        controller.showSettings(section: .themes)
+        XCTAssertTrue(settings.blockedHeaderField.isHidden)
+        XCTAssertTrue(settings.blockedList.isHidden)
+        XCTAssertTrue(settings.blockedEmptyField.isHidden)
+    }
+
+    /// Sharing needs an account to share *with* (carried over, 2026-09-02):
+    /// the daemon refuses every viewer when `auth_account_email` is missing,
+    /// with a message that points nowhere near the cause. So the switch is
+    /// disabled and the copy under it says what to do instead of describing
+    /// a feature that cannot run.
+    @MainActor
+    func testTheSharingSwitchIsDisabledWithCopyWhileSignedOut() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let settings = controller.settingsView
+        controller.showSettings(section: .remote)
+
+        settings.applyRemoteSharing(isSharing: false, canShare: false)
+        XCTAssertFalse(settings.shareToggle.isEnabled)
+        XCTAssertTrue(settings.shareExplanationField.stringValue.contains("Sign in"))
+
+        settings.applyRemoteSharing(isSharing: false, canShare: true)
+        XCTAssertTrue(settings.shareToggle.isEnabled)
+        XCTAssertEqual(settings.shareExplanationField.stringValue, SettingsSurfaceView.shareExplanation)
+
+        // Switching sharing *off* must always be possible, whatever the
+        // account rows say — including for a host whose row went away while
+        // sharing was on.
+        settings.applyRemoteSharing(isSharing: true, canShare: false)
+        XCTAssertTrue(settings.shareToggle.isEnabled)
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(

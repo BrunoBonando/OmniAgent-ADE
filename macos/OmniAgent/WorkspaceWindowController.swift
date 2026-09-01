@@ -1206,6 +1206,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsView.onDisconnectGitHub = { [weak self] in self?.disconnectGitHub() }
         settingsView.onDeleteAccount = { [weak self] in self?.deleteAccount() }
         settingsView.onToggleRemoteSharing = { [weak self] in self?.toggleRemoteSharing() }
+        settingsView.onUnblock = { [weak self] id in self?.remoteSharing.unblock(id) }
         seedAccountFromMirror()
         settingsPanel.onHeightChange = { [weak self] in
             guard let self, settingsPanelPlace != .hidden else { return }
@@ -1669,6 +1670,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     func stop() {
         connection.disconnect()
         daemonPersistence.stop()
+        // The panel outlives nothing: quitting ends sharing (spec §7), and a
+        // borderless screen-covering window left ordered in after its owner
+        // has gone is a window nobody can close.
+        takeoverPanel?.dismiss()
+        takeoverPanel = nil
     }
 
     /// Everything the daemon's data dir holds for this account, read once
@@ -3472,7 +3478,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // sidebar's count opens, by name (phase 2 §5).
                 watchedWorkspaces: watchedPaletteWorkspaces(),
                 // Which of the three update rows can be taken right now.
-                updateState: updateController.state
+                updateState: updateController.state,
+                // The sharing switch is only offered where it can be taken.
+                canShareEnvironment: canShareEnvironment,
+                // Terminate/Block exist for exactly as long as the panel
+                // does — read off the panel itself, not off the roster, so a
+                // row can never be offered for a verb that has nothing to
+                // act on.
+                liveRemoteMachine: takeoverPanel?.info.machineName,
+                blockedMachineCount: remoteSharing.blockedViewerIDs.count
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
@@ -3541,6 +3555,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             deleteAccount()
         case .toggleRemoteSharing:
             toggleRemoteSharing()
+        case .showBlockedMachines:
+            showSettings(section: .remote)
+        case .terminateRemoteConnection:
+            takeoverPanel?.terminate()
+        case .blockRemoteConnection:
+            takeoverPanel?.block()
         case .checkForUpdates:
             updateController.checkForUpdates()
         case .downloadUpdate:
@@ -4204,6 +4224,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// an open popover, which has to follow the roster rather than hold the
     /// list it opened with.
     func applyRemoteViewers(_ viewers: [RemoteViewer]) {
+        // The takeover panel and the menu bar icon read the roster through
+        // the sharing model, which is where "somebody is driving this Mac"
+        // is decided — told first, and unconditionally, so a roster that
+        // repeats itself in this window's own terms (same panes) still
+        // corrects an identity the relay filled in a moment later.
+        remoteSharing.applyRemoteViewers(viewers)
         guard viewers != remoteViewers else { return }
         remoteViewers = viewers
         workspace.setRemoteViewerNames(paneViewerNames())
@@ -4402,11 +4428,68 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// `remoteSharing.onChange`'s one handler: pushes the confirmed state to
     /// `settingsView` (non-optimistic — this only ever runs after a write
-    /// actually landed, or after a restore) and tells whoever is watching
-    /// the menu bar icon.
+    /// actually landed, or after a restore), puts the takeover panel up or
+    /// takes it down, and tells whoever is watching the menu bar icon.
     private func applyRemoteSharingChange() {
-        settingsView.applyRemoteSharing(isSharing: remoteSharing.isSharing)
+        settingsView.applyRemoteSharing(
+            isSharing: remoteSharing.isSharing,
+            canShare: canShareEnvironment
+        )
+        settingsView.applyBlockedMachines(remoteSharing.blockedViewerIDs)
+        syncTakeoverPanel()
         onRemoteSharingChanged?()
+    }
+
+    /// Whether sharing can be switched on at all: an `auth_account_email`
+    /// row exists.
+    ///
+    /// Read off the page's own account reading (`refreshAccountSection`
+    /// fills it), the same seam the spotlight's account rows use — so the
+    /// row the palette offers and the switch the page shows can never
+    /// disagree. The *structural* refusal is `RemoteSharingModel.setSharing`,
+    /// which re-reads the row before writing; this only decides what to
+    /// offer.
+    var canShareEnvironment: Bool { !settingsView.accountEmail.isEmpty }
+
+    /// The machine driving this Mac right now — the menu bar's blue icon and
+    /// the palette's Terminate/Block rows are this one reading.
+    var liveRemoteConnection: RemoteConnectionInfo? { remoteSharing.liveConnection }
+
+    /// The takeover panel (spec §7) while somebody is connected, `nil`
+    /// otherwise. Not `private`: its presence *is* the assertion a test about
+    /// this behaviour makes.
+    private(set) var takeoverPanel: RemoteTakeoverPanel?
+
+    /// Puts the panel up the moment a remote connection is live and takes it
+    /// down the moment it is not — driven off the daemon's roster rather than
+    /// off the click that ended it, so a Terminate that did not land leaves
+    /// the panel exactly where it was.
+    private func syncTakeoverPanel() {
+        // Both halves, deliberately. A remote connection cannot exist while
+        // sharing is off — the daemon's own three-way condition (spec §2)
+        // refuses to hold a control channel without `remote_sharing.enabled`
+        // — so in production `isSharing` is already true whenever there is a
+        // `liveConnection`. Asking anyway is what keeps a *stale roster*
+        // from putting a screen-covering window over a Mac that is not
+        // sharing: the roster is a push, the switch is a row this app reads,
+        // and the one moment they can disagree is a launch whose roster read
+        // lands before its settings read. In that moment the honest thing is
+        // to wait for the second, which arrives on the same connection.
+        guard let info = remoteSharing.liveConnection, remoteSharing.isSharing else {
+            takeoverPanel?.dismiss()
+            takeoverPanel = nil
+            return
+        }
+        if let panel = takeoverPanel {
+            panel.apply(info)
+            return
+        }
+        let panel = RemoteTakeoverPanel(info: info, connection: connection)
+        // The daemon owns `remote_control_blocked`, so the app's copy is
+        // stale the instant a Block lands.
+        panel.onBlocked = { [weak self] in self?.remoteSharing.refreshBlockedList() }
+        takeoverPanel = panel
+        panel.present(over: window)
     }
 
     /// `remoteSharing.onWriteFailed`'s one handler — `registerThisMachine`'s
@@ -5486,6 +5569,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 settingsStore.get(SettingsKey.authGithubLogin) { [weak self] githubResult in
                     guard let self, case .success(let githubLogin) = githubResult else { return }
                     settingsView.applyAccount(email: email, signedIn: signedIn, githubLogin: githubLogin)
+                    // The account row is the sharing gate's input, so the
+                    // switch and its copy are re-decided the moment it lands
+                    // — signing in must enable sharing without a relaunch.
+                    applyRemoteSharingChange()
                     settingsStore.get(SettingsKey.authAccountName) { [weak self] nameResult in
                         guard let self, case .success(let name) = nameResult else { return }
                         settingsStore.get(SettingsKey.authAccountPicture) { [weak self] pictureResult in
