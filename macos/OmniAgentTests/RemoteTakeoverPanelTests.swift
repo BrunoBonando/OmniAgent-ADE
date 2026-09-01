@@ -290,6 +290,180 @@ final class RemoteTakeoverPanelTests: XCTestCase {
         XCTAssertTrue(occupied.isEmpty, "left empty rather than stubbed: \(occupied)")
     }
 
+    // MARK: - The panel is never absent while somebody is driving (fix round 1)
+
+    /// **A live connection presents the panel on its own.**
+    ///
+    /// It used to also require `isSharing`, which is this app's *cached* copy
+    /// of a row the daemon reads from disk independently. A post-connect
+    /// restore that fails — real enough that `connectionDidComeUp()` exists
+    /// to retry it — leaves that copy `false`, and the roster push would then
+    /// have shown no panel at all while somebody drove the Mac. Worse, the
+    /// menu bar would have gone blue at the same instant, because
+    /// `MenuBarController.shareState` asks `liveRemoteConnection` first: two
+    /// surfaces disagreeing about whether anyone is here.
+    func testALiveConnectionPresentsThePanelEvenWhenTheSharingRowNeverRead() throws {
+        let client = FakeSettingsClient()
+        // The restore fails, so `isSharing` stays at its fail-closed default.
+        client.failing = [SettingsKey.remoteSharing]
+        let controller = try makeController(client: client, socket: "panel-fails-open")
+        defer { controller.close() }
+        XCTAssertFalse(controller.isSharingEnvironment, "the app believes it is not sharing")
+
+        controller.applyRemoteViewers([air])
+
+        XCTAssertNotNil(controller.liveRemoteConnection)
+        XCTAssertNotNil(
+            controller.takeoverPanel,
+            "somebody is driving this Mac, so the panel is up — a panel a moment early is "
+                + "harmless, a panel missing is the whole failure"
+        )
+    }
+
+    /// And it comes down when, and only when, the daemon says the connection
+    /// is gone.
+    func testThePanelComesDownWhenTheRosterEmpties() throws {
+        let controller = try makeController(socket: "panel-down")
+        defer { controller.close() }
+        controller.applyRemoteViewers([air])
+        XCTAssertNotNil(controller.takeoverPanel)
+
+        controller.applyRemoteViewers([])
+
+        XCTAssertNil(controller.takeoverPanel)
+    }
+
+    /// **A kick the daemon refused leaves the panel exactly where it was.**
+    ///
+    /// The popover's Disconnect used to filter the machine out of the roster
+    /// before the daemon had answered, which drove `liveConnection` to `nil`
+    /// and dismissed the panel — so a refused kick read as "they are off your
+    /// Mac" while they were still on it, and stayed wrong if the follow-up
+    /// re-read failed too.
+    func testARefusedKickLeavesThePanelExactlyWhereItWas() throws {
+        let controller = try makeController(socket: "panel-refused-kick")
+        defer { controller.close() }
+        controller.viewerLister = { $0(.success([self.air])) }
+        controller.viewerDisconnector = { _, completion in
+            completion(.failure(NSError(domain: "test", code: 1)))
+        }
+        controller.applyRemoteViewers([air])
+        XCTAssertNotNil(controller.takeoverPanel)
+
+        controller.disconnectViewer(air.viewerID)
+
+        XCTAssertNotNil(
+            controller.takeoverPanel,
+            "the daemon refused, so the machine is still driving this Mac"
+        )
+        XCTAssertNotNil(controller.liveRemoteConnection)
+    }
+
+    /// Even a kick the daemon *accepted* does not take the panel down by
+    /// itself: the roster does. The app must not predict what the daemon is
+    /// about to report.
+    func testAnAcceptedKickStillWaitsForTheRosterBeforeThePanelGoes() throws {
+        let controller = try makeController(socket: "panel-accepted-kick")
+        defer { controller.close() }
+        controller.viewerDisconnector = { _, completion in completion(.success(())) }
+        controller.applyRemoteViewers([air])
+
+        controller.disconnectViewer(air.viewerID)
+        XCTAssertNotNil(controller.takeoverPanel, "only the daemon's next roster ends the takeover")
+
+        controller.applyRemoteViewers([])
+        XCTAssertNil(controller.takeoverPanel)
+    }
+
+    /// A kick that blocks makes the app's copy of `remote_control_blocked`
+    /// stale — the daemon wrote it — so the controller re-reads. Without
+    /// this, a later Unblock of a *different* id computed from the stale copy
+    /// silently forgave this machine.
+    func testAKickThatBlocksReReadsTheBlockedRowTheDaemonJustWrote() throws {
+        let client = FakeSettingsClient()
+        let controller = try makeController(client: client, socket: "panel-kick-blocked")
+        defer { controller.close() }
+        controller.viewerDisconnector = { _, completion in completion(.success(())) }
+        XCTAssertEqual(controller.settingsView.blockedViewerIDs, [])
+
+        // What the daemon does as part of the kick.
+        client.seedRow("remote_control_blocked", #"["v-air"]"#)
+        controller.disconnectViewer(air.viewerID)
+
+        XCTAssertEqual(controller.settingsView.blockedViewerIDs, ["v-air"])
+    }
+
+    /// **The spotlight has to stack above the panel.**
+    ///
+    /// `CommandPaletteController.present(over:)` stacks by child window, not
+    /// by level, so handing it the workspace window while the panel is up
+    /// drew the palette *behind* a `.modalPanel` — it took the keyboard,
+    /// showed nothing, and dismissed itself on the next resign-key. The
+    /// Terminate/Block rows passed their own test and could not be reached.
+    func testTheSpotlightStacksAboveTheTakeoverPanelWhileItIsUp() throws {
+        let controller = try makeController(socket: "panel-palette-parent")
+        defer { controller.close() }
+        XCTAssertTrue(controller.paletteParentWindow === controller.window)
+
+        controller.applyRemoteViewers([air])
+
+        let panel = try XCTUnwrap(controller.takeoverPanel)
+        XCTAssertTrue(
+            controller.paletteParentWindow === panel.window,
+            "a child window is always drawn above its parent"
+        )
+        controller.applyRemoteViewers([])
+        XCTAssertTrue(controller.paletteParentWindow === controller.window)
+    }
+
+    // MARK: - Controller helpers
+
+    /// The one machine every controller test above hands the roster.
+    private var air: RemoteViewer {
+        RemoteViewer(
+            viewerID: "v-air",
+            machineName: "Air",
+            sessions: ["s1"],
+            since: "2026-09-01T09:00:00Z",
+            accountEmail: "bruno@bonando.com",
+            ip: "203.0.113.7",
+            country: "DE",
+            client: "OmniAgent/1.7.22 macOS 27.0"
+        )
+    }
+
+    /// A controller whose takeover panel is built but never ordered on
+    /// screen: the seam is presentation only, so `takeoverPanel` — the thing
+    /// every assertion above is about — is exactly what production sets.
+    private func makeController(
+        client: FakeSettingsClient = FakeSettingsClient(),
+        socket: String
+    ) throws -> WorkspaceWindowController {
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-\(socket)-test.sock")
+            ),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            authDefaults: try throwawayDefaults()
+        )
+        controller.takeoverPanelPresenter = { _ in }
+        controller.relayDeviceRegistrar = { _ in
+            XCTFail("no test here may reach the relay")
+            return RelayClient.Registration(deviceID: "d1", token: "secret")
+        }
+        return controller
+    }
+
+    /// A suite of its own, torn down after — never the real app's defaults
+    /// (`RealPreferencesGuard`).
+    private func throwawayDefaults() throws -> UserDefaults {
+        let name = "digital.bruno.omniagent.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
+        return defaults
+    }
+
     private func renderedText(of view: NSView) -> String {
         view.subviews.compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: "\n")
     }

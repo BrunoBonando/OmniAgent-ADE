@@ -198,9 +198,14 @@ final class RemoteTakeoverPanel {
     /// `nil` in a test that only inspects the layout. A kick with no
     /// connection is a no-op, never a crash.
     private weak var connection: RemoteViewerDisconnecting?
-    /// A failed Terminate/Block — surfaced by the owner in the house glass
-    /// card, never swallowed: this is a security surface, and "nothing
-    /// happened" must not look like "done".
+    /// A failed Terminate/Block, for anyone who wants to know beyond the
+    /// panel itself.
+    ///
+    /// **The panel is what reports the failure**, in its own red line — see
+    /// `disconnect(block:)`. It cannot be the house glass ask card, which
+    /// `presentWindowAsk` mounts on the workspace window's content view,
+    /// *behind* this window. So this is an extra hook and not the mechanism;
+    /// production leaves it unset, and nothing is swallowed when it is.
     var onActionFailed: ((Error) -> Void)?
     /// A Block that landed. The daemon writes `remote_control_blocked`
     /// itself, so the app's copy of that row is stale until it re-reads.
@@ -269,6 +274,14 @@ final class RemoteTakeoverPanel {
     }
 
     func dismiss() {
+        // The spotlight parents its scrim to whichever window it opened over
+        // (`WorkspaceWindowController.paletteParentWindow`), and a child
+        // window is ordered out with its parent. Letting go first means a
+        // palette that outlives the panel comes back on the workspace window
+        // rather than disappearing with this one.
+        for child in window.childWindows ?? [] {
+            window.removeChildWindow(child)
+        }
         window.orderOut(nil)
     }
 

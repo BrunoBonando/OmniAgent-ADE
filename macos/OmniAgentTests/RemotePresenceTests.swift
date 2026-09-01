@@ -33,22 +33,33 @@ final class RemotePresenceTests: XCTestCase {
         XCTAssertEqual(controller.remoteViewerNames(forPane: "s1"), ["Air", "MBP"])
     }
 
-    /// Disconnect reaches the daemon with the viewer id, and the machine
-    /// leaves the roster on the spot rather than lingering until the next
-    /// push.
-    func testDisconnectSendsTheViewerIdAndDropsItFromTheRoster() {
+    /// Disconnect reaches the daemon with the viewer id — and the roster is
+    /// left exactly as the daemon last reported it.
+    ///
+    /// **This used to assert the opposite** (the machine left the roster on
+    /// the spot, optimistically). Fix round 1: the roster is the daemon's to
+    /// report. The old guess was already the wrong answer for a security
+    /// surface, and once the roster began driving the takeover panel it
+    /// became the panel vanishing on a kick the daemon had not performed
+    /// yet — see
+    /// `RemoteTakeoverPanelTests.testARefusedKickLeavesThePanelExactlyWhereItWas`.
+    func testDisconnectSendsTheViewerIdAndLeavesTheRosterToTheDaemon() {
         let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
         controller.applyRemoteViewers([.init(viewerID: "v1", machineName: "Air", sessions: ["s1"], since: "…")])
         controller.disconnectViewer("v1")
         XCTAssertEqual(controller.connectionDouble.disconnectedViewerIDs, ["v1"])
-        XCTAssertEqual(controller.remoteViewerNames(forPane: "s1"), [])
+        XCTAssertEqual(
+            controller.remoteViewerNames(forPane: "s1"), ["Air"],
+            "still listed until the daemon says otherwise — the kick is not the answer, the push is"
+        )
     }
 
-    /// The removal is optimistic, so the daemon refusing the kick has to undo
-    /// it. Anything else is the one wrong answer a security surface must
-    /// never give: the window saying nobody is watching while the other Mac
-    /// still is.
-    func testADisconnectTheDaemonRefusesPutsTheMachineBackOnTheRoster() {
+    /// Nothing was predicted, so there is nothing to undo — but a refused
+    /// kick still re-reads, so the window is showing the daemon's answer and
+    /// not a roster that predates the attempt. Anything else is the one wrong
+    /// answer a security surface must never give: the window saying nobody is
+    /// watching while the other Mac still is.
+    func testADisconnectTheDaemonRefusesLeavesTheMachineOnTheRoster() {
         let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
         let air = RemoteViewer(viewerID: "v1", machineName: "Air", sessions: ["s1"], since: "…")
         controller.applyRemoteViewers([air])
@@ -253,6 +264,12 @@ final class RemotePresenceTests: XCTestCase {
             XCTFail("no test here may reach the relay")
             return RelayClient.Registration(deviceID: "d1", token: "secret")
         }
+        // A roster with anyone on it now builds the takeover panel, which in
+        // production orders a borderless screen-covering key window. The
+        // *decision* to present is untouched (`takeoverPanel` is still set,
+        // and `RemoteTakeoverPanelTests` asserts on it) — only the ordering
+        // into this shared test host is stubbed out.
+        controller.takeoverPanelPresenter = { _ in }
         controller.showWindow(nil)
         controller.applyRestoredPanes(
             WorkspaceRestoration.plan(fromLayout: PersistedLayoutCodec.serialize(panes))

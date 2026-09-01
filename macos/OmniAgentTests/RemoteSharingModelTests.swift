@@ -43,6 +43,45 @@ final class RemoteSharingModelTests: XCTestCase {
         XCTAssertEqual(model.blockedViewerIDs, ["mac-b"])
     }
 
+    /// **`unblock` reads the row it is about to rewrite** (fix round 1).
+    ///
+    /// Two writers share `remote_control_blocked`: the daemon appends to it
+    /// on every kick that blocks, and the app only removes. Computing the new
+    /// list from the in-memory copy therefore silently forgave whatever the
+    /// daemon had added since the last read — unblocking one machine let a
+    /// different one back in.
+    func testUnblockRewritesTheRowItReadRatherThanItsOwnStaleCopy() throws {
+        let client = FakeSettingsClient(rows: ["remote_control_blocked": #"["mac-a"]"#])
+        let model = RemoteSharingModel(store: SettingsStore(client: client))
+        XCTAssertEqual(model.blockedViewerIDs, ["mac-a"])
+
+        // The daemon blocks a second machine behind the app's back — exactly
+        // what a kick from the viewer popover does.
+        client.seedRow("remote_control_blocked", #"["mac-a","mac-b"]"#)
+        model.unblock("mac-a")
+
+        XCTAssertEqual(
+            client.rows["remote_control_blocked"], #"["mac-b"]"#,
+            "mac-b was blocked by the daemon and must stay blocked"
+        )
+        XCTAssertEqual(model.blockedViewerIDs, ["mac-b"])
+    }
+
+    /// The mirror of the same fix: an id the daemon blocked and this app has
+    /// never seen can still be unblocked, rather than being refused by a
+    /// stale membership check.
+    func testAnIDTheDaemonBlockedCanBeUnblockedEvenThoughTheAppNeverSawIt() throws {
+        let client = FakeSettingsClient()
+        let model = RemoteSharingModel(store: SettingsStore(client: client))
+        XCTAssertEqual(model.blockedViewerIDs, [])
+
+        client.seedRow("remote_control_blocked", #"["mac-b"]"#)
+        model.unblock("mac-b")
+
+        XCTAssertEqual(client.rows["remote_control_blocked"], "[]")
+        XCTAssertEqual(model.blockedViewerIDs, [])
+    }
+
     /// Unblocking an id that was never blocked is a no-op: no write, and the
     /// stored list is untouched.
     func testUnblockingAnUnlistedIDWritesNothing() throws {

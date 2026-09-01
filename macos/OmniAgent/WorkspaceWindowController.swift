@@ -3498,7 +3498,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
             initialQuery: initialQuery,
-            over: window
+            // Above the takeover panel while it is up — the rows it offers
+            // there (Terminate, Block) are unreachable otherwise.
+            over: paletteParentWindow
         )
     }
 
@@ -3593,7 +3595,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 case .failure:
                     palette.present(
                         commands: [PaletteCommand(id: "search-error", title: "Brain search failed.", detail: nil, action: .noop, section: .brain)],
-                        over: window
+                        over: paletteParentWindow
                     )
                 }
             }
@@ -3786,7 +3788,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 )
             }
         }
-        palette.present(commands: rows, over: window)
+        palette.present(commands: rows, over: paletteParentWindow)
     }
 
     /// Named away from AppKit's `toggleSidebar:` on purpose. Toolbar items and
@@ -4281,33 +4283,45 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         remoteViewers.filter { $0.sessions.contains(paneID) }.map(\.machineName)
     }
 
-    /// Kicks one machine: the daemon drops its socket and blocks the viewer
-    /// id until Remote Control is switched on again. Dropped from the roster
-    /// here as well as by the daemon's next push — the popover it was
-    /// disconnected from must not keep offering the button.
+    /// Kicks one machine, and blocks it: the popover's Disconnect is Block,
+    /// not Terminate (`disconnectViewer(viewerID:block:)` defaults to
+    /// blocking, which is what this affordance has always meant).
     ///
-    /// The optimistic removal is a guess, and the daemon's reply is the only
-    /// thing that turns it into a fact. The reply used to be discarded: a
-    /// `DisconnectViewer` the daemon refused — a blocklist write that failed,
-    /// a dropped socket — left nothing blocked and nobody kicked, while the
-    /// host's window had already stopped showing the machine. That is the one
-    /// wrong answer this surface can give, because it is a security surface:
-    /// "you're safe" when the other Mac is still watching. On a failure the
-    /// roster is re-read from the daemon, so the window goes back to showing
-    /// what is actually connected.
+    /// **Nothing is removed from the roster here.** It used to be: the
+    /// machine was filtered out optimistically and the daemon's reply only
+    /// consulted on failure. That was already the wrong answer for a
+    /// security surface — "you're safe" while the other Mac is still
+    /// watching — and once the roster began driving the takeover panel it
+    /// became the panel disappearing on a kick the daemon had not performed
+    /// yet, or refused. If the follow-up re-read failed too, the window
+    /// stayed wrong.
+    ///
+    /// The roster is the daemon's to report. A successful kick cancels the
+    /// connection, which publishes a new roster within the same round trip;
+    /// a refused one publishes nothing, and the window goes on showing what
+    /// is actually connected. This is `RemoteSharingModel`'s non-optimistic
+    /// rule, applied to the one surface that had not adopted it.
     func disconnectViewer(_ viewerID: String) {
         let finish: (Result<Void, Error>) -> Void = { [weak self] result in
-            guard case .failure = result else { return }
-            self?.refreshRemoteViewers()
+            guard let self else { return }
+            switch result {
+            case .success:
+                // The daemon appended this id to `remote_control_blocked` as
+                // part of the kick, so the app's copy is stale — and an
+                // `unblock` of some *other* id computed from a stale copy
+                // would silently forgive this one.
+                remoteSharing.refreshBlockedList()
+            case .failure:
+                // Nothing was predicted, so there is nothing to undo — this
+                // only makes sure the window is showing the daemon's answer
+                // rather than a roster that predates the attempt.
+                refreshRemoteViewers()
+            }
         }
-        // The guess goes in first, so a reply that arrives synchronously —
-        // an encoding failure, or a test double — corrects it instead of
-        // being overwritten by it.
-        applyRemoteViewers(remoteViewers.filter { $0.viewerID != viewerID })
         if let viewerDisconnector {
             viewerDisconnector(viewerID, finish)
         } else {
-            connection.disconnectViewer(viewerID: viewerID, completion: finish)
+            connection.disconnectViewer(viewerID: viewerID, block: true, completion: finish)
         }
     }
 
@@ -4467,22 +4481,56 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// this behaviour makes.
     private(set) var takeoverPanel: RemoteTakeoverPanel?
 
+    /// The window the spotlight (and anything else that opens "over" this
+    /// window) must stack against: the takeover panel while it is up, the
+    /// workspace window otherwise.
+    ///
+    /// `CommandPaletteController.present(over:)` stacks by **child window**
+    /// rather than by level — "strict stacking without fighting window
+    /// levels", its own words — and a child is always drawn above its
+    /// parent. Passing the workspace window while the takeover panel is up
+    /// therefore put the spotlight *behind* the panel (`.floating` under
+    /// `.modalPanel`), where it took the keyboard, showed nothing, and
+    /// dismissed itself on the next resign-key. The Terminate/Block rows
+    /// passed their test and could not be reached. Handing the same
+    /// mechanism the right parent fixes it without a level fight.
+    var paletteParentWindow: NSWindow? { takeoverPanel?.window ?? window }
+
+    /// How the panel reaches the screen. `nil` — production, always — is
+    /// `RemoteTakeoverPanel.present(over:)`.
+    ///
+    /// A test seam, `viewerDisconnector`'s pattern, and deliberately *only*
+    /// about presentation: the decision to present is never gated on it. It
+    /// exists because feeding a roster to a controller now presents a real
+    /// borderless screen-covering key window, which eight presence tests
+    /// would otherwise order into the shared test host. A test-only concern
+    /// must never narrow a security-visible guard, so it narrows nothing —
+    /// `takeoverPanel` is still built, still recorded, and still the thing
+    /// `run(.terminateRemoteConnection)` acts on.
+    var takeoverPanelPresenter: ((RemoteTakeoverPanel) -> Void)?
+
     /// Puts the panel up the moment a remote connection is live and takes it
     /// down the moment it is not — driven off the daemon's roster rather than
     /// off the click that ended it, so a Terminate that did not land leaves
     /// the panel exactly where it was.
     private func syncTakeoverPanel() {
-        // Both halves, deliberately. A remote connection cannot exist while
-        // sharing is off — the daemon's own three-way condition (spec §2)
-        // refuses to hold a control channel without `remote_sharing.enabled`
-        // — so in production `isSharing` is already true whenever there is a
-        // `liveConnection`. Asking anyway is what keeps a *stale roster*
-        // from putting a screen-covering window over a Mac that is not
-        // sharing: the roster is a push, the switch is a row this app reads,
-        // and the one moment they can disagree is a launch whose roster read
-        // lands before its settings read. In that moment the honest thing is
-        // to wait for the second, which arrives on the same connection.
-        guard let info = remoteSharing.liveConnection, remoteSharing.isSharing else {
+        // `liveConnection` **alone**, and never `isSharing` with it.
+        //
+        // `isSharing` is this app's cached copy of a row the daemon reads
+        // from disk on its own; a post-connect restore that fails leaves it
+        // `false` until the next `.connected` (which is exactly why
+        // `connectionDidComeUp()` exists). Anding the two would mean a live
+        // viewer's roster push could arrive with `isSharing == false` and
+        // put **no panel** on screen while a stranger drives the Mac — and
+        // the menu bar would go blue at the same moment, since
+        // `MenuBarController.shareState` asks `liveRemoteConnection` first.
+        // Two surfaces disagreeing about whether anyone is here is the one
+        // thing this surface cannot do.
+        //
+        // So it fails **open**: a panel a moment early is harmless, a panel
+        // missing is the whole failure. The daemon is the authority on
+        // whether a remote connection exists, and the roster is what it says.
+        guard let info = remoteSharing.liveConnection else {
             takeoverPanel?.dismiss()
             takeoverPanel = nil
             return
@@ -4496,7 +4544,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // stale the instant a Block lands.
         panel.onBlocked = { [weak self] in self?.remoteSharing.refreshBlockedList() }
         takeoverPanel = panel
-        panel.present(over: window)
+        if let takeoverPanelPresenter {
+            takeoverPanelPresenter(panel)
+        } else {
+            panel.present(over: window)
+        }
     }
 
     /// `remoteSharing.onWriteFailed`'s one handler — `registerThisMachine`'s

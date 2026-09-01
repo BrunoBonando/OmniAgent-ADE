@@ -207,10 +207,7 @@ final class RemoteSharingModel {
         guard let store else { return }
         store.get(SettingsKey.remoteControlBlocked) { [weak self] result in
             guard let self, case let .success(raw) = result else { return }
-            let ids = RemoteControlProjection.decodeEnabled(raw).sorted()
-            guard ids != blockedViewerIDs else { return }
-            blockedViewerIDs = ids
-            onChange?()
+            apply(blocked: RemoteControlProjection.decodeEnabled(raw).sorted())
         }
     }
 
@@ -234,29 +231,67 @@ final class RemoteSharingModel {
     }
 
     /// Rewrites `remote_control_blocked` without `viewerID` — the only way
-    /// the app ever removes an entry from it. A no-op, with no write and no
-    /// `onChange`, when the id was not blocked to begin with.
-    /// `blockedViewerIDs` changes only once the write actually lands; a
-    /// failure leaves it exactly as it was and calls `onWriteFailed`.
+    /// the app ever removes an entry from it.
+    ///
+    /// **Read, modify, write — never write from the in-memory copy.** This
+    /// row has two writers: the daemon *appends* to it on every kick that
+    /// blocks (it has to hold with the app closed), and the app only ever
+    /// removes from it. Computing the new list from `blockedViewerIDs` meant
+    /// unblocking one machine could silently forgive another — the one the
+    /// daemon had just added, which this app had not re-read. A blocklist
+    /// that quietly drops entries is the same class of failure as one that
+    /// never held them.
+    ///
+    /// So the row is read first and the answer is computed from *that*:
+    /// which also means an id the daemon blocked but this app has not seen
+    /// can be unblocked, rather than being refused by a stale membership
+    /// check. A no-op, with no write, when the freshly read row does not
+    /// contain the id — and the in-memory copy is reconciled with what the
+    /// read found either way. `blockedViewerIDs` changes only once the write
+    /// actually lands; a failed read or write leaves it as it was and calls
+    /// `onWriteFailed`.
     func unblock(_ viewerID: String) {
-        guard blockedViewerIDs.contains(viewerID) else { return }
         guard let store else {
             onWriteFailed?(RemoteSharingModelError.notConfigured)
             return
         }
-        var ids = Set(blockedViewerIDs)
-        ids.remove(viewerID)
-        let sorted = ids.sorted()
-        store.set(SettingsKey.remoteControlBlocked, RemoteControlProjection.encodeEnabled(ids)) { [weak self] result in
+        store.get(SettingsKey.remoteControlBlocked) { [weak self] result in
             guard let self else { return }
-            switch result {
-            case .success:
-                blockedViewerIDs = sorted
-                onChange?()
-            case let .failure(error):
-                onWriteFailed?(error)
+            guard case let .success(raw) = result else {
+                if case let .failure(error) = result { onWriteFailed?(error) }
+                return
+            }
+            var ids = Set(RemoteControlProjection.decodeEnabled(raw))
+            guard ids.contains(viewerID) else {
+                // Nothing to remove, but the read is still worth keeping:
+                // the daemon may have added something since the last one.
+                apply(blocked: ids.sorted())
+                return
+            }
+            ids.remove(viewerID)
+            let sorted = ids.sorted()
+            store.set(
+                SettingsKey.remoteControlBlocked,
+                RemoteControlProjection.encodeEnabled(ids)
+            ) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    apply(blocked: sorted)
+                case let .failure(error):
+                    onWriteFailed?(error)
+                }
             }
         }
+    }
+
+    /// Stores a new blocked list and fires `onChange` only if it actually
+    /// changed — the one place that pair happens, so a re-read that finds
+    /// nothing new costs no redraw.
+    private func apply(blocked ids: [String]) {
+        guard ids != blockedViewerIDs else { return }
+        blockedViewerIDs = ids
+        onChange?()
     }
 
     /// Reads both rows, `remoteSharing` first then `remoteControlBlocked` —
