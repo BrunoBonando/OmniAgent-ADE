@@ -2016,10 +2016,16 @@ final class NavigationSidebarTests: XCTestCase {
 
     /// It sits above the machine gauges, which is where it was asked to go —
     /// and both survive.
+    ///
+    /// Compared in the sidebar's own coordinate space. The Claude card now
+    /// shares a stack with the update card above it, so its raw `frame` is
+    /// expressed in that stack's space and is not comparable with a view
+    /// outside it — it reads as 0, which is neither above nor below anything.
     func testTheClaudeCardSitsAboveTheMachineGauges() {
         let sidebar = makeSidebar()
+        func minY(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: sidebar).minY }
         XCTAssertGreaterThan(
-            sidebar.claudeLimits.frame.minY, sidebar.statsRow.frame.minY,
+            minY(sidebar.claudeLimits), minY(sidebar.statsRow),
             "higher up the column than CPU/MEM/GPU"
         )
         XCTAssertGreaterThan(sidebar.statsRow.frame.height, 0, "the gauges are still there")

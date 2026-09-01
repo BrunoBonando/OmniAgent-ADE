@@ -999,8 +999,9 @@ final class NavigationSidebarView: NSView {
     var onShowViewers: ((String) -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []
-    /// The self-update strip, above every nav row — hidden until there is an
-    /// update to talk about (`SidebarUpdateWidget.swift`).
+    /// The self-update card, directly above the session/week limits card —
+    /// same glass, same radius, same inset, hidden until there is an update to
+    /// talk about (`SidebarUpdateWidget.swift`).
     let updateWidget = SidebarUpdateWidgetView()
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
     let workspacesTree = WorkspacesTreeView()
@@ -1047,18 +1048,13 @@ final class NavigationSidebarView: NSView {
             return row
         }
 
-        // The update widget rides in the stack rather than being pinned above
-        // it so that hiding it actually removes it: NSStackView drops hidden
-        // arranged subviews from the layout, where a pinned view would keep
-        // its height constraint and leave a gap over Home.
-        updateWidget.isHidden = true
-        let navStack = NSStackView(views: [updateWidget] + navRows)
+        let navStack = NSStackView(views: navRows)
         navStack.orientation = .vertical
         navStack.alignment = .leading
         navStack.spacing = 2
         navStack.edgeInsets = NSEdgeInsets(top: 10, left: 8, bottom: 0, right: 8)
         navStack.translatesAutoresizingMaskIntoConstraints = false
-        for row in navRows + [updateWidget] {
+        for row in navRows {
             row.widthAnchor.constraint(equalTo: navStack.widthAnchor, constant: -16).isActive = true
         }
 
@@ -1099,7 +1095,22 @@ final class NavigationSidebarView: NSView {
             addSubview(glass)
         }
 
-        for view in [navStack, workspacesHeader, scroll, claudeLimits, statsRow, accountRow] {
+        // The update card and the limits card are one stack of cards at the
+        // foot of the column, and the stack is what makes hiding the update
+        // one work: NSStackView drops a hidden arranged subview from the
+        // layout, where a pinned view would keep its height constraint and
+        // leave a gap above the gauges.
+        updateWidget.isHidden = true
+        let bottomCards = NSStackView(views: [updateWidget, claudeLimits])
+        bottomCards.orientation = .vertical
+        bottomCards.alignment = .leading
+        bottomCards.spacing = 8
+        bottomCards.translatesAutoresizingMaskIntoConstraints = false
+        for card in [updateWidget, claudeLimits] {
+            card.widthAnchor.constraint(equalTo: bottomCards.widthAnchor).isActive = true
+        }
+
+        for view in [navStack, workspacesHeader, scroll, bottomCards, statsRow, accountRow] {
             addSubview(view)
         }
 
@@ -1131,11 +1142,11 @@ final class NavigationSidebarView: NSView {
             scroll.topAnchor.constraint(equalTo: workspacesHeader.bottomAnchor, constant: 2),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: claudeLimits.topAnchor, constant: -8),
+            scroll.bottomAnchor.constraint(equalTo: bottomCards.topAnchor, constant: -8),
 
-            claudeLimits.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            claudeLimits.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            claudeLimits.bottomAnchor.constraint(equalTo: statsRow.topAnchor, constant: -8),
+            bottomCards.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            bottomCards.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            bottomCards.bottomAnchor.constraint(equalTo: statsRow.topAnchor, constant: -8),
 
             statsRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             statsRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),

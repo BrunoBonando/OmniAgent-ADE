@@ -158,15 +158,19 @@ final class UpdateControllerTests: XCTestCase {
     func testTheWidgetSaysWhatIsHappening() {
         let widget = SidebarUpdateWidgetView()
         widget.apply(.checking)
-        XCTAssertEqual(widget.titleText, "Checking for updates…")
+        XCTAssertEqual(widget.titleText, "Checking for updates")
         widget.apply(.available(version: "1.8.0"))
-        XCTAssertEqual(widget.titleText, "Update available · 1.8.0")
+        XCTAssertEqual(widget.titleText, "Update available")
+        XCTAssertEqual(widget.captionText, "Version 1.8.0 — click to download")
+        // The percentage lives in the title while the bar has the caption's row.
         widget.apply(.updating(fraction: 0.5))
-        XCTAssertEqual(widget.titleText, "Updating…")
+        XCTAssertEqual(widget.titleText, "Updating 50%")
         widget.apply(.readyToRestart(version: "1.8.0"))
-        XCTAssertEqual(widget.titleText, "Update ready · 1.8.0 — Restart")
-        widget.apply(.failed("nope"))
-        XCTAssertEqual(widget.titleText, "Update failed — Retry")
+        XCTAssertEqual(widget.titleText, "Update ready")
+        XCTAssertEqual(widget.captionText, "Version 1.8.0 — restart to apply")
+        widget.apply(.failed("the network went away"))
+        XCTAssertEqual(widget.titleText, "Update failed")
+        XCTAssertEqual(widget.captionText, "the network went away", "the reason, not a shrug")
     }
 
     func testTheWidgetPressesOnlyWhereThereIsSomethingToPress() {
@@ -177,31 +181,117 @@ final class UpdateControllerTests: XCTestCase {
         widget.onRetry = { retries += 1 }
 
         widget.apply(.available(version: "1.8.0"))
-        widget.onPress?()
+        widget.press()
         widget.apply(.readyToRestart(version: "1.8.0"))
-        widget.onPress?()
+        widget.press()
         widget.apply(.failed("x"))
-        widget.onPress?()
+        widget.press()
         XCTAssertEqual([downloads, restarts, retries], [1, 1, 1])
 
         // Mid-download a press must not cancel anything by accident.
         widget.apply(.updating(fraction: 0.3))
-        widget.onPress?()
+        widget.press()
         widget.apply(.checking)
-        widget.onPress?()
+        widget.press()
         XCTAssertEqual([downloads, restarts, retries], [1, 1, 1])
     }
 
-    /// The widget rides in the nav stack precisely so that hiding it removes
-    /// it from the layout rather than leaving a gap over Home. Assert the
-    /// geometry, not just the `isHidden` flag -- a pinned view with its own
-    /// height constraint would pass the flag check and still push Home down.
+    /// Bruno's placement: the update card is a card, directly above the
+    /// session/week gauges, in the same glass and the same 8pt gutter — not a
+    /// row up among Home and Search.
+    func testTheUpdateCardSitsDirectlyAboveTheLimitsCard() throws {
+        let sidebar = try Self.sidebarInWindow()
+        sidebar.view.updateWidget.apply(.available(version: "1.8.0"))
+        sidebar.content.layoutSubtreeIfNeeded()
+
+        let card = sidebar.rect(sidebar.view.updateWidget)
+        let gauges = sidebar.rect(sidebar.view.claudeLimits)
+        XCTAssertEqual(card.minY, gauges.maxY + 8, accuracy: 0.5, "one gutter above the gauges")
+        XCTAssertEqual(card.minX, gauges.minX, accuracy: 0.5, "and flush with them")
+        XCTAssertEqual(card.width, gauges.width, accuracy: 0.5)
+        XCTAssertEqual(card.height, SidebarUpdateWidgetView.height, accuracy: 0.5)
+        sidebar.window.close()
+    }
+
+    /// The gauges are pinned to the foot of the column, so an update arriving
+    /// must not shove them. Assert the geometry, not the `isHidden` flag — a
+    /// pinned card with its own height constraint would pass the flag check
+    /// and still move them.
     ///
-    /// Measured in the *sidebar's* coordinate space, not the row's own. A
-    /// row's frame is expressed in the stack's space, where it does not move
-    /// at all when the stack grows -- the stack does. Comparing raw
-    /// `frame.maxY` therefore reports "nothing moved" no matter what happens.
-    func testHidingTheWidgetDoesNotMoveTheNavRows() throws {
+    /// Measured in the *sidebar's* coordinate space. A view's own frame is
+    /// expressed in its stack's space, where it does not move when the stack
+    /// grows — the stack does — so comparing raw `frame` reports "nothing
+    /// moved" whatever happens.
+    func testAnArrivingUpdateDoesNotMoveTheGauges() throws {
+        let sidebar = try Self.sidebarInWindow()
+        let atRest = sidebar.rect(sidebar.view.claudeLimits)
+
+        sidebar.view.updateWidget.apply(.available(version: "1.8.0"))
+        sidebar.content.layoutSubtreeIfNeeded()
+        XCTAssertEqual(sidebar.rect(sidebar.view.claudeLimits), atRest, "the gauges stay put")
+
+        sidebar.view.updateWidget.apply(.idle)
+        sidebar.content.layoutSubtreeIfNeeded()
+        XCTAssertEqual(sidebar.rect(sidebar.view.claudeLimits), atRest)
+        sidebar.window.close()
+    }
+
+    /// A card whose constraints cannot resolve would render as a sliver and
+    /// nobody would see it — which, on a screen these tests cannot look at, is
+    /// worth asserting directly.
+    func testTheCardHasRoomForItsTwoLinesAndItsBar() throws {
+        let sidebar = try Self.sidebarInWindow()
+        let widget = sidebar.view.updateWidget
+
+        widget.apply(.available(version: "1.8.0"))
+        sidebar.content.layoutSubtreeIfNeeded()
+        XCTAssertEqual(sidebar.rect(widget).height, SidebarUpdateWidgetView.height, accuracy: 0.5)
+
+        widget.apply(.updating(fraction: 0.5))
+        sidebar.content.layoutSubtreeIfNeeded()
+        XCTAssertFalse(widget.subviews.contains { $0 is UpdateProgressBarView && $0.isHidden })
+        let bar = try XCTUnwrap(widget.subviews.compactMap { $0 as? UpdateProgressBarView }.first)
+        XCTAssertGreaterThan(bar.fillWidth, 0, "half a download draws half a bar")
+        XCTAssertLessThan(bar.fillWidth, bar.bounds.width, "and not all of it")
+        sidebar.window.close()
+    }
+
+    /// The band of light is an invitation, so it runs only where there is
+    /// something to accept — and never when the user has asked for less motion.
+    func testTheSheenRunsOnlyWhileSomethingIsWaitingToBeTaken() throws {
+        try XCTSkipIf(
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            "Reduce Motion is on, which switches the sheen off by design"
+        )
+        let sidebar = try Self.sidebarInWindow()
+        let widget = sidebar.view.updateWidget
+
+        widget.apply(.available(version: "1.8.0"))
+        XCTAssertTrue(widget.isSheenAnimating)
+        widget.apply(.readyToRestart(version: "1.8.0"))
+        XCTAssertTrue(widget.isSheenAnimating)
+
+        // Working, or nothing to offer: no glinting.
+        widget.apply(.updating(fraction: 0.4))
+        XCTAssertFalse(widget.isSheenAnimating)
+        widget.apply(.failed("x"))
+        XCTAssertFalse(widget.isSheenAnimating)
+        widget.apply(.idle)
+        XCTAssertFalse(widget.isSheenAnimating)
+        sidebar.window.close()
+    }
+
+    /// A sidebar in a real window. Auto Layout on a bare view whose frame was
+    /// set by hand does not settle, and reports the same numbers either way.
+    private struct SidebarHarness {
+        let window: NSWindow
+        let content: NSView
+        let view: NavigationSidebarView
+        /// A subview's rect in the sidebar's own coordinate space.
+        func rect(_ subview: NSView) -> NSRect { subview.convert(subview.bounds, to: view) }
+    }
+
+    private static func sidebarInWindow() throws -> SidebarHarness {
         let sidebar = NavigationSidebarView()
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         let window = NSWindow(
@@ -218,46 +308,7 @@ final class UpdateControllerTests: XCTestCase {
             sidebar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         content.layoutSubtreeIfNeeded()
-
-        let home = try XCTUnwrap(sidebar.navRows.first)
-        func homeTop() -> CGFloat { home.convert(home.bounds, to: sidebar).maxY }
-
-        let whileHidden = homeTop()
-
-        sidebar.updateWidget.apply(.available(version: "1.8.0"))
-        content.layoutSubtreeIfNeeded()
-        // Non-flipped: further down the column is a *smaller* y.
-        XCTAssertLessThan(homeTop(), whileHidden, "a visible widget pushes Home down")
-        XCTAssertGreaterThan(
-            sidebar.updateWidget.convert(sidebar.updateWidget.bounds, to: sidebar).minY,
-            homeTop(),
-            "and sits above it, not over it"
-        )
-
-        sidebar.updateWidget.apply(.idle)
-        content.layoutSubtreeIfNeeded()
-        XCTAssertEqual(homeTop(), whileHidden, accuracy: 0.5, "hiding it gives the room back")
-        window.close()
-    }
-
-    /// A widget whose constraints cannot resolve would render as a zero-height
-    /// sliver and nobody would see it -- which, on a screen this test cannot
-    /// look at, is worth asserting directly.
-    func testTheVisibleWidgetHasRoomForItsLabelAndBar() {
-        let widget = SidebarUpdateWidgetView()
-        widget.translatesAutoresizingMaskIntoConstraints = false
-        widget.widthAnchor.constraint(equalToConstant: 264).isActive = true
-
-        widget.apply(.available(version: "1.8.0"))
-        widget.layoutSubtreeIfNeeded()
-        XCTAssertGreaterThanOrEqual(widget.fittingSize.height, 30)
-
-        widget.apply(.updating(fraction: 0.5))
-        widget.layoutSubtreeIfNeeded()
-        XCTAssertGreaterThan(
-            widget.fittingSize.height, 30,
-            "the progress bar needs its own line"
-        )
+        return SidebarHarness(window: window, content: content, view: sidebar)
     }
 
     // MARK: - Spotlight

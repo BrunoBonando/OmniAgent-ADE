@@ -59,8 +59,16 @@ the old binary between terminate and relaunch.
 
 ## 4. Widget states
 
-One `SidebarUpdateWidgetView` pinned above `navRows`, `isHidden` when there is
-nothing to say. States map 1:1 to `SPUUserDriver`:
+One `SidebarUpdateWidgetView` sharing a stack with `SidebarClaudeLimitsView`
+at the foot of the column — the same sheet of liquid glass, the same 14pt
+radius, the same 8pt gutter, so the two read as one stack of cards. `isHidden`
+when there is nothing to say, and being a stack child is what makes hiding it
+give the room back instead of leaving a gap above the gauges.
+
+It carries an accent wash over the glass and a slow band of light that crosses
+the card only while something is waiting to be taken (`.available`,
+`.readyToRestart`) — never while it is working, and never under Reduce Motion.
+States map 1:1 to `SPUUserDriver`:
 
 | Widget | Sparkle callback |
 |---|---|
@@ -107,7 +115,7 @@ We are not sandboxed, so the XPC installer services are optional; keep them
 
 Every one of these drives the same `UpdateController`:
 
-- Sidebar widget, above `SidebarNavItem.allCases` rows.
+- Sidebar card, directly above `SidebarClaudeLimitsView` (session/week).
 - Settings › General: version line, **Check Now**, auto-check toggle, and the
   widget's current state.
 - OmniAgent menu: **Check for Updates…**, straight after About.
