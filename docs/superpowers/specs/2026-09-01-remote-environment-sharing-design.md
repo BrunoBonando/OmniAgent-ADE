@@ -186,7 +186,8 @@ The relay already authenticates the viewer's JWT at `WS /v1/viewer/{device_id}`.
 
 - `ip` from `CF-Connecting-IP`, `country` from `CF-IPCountry` — both set by Cloudflare at the edge and not settable by the client.
 - **City is omitted, not faked.** `CF-IPCity` is an Enterprise-plan header, and geolocating the IP through a third-party API would hand every viewer IP to that third party for a line of UI copy.
-- The daemon stores this in `ConnectionEntry.viewer` alongside the self-reported name and surfaces both, distinguishably, to local clients.
+- The daemon stores this as `AssertedIdentity`, carried on `ConnectionEntry.trust` (`ClientTrust::Remote`) and on `LeaseHolder.asserted` — **not** on `ConnectionEntry.viewer`, which stays exactly what the client said about itself. The two halves are separate types on separate fields so that a check cannot reach the wrong one by mistake, and both are surfaced, distinguishably, to local clients.
+- **The relay cannot assert a per-viewer machine identity, and this is a deliberate limitation.** A viewer authenticates with a *user-level* JWT and dials the **host's** device id; the relay never learns which of that user's machines is calling. So `user_sub`/`account_email` identify a person, not a Mac, and `ip`/`country`/`client` are exactly the fields a reconnect changes. Where the daemon needs to tell one of an account's machines from another — the lease reclaim in §11 — the discriminator is therefore the self-reported `viewer_id`, read *only after* the account check below has established that both connections belong to the account this daemon serves. It decides which machine inside a verified account, never which account.
 
 No new endpoint, no schema change, no manifest change: one dictionary added to a message the relay already sends.
 
@@ -198,10 +199,15 @@ This is the invariant the whole feature rests on, so it is checked **twice, in t
 
 **The daemon (new).** The relay now asserts `account_email` **in the `open` control message, not in the client's `Hello`** — the daemon carries it from `conn_id` onto the data connection before dispatch begins, and a data connection whose `conn_id` has no asserted identity is refused outright. A check run on a value the connecting client supplies would check nothing. The daemon is already serving exactly one account's data — the `current-account` pointer names it, and the data dir is `<root>/accounts/<id>/` where `<id> = Store::account_dir_id(email)`. So the daemon hashes the asserted email with the same function and refuses the connection unless it equals the account directory it is serving:
 
+…and it asks the same question a second way, because the first reads only the *shape and name* of a path: that directory's own `auth_account_email` row, written by the app when it signed in, must also name the asserted email. A directory fabricated at `…/accounts/<the right id>` — a hand-set `OMNIAGENT_ADE_DATA_DIR`, a stray copy — has an empty store and no row to match, and comparing the full email as text means the 16-hex truncated hash is no longer the only thing standing between two accounts. The row is not a new source of truth: it is inside the account directory, it is the account directory's own account of itself, and being an `auth_` row it is already unreadable and unwritable through the protocol by a remote client.
+
 ```
-account_dir_id(viewer.account_email) == the account dir this daemon started into  →  proceed
+account_dir_id(viewer.account_email) == the account dir this daemon started into
+  AND  auth_account_email in that dir  == viewer.account_email                   →  proceed
 otherwise                                                                        →  Error, close
 ```
+
+Every uncertain case fails closed, the missing row included — which covers the real window in which a freshly created account directory has not been written to yet. That refusal is temporary and self-healing (the app writes the row as it signs in, and in production a viewer cannot be admitted at all until the app is attached — §2 condition 3), and failing open there would hand back the fabricated-directory hole the second fact exists to close. A host with no account directory at all is refused with its own sentence, because a Mac nobody is signed in to is not a Mac signed in to somebody else.
 
 No new identifier, no new settings row, no new hash: the check reuses the function that decides whose files these are in the first place. A relay bug, a mis-routed splice, or a compromised relay cannot hand machine A's sessions to a different person's machine, because the daemon independently refuses anyone who is not the account it is serving.
 

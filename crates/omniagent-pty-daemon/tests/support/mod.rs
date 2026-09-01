@@ -29,7 +29,8 @@ use omniagent_pty_daemon::protocol::{
 };
 use omniagent_pty_daemon::{
     serve_client, sharing_should_be_live, AssertedIdentity, ClientContext, ClientTrust,
-    DaemonServer, DEVICE_TOKEN_KEY, LOCAL_ABSENCE_GRACE, REMOTE_SHARING_KEY,
+    DaemonServer, AUTH_ACCOUNT_EMAIL_KEY, DEVICE_TOKEN_KEY, LOCAL_ABSENCE_GRACE,
+    REMOTE_SHARING_KEY,
 };
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
@@ -168,9 +169,26 @@ pub async fn daemon_signed_out() -> Daemon {
     daemon
 }
 
+/// A daemon whose data directory *is* `<root>/accounts/<id(email)>` but whose
+/// store holds no [`AUTH_ACCOUNT_EMAIL_KEY`] row.
+///
+/// Two things have this shape and the daemon cannot tell them apart, which is
+/// why it refuses both: a **fabricated** directory (an `OMNIAGENT_ADE_DATA_DIR`
+/// pointed somewhere hand-made, a stray copy) whose name was chosen to hash
+/// right and which has nothing inside it, and a **legitimately fresh** account
+/// directory in the moment before the app has written its auth rows. Use
+/// [`Daemon::sign_in_as`] to turn the second into an ordinary host.
+pub async fn daemon_in_an_account_dir_with_no_auth_row(email: &str) -> Daemon {
+    let mut daemon = boot(HostAccount::AccountDirWithoutTheRow(email)).await;
+    daemon.reconnect_local_client().await;
+    daemon
+}
+
 /// Which account a booted daemon is serving.
 enum HostAccount<'a> {
     SignedIn(&'a str),
+    /// The account directory exists; the row inside it does not.
+    AccountDirWithoutTheRow(&'a str),
     SignedOut,
 }
 
@@ -178,7 +196,9 @@ async fn boot(account: HostAccount<'_>) -> Daemon {
     let root = tempfile::tempdir().unwrap();
     let data_root = root.path().join("brain-data");
     let data_dir = match account {
-        HostAccount::SignedIn(email) => account_data_dir(&data_root, email),
+        HostAccount::SignedIn(email) | HostAccount::AccountDirWithoutTheRow(email) => {
+            account_data_dir(&data_root, email)
+        }
         HostAccount::SignedOut => data_root,
     };
     let server =
@@ -189,6 +209,9 @@ async fn boot(account: HostAccount<'_>) -> Daemon {
     let (stop, stopped) = oneshot::channel();
     tokio::spawn(server.run_until(stopped));
     enable_sharing(&ctx);
+    if let HostAccount::SignedIn(email) = account {
+        sign_in_as(&ctx, email);
+    }
 
     Daemon {
         ctx,
@@ -198,7 +221,23 @@ async fn boot(account: HostAccount<'_>) -> Daemon {
     }
 }
 
+/// What the app writes into the account directory when it signs in — the row
+/// the daemon's account check compares the relay's assertion against as its
+/// second fact (spec §9, fix round 1).
+pub fn sign_in_as(ctx: &ClientContext, email: &str) {
+    let store = ctx.settings.lock().unwrap();
+    store.set_setting("auth_signed_in", "true").unwrap();
+    store.set_setting(AUTH_ACCOUNT_EMAIL_KEY, email).unwrap();
+}
+
 impl Daemon {
+    /// The app finishing its sign-in against a directory that already exists —
+    /// what turns [`daemon_in_an_account_dir_with_no_auth_row`] into an
+    /// ordinary host, and the reason its refusal is temporary.
+    pub fn sign_in_as(&self, email: &str) {
+        sign_in_as(&self.ctx, email);
+    }
+
     /// A remote client that has not said `Hello` yet, speaking this build's
     /// protocol version, and which the relay asserts is this daemon's own
     /// account — the ordinary case every other admission test is about.

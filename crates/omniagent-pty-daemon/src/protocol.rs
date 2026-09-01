@@ -20,11 +20,28 @@ pub const MAX_PAYLOAD_LEN: usize = 1024 * 1024;
 ///
 /// `viewer_id`/`machine_name` are what a viewer calls itself (phase 2 spec
 /// §5). Both are `Option` so a client older than phase 2 — which sends
-/// `{"client": …}` alone — still parses, and both are self-reported: the two
-/// Macs belong to one account and the relay already refuses anyone else, so
-/// this is a labelling mechanism, not an authorization boundary. The daemon
-/// records them only for a `ClientTrust::Remote` connection, and they are what
-/// its presence roster and its blocklist are keyed on.
+/// `{"client": …}` alone — still parses. **Both are self-reported**: what is
+/// in this payload is what the connecting client chose to write, and nothing
+/// here is ever an account boundary. The daemon records them only for a
+/// `ClientTrust::Remote` connection, and they are what its presence roster and
+/// its blocklist are keyed on.
+///
+/// **`viewer_id` is nonetheless decision-bearing in exactly one place, and the
+/// scope of that is the whole point.** It is the discriminator on the lease
+/// reclaim (`connections::LeaseHolder::is_the_same_viewer_as`): a viewer coming
+/// back after a network blip may take the lease from the socket it left
+/// behind, and this id is how "the same machine" is recognised. It decides
+/// *which machine inside an account that has already been verified* — never
+/// which account. `server::viewer_owns_this_account` runs first, on the
+/// relay's assertion, and refuses everyone who is not the account this daemon
+/// serves; both sides of that comparison are therefore the same person by the
+/// time the id is read, and a forged id cannot cross an account boundary.
+///
+/// Which is also the rule for whatever is added here next: the moment a check
+/// reads a field of this struct *before* `viewer_owns_this_account` has run,
+/// it is a check the caller gets to answer for itself. The trusted half of an
+/// identity is [`crate::AssertedIdentity`]; it never travels in this payload
+/// and cannot be reached from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloPayload {
     pub client: String,

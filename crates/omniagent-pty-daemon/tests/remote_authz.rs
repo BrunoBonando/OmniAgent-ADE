@@ -349,6 +349,7 @@ async fn remote_client_sharing(
     // Spec §2: a machine that is not sharing refuses every remote `Hello`
     // before the trust boundary this file tests is ever reached.
     support::enable_sharing(&ctx);
+    support::sign_in_as(&ctx, support::HOST_ACCOUNT_EMAIL);
     support::hold_local_client(&ctx).await;
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     tokio::spawn(serve_client(

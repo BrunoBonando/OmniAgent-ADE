@@ -121,7 +121,82 @@ async fn a_blank_asserted_email_is_refused() {
 async fn a_signed_out_host_refuses_every_viewer() {
     let harness = support::daemon_signed_out().await;
     let mut viewer = harness.connect_remote_asserting("MacBook Pro", "bruno@bonando.com");
-    assert_refused(&mut viewer).await;
+    let message = assert_refused(&mut viewer).await;
+    // And it says what is actually true. "Signed in to a different account"
+    // would send the Mac's own owner looking for an account switch that does
+    // not exist, when what they need is to sign in.
+    assert!(
+        message.contains("no one is signed in"),
+        "a signed-out Mac claimed to be signed in to somebody else: {message}"
+    );
+}
+
+/// **The second fact** (fix round 1, FIX 2). The hash half of the check reads
+/// only the shape and name of a path, so a directory fabricated at
+/// `…/accounts/<the right id>` satisfies it — a hand-set
+/// `OMNIAGENT_ADE_DATA_DIR`, a stray copy. Its store is empty, and the account
+/// directory's own `auth_account_email` row is what refuses it.
+///
+/// This is also what stops a truncated 64-bit hash being the only thing
+/// standing between two accounts: the second comparison is the full email as
+/// text.
+#[tokio::test]
+async fn an_account_directory_with_no_auth_row_is_refused_however_right_its_name_looks() {
+    let harness =
+        support::daemon_in_an_account_dir_with_no_auth_row(support::HOST_ACCOUNT_EMAIL).await;
+    let mut viewer = harness.connect_remote_asserting("MacBook Pro", support::HOST_ACCOUNT_EMAIL);
+    let message = assert_refused(&mut viewer).await;
+    // The directory *does* exist and hashes correctly, so this is not the
+    // signed-out arm being reached by accident.
+    assert!(
+        !message.contains("no one is signed in"),
+        "the fabricated directory was read as a signed-out host: {message}"
+    );
+}
+
+/// The same daemon state seen from the other side: a **legitimately fresh**
+/// account directory, in the window between its creation and the app writing
+/// its auth rows. The daemon cannot tell it from a fabricated one and refuses
+/// it identically — which is the deliberate choice, because failing open here
+/// would hand back the hole the case above closes.
+///
+/// What makes that acceptable is that the refusal is temporary and needs no
+/// intervention: the app finishes signing in, the row lands, and the very next
+/// `Hello` is admitted. In production the window is not reachable at all — a
+/// remote connection requires the host's app to be attached (spec §2 condition
+/// 3), and the app writes these rows as it signs in.
+#[tokio::test]
+async fn a_fresh_account_directory_admits_the_owner_once_the_app_has_written_its_row() {
+    let harness =
+        support::daemon_in_an_account_dir_with_no_auth_row(support::HOST_ACCOUNT_EMAIL).await;
+    let mut too_early =
+        harness.connect_remote_asserting("MacBook Pro", support::HOST_ACCOUNT_EMAIL);
+    assert_refused(&mut too_early).await;
+
+    harness.sign_in_as(support::HOST_ACCOUNT_EMAIL);
+
+    let mut owner = harness.connect_remote_asserting("MacBook Pro", support::HOST_ACCOUNT_EMAIL);
+    assert!(
+        matches!(owner.hello().await, HelloResult::Ack(_)),
+        "the refusal did not clear once the app had signed in"
+    );
+}
+
+/// And the row is not a way *in* on its own: a directory whose name hashes to
+/// one account while its row names another is refused rather than letting
+/// either half win. The two facts have to agree.
+#[tokio::test]
+async fn a_directory_whose_row_disagrees_with_its_name_is_refused() {
+    let harness =
+        support::daemon_in_an_account_dir_with_no_auth_row(support::HOST_ACCOUNT_EMAIL).await;
+    harness.sign_in_as("someone@else.com");
+
+    // The asserted email hashes to this directory's name…
+    let mut by_name = harness.connect_remote_asserting("MacBook Pro", support::HOST_ACCOUNT_EMAIL);
+    assert_refused(&mut by_name).await;
+    // …and the other one matches the row. Neither is enough alone.
+    let mut by_row = harness.connect_remote_asserting("MacBook Pro", "someone@else.com");
+    assert_refused(&mut by_row).await;
 }
 
 /// **Where the check sits in the `Hello` sequence**, pinned where it is

@@ -343,6 +343,16 @@ pub fn remote_control_active(store: &Store) -> bool {
 /// [`protected_setting_key`].
 const AUTH_KEY_PREFIX: &str = "auth_";
 
+/// The row the app writes when it signs in, naming the account whose data
+/// directory this is (`SettingsKeys.authAccountEmail`).
+///
+/// It is inside the account directory, so it is the account directory's own
+/// account of itself — which is why [`viewer_owns_this_account`] can use it as
+/// a second fact without introducing a second *source* of truth. Being an
+/// `auth_` row it is already unreadable and unwritable through the protocol by
+/// a remote client ([`protected_setting_key`]).
+pub const AUTH_ACCOUNT_EMAIL_KEY: &str = "auth_account_email";
+
 /// Settings rows a remote client may neither read nor write (phase 3 spec §3,
 /// §12 invariant 2).
 ///
@@ -374,6 +384,21 @@ pub fn protected_setting_key(key: &str) -> bool {
     ) || key.starts_with(AUTH_KEY_PREFIX)
 }
 
+/// What [`viewer_owns_this_account`] concluded. Two refusals rather than one
+/// because they are different sentences to a human: a Mac nobody is signed in
+/// to is not "signed in to a different account", and telling its owner that
+/// would send them looking for an account switch that does not exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountMatch {
+    /// The caller is the account this daemon serves.
+    Owner,
+    /// Nobody is signed in here, so there is no account for anyone to be.
+    HostSignedOut,
+    /// Somebody else — or a caller the relay did not identify well enough to
+    /// tell apart from somebody else, which is the same refusal.
+    Refused,
+}
+
 /// The second of two independent checks that nobody ever sees another
 /// person's sessions (spec §9, §12 invariant 10).
 ///
@@ -382,45 +407,91 @@ pub fn protected_setting_key(key: &str) -> bool {
 /// neither is relied on to be, so a relay bug, a mis-spliced connection or a
 /// compromised relay still cannot hand this Mac's sessions to someone else.
 ///
-/// The daemon serves exactly one account: `current-account` names it and the
-/// data dir is `<root>/accounts/<id>/` (2026-08-30 account-scoped-workspace
-/// spec). So hash the **relay-asserted** email with the same function that
-/// chose that directory and require equality. No new identifier, no new
-/// settings row, no second hash to keep in step — the check reuses the
-/// function that decided whose files these are in the first place, which is
-/// also where its case- and whitespace-normalization comes from.
+/// The daemon serves exactly one account, and it is asked to agree with itself
+/// **twice** about which one:
 ///
-/// **It reads the assertion and nothing else.** The parameter is an
-/// [`AssertedIdentity`], which only `relay.rs` can construct and only from the
-/// control channel; there is deliberately no overload, no `&HelloPayload`
-/// nearby and no email field on the self-reported type. A check run on a value
-/// the connecting client supplies checks nothing.
+/// 1. `current-account` chose the data dir, so the dir is
+///    `<root>/accounts/<id>/` with `<id> = Store::account_dir_id(email)`. Hash
+///    the **relay-asserted** email with that same function and require
+///    equality. No new identifier and no second hash to keep in step — this is
+///    the function that decided whose files these are in the first place,
+///    which is also where the case- and whitespace-normalization comes from.
+/// 2. That directory's own store holds [`AUTH_ACCOUNT_EMAIL_KEY`], written by
+///    the app when it signed in. Compare the asserted email against it as a
+///    **string**.
+///
+/// Neither is redundant. (1) alone reads only the *shape and name* of a path,
+/// so a directory fabricated at `…/accounts/<some id>` — an env-var override, a
+/// stray copy — would look signed-in to it, and its 16 hex characters are a
+/// truncated SHA-256 doing authorization duty. (2) closes both: a fabricated
+/// directory has an empty store and no row to match, and the full email is
+/// compared as text, so the truncation is no longer the only thing between two
+/// accounts. (2) alone would be a row inside a directory that anyone able to
+/// write the row could also have chosen — which is why both, and why (2) is
+/// deliberately not a new source of truth but the account directory's own
+/// account of itself.
+///
+/// **It reads the assertion and nothing else the caller can touch.** The
+/// identity parameter is an [`AssertedIdentity`], which only `relay.rs` can
+/// construct and only from the control channel; there is deliberately no
+/// overload, no `&HelloPayload` nearby and no email field on the self-reported
+/// type. `signed_in_email` comes off the daemon's own store and is an `auth_`
+/// row, which [`protected_setting_key`] already keeps out of a remote client's
+/// reach in both directions. A check run on a value the connecting client
+/// supplies checks nothing.
 ///
 /// Every uncertain case fails closed:
 /// - no asserted email, or a blank one — nothing to compare, and a blank one
 ///   must never become "the hash of the empty string", which is a real
 ///   directory name;
-/// - a data dir that is not `…/accounts/<id>` — a **signed-out** host, which
-///   has no account for anyone to be;
-/// - a path with no final component at all.
-fn viewer_owns_this_account(asserted: &AssertedIdentity, data_dir: &Path) -> bool {
+/// - a data dir that is not `…/accounts/<id>`, or with no final component at
+///   all — a **signed-out** host, which has no account for anyone to be;
+/// - **no `auth_account_email` row, or an unreadable store** — including the
+///   real window where a freshly created account directory has not been
+///   written to yet. That window is bounded and self-healing (the app writes
+///   the row as it signs in, long before a viewer could be admitted — spec §2
+///   condition 3 requires the app to be attached at all), the refusal is a
+///   `Hello` a viewer re-dials past within seconds, and failing open here
+///   would give back exactly the fabricated-directory hole this exists to
+///   close. A temporary refusal is the cheaper mistake.
+fn viewer_owns_this_account(
+    asserted: &AssertedIdentity,
+    data_dir: &Path,
+    signed_in_email: Option<&str>,
+) -> AccountMatch {
+    // The data dir is `<root>/accounts/<id>` while signed in, so its last
+    // component *is* the account id and its parent is the accounts directory.
+    // Signed out it is the root itself, and neither half holds. Asked first so
+    // that a host with no account gives every caller the same answer, rather
+    // than one that varies with what the caller asserted.
+    let account_id = data_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|_| {
+            data_dir
+                .parent()
+                .is_some_and(|parent| parent.ends_with(brain_core::store::ACCOUNTS_DIR))
+        });
+    let Some(account_id) = account_id else {
+        return AccountMatch::HostSignedOut;
+    };
     let Some(email) = asserted
         .account_email
         .as_deref()
-        .filter(|email| !email.trim().is_empty())
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
     else {
-        return false;
+        return AccountMatch::Refused;
     };
-    // The data dir is `<root>/accounts/<id>` while signed in, so its last
-    // component *is* the account id and its parent is the accounts directory.
-    // Signed out it is the root itself, and neither half holds.
-    let Some(serving) = data_dir.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    data_dir
-        .parent()
-        .is_some_and(|parent| parent.ends_with(brain_core::store::ACCOUNTS_DIR))
-        && Store::account_dir_id(email) == serving
+    let hashes_to_this_directory = Store::account_dir_id(email) == account_id;
+    let is_who_this_directory_says_it_is = signed_in_email
+        .map(str::trim)
+        .is_some_and(|signed_in| !signed_in.is_empty() && signed_in.eq_ignore_ascii_case(email));
+    if hashes_to_this_directory && is_who_this_directory_says_it_is {
+        AccountMatch::Owner
+    } else {
+        AccountMatch::Refused
+    }
 }
 
 /// The trust boundary for relayed clients (phase 3 spec §3). `Err(reason)`
@@ -801,20 +872,31 @@ where
     // and there is nothing else here it could run on: `identity` is the
     // client's own `Hello` and has no email in it at all.
     if let ClientTrust::Remote(asserted) = &trust {
-        if !viewer_owns_this_account(asserted, &data_dir) {
+        // The account directory's own account of itself. An unreadable store
+        // yields `None`, which the check treats as no row — a refusal, because
+        // failing open on a store this daemon cannot read is failing open on
+        // the question of whose data it is holding.
+        let signed_in_email = lock_store(&settings)
+            .ok()
+            .and_then(|store| store.get_setting(AUTH_ACCOUNT_EMAIL_KEY).ok().flatten());
+        let verdict = viewer_owns_this_account(asserted, &data_dir, signed_in_email.as_deref());
+        if verdict != AccountMatch::Owner {
             tracing::warn!(
+                verdict = ?verdict,
                 asserted_email = asserted.account_email.as_deref().unwrap_or("<none>"),
                 asserted_ip = asserted.ip.as_deref().unwrap_or("<none>"),
                 asserted_country = asserted.country.as_deref().unwrap_or("<none>"),
                 serving = %data_dir.display(),
                 "refused a relayed connection: the asserted account is not the one this daemon serves"
             );
-            send_error(
-                &writer,
-                request,
-                anyhow!("this Mac is signed in to a different OmniAgent account"),
-            )
-            .await?;
+            // Two sentences, because a Mac nobody is signed in to is not a Mac
+            // signed in to somebody else, and only one of those is worth
+            // sending its owner to the account switcher over.
+            let refusal = match verdict {
+                AccountMatch::HostSignedOut => "no one is signed in to OmniAgent on this Mac",
+                _ => "this Mac is signed in to a different OmniAgent account",
+            };
+            send_error(&writer, request, anyhow!("{refusal}")).await?;
             return Ok(());
         }
     }
@@ -1858,50 +1940,115 @@ mod tests {
     }
 
     /// The shapes of `data_dir` the account check has to tell apart, next to
-    /// each other — the integration tests can only reach the two realistic
-    /// ones, and the rest are exactly where a path-shaped check goes wrong.
+    /// each other — the integration tests can only reach the realistic ones,
+    /// and the rest are exactly where a path-shaped check goes wrong.
     #[test]
     fn the_account_check_matches_the_account_directory_and_nothing_else() {
         let root = Path::new("/Users/b/Library/Application Support/OmniAgent-ADE");
         let mine = root
             .join("accounts")
             .join(Store::account_dir_id("bruno@bonando.com"));
+        let signed_in = Some("bruno@bonando.com");
 
-        assert!(viewer_owns_this_account(
-            &asserting(Some("bruno@bonando.com")),
-            &mine
-        ));
-        // Normalized the way the directory name was chosen, because it is the
-        // same function that chose it.
-        assert!(viewer_owns_this_account(
-            &asserting(Some("  Bruno@Bonando.COM ")),
-            &mine
-        ));
-        assert!(!viewer_owns_this_account(
-            &asserting(Some("someone@else.com")),
-            &mine
-        ));
+        assert_eq!(
+            viewer_owns_this_account(&asserting(Some("bruno@bonando.com")), &mine, signed_in),
+            AccountMatch::Owner
+        );
+        // Normalized on both halves the way the directory name was chosen,
+        // because it is the same function that chose it.
+        assert_eq!(
+            viewer_owns_this_account(&asserting(Some("  Bruno@Bonando.COM ")), &mine, signed_in),
+            AccountMatch::Owner
+        );
+        assert_eq!(
+            viewer_owns_this_account(
+                &asserting(Some("bruno@bonando.com")),
+                &mine,
+                Some(" BRUNO@bonando.com  ")
+            ),
+            AccountMatch::Owner
+        );
+        assert_eq!(
+            viewer_owns_this_account(&asserting(Some("someone@else.com")), &mine, signed_in),
+            AccountMatch::Refused
+        );
 
         // Nothing asserted, and nothing meaningful asserted.
-        assert!(!viewer_owns_this_account(&asserting(None), &mine));
-        assert!(!viewer_owns_this_account(&asserting(Some("   ")), &mine));
+        assert_eq!(
+            viewer_owns_this_account(&asserting(None), &mine, signed_in),
+            AccountMatch::Refused
+        );
+        assert_eq!(
+            viewer_owns_this_account(&asserting(Some("   ")), &mine, signed_in),
+            AccountMatch::Refused
+        );
 
-        // Signed out: the data dir is the root, so there is no account.
-        assert!(!viewer_owns_this_account(
-            &asserting(Some("bruno@bonando.com")),
-            root
-        ));
+        // Signed out: the data dir is the root, so there is no account — and
+        // the answer does not vary with what the caller asserted.
+        assert_eq!(
+            viewer_owns_this_account(&asserting(Some("bruno@bonando.com")), root, signed_in),
+            AccountMatch::HostSignedOut
+        );
+        assert_eq!(
+            viewer_owns_this_account(&asserting(Some("someone@else.com")), root, None),
+            AccountMatch::HostSignedOut
+        );
         // A directory that merely *ends* in the right name is not an account
         // directory — the parent has to be `accounts`.
-        assert!(!viewer_owns_this_account(
-            &asserting(Some("bruno@bonando.com")),
-            &root.join(Store::account_dir_id("bruno@bonando.com"))
-        ));
+        assert_eq!(
+            viewer_owns_this_account(
+                &asserting(Some("bruno@bonando.com")),
+                &root.join(Store::account_dir_id("bruno@bonando.com")),
+                signed_in
+            ),
+            AccountMatch::HostSignedOut
+        );
         // …and a path with no final component at all is not one either.
-        assert!(!viewer_owns_this_account(
-            &asserting(Some("bruno@bonando.com")),
-            Path::new("/")
-        ));
+        assert_eq!(
+            viewer_owns_this_account(&asserting(Some("bruno@bonando.com")), Path::new("/"), None),
+            AccountMatch::HostSignedOut
+        );
+    }
+
+    /// The second fact, and what it is for (fix round 1, FIX 2).
+    ///
+    /// The hash half reads only the *shape and name* of a path, so a directory
+    /// fabricated at `…/accounts/<the right id>` satisfies it — an env-var
+    /// override, a stray copy. Its store is empty, so the row half refuses it.
+    /// This is also what stops a truncated 64-bit hash being the only thing
+    /// standing between two accounts: the full email is compared as text.
+    #[test]
+    fn a_directory_that_hashes_right_but_has_no_row_is_still_refused() {
+        let fabricated =
+            Path::new("/tmp/anywhere/accounts").join(Store::account_dir_id("bruno@bonando.com"));
+        let asserted = asserting(Some("bruno@bonando.com"));
+
+        // The hash half alone would say yes to this.
+        assert_eq!(
+            Store::account_dir_id("bruno@bonando.com"),
+            fabricated.file_name().unwrap().to_str().unwrap()
+        );
+        // No row (an empty store) — refused.
+        assert_eq!(
+            viewer_owns_this_account(&asserted, &fabricated, None),
+            AccountMatch::Refused
+        );
+        // A blank row is the same case as a missing one.
+        assert_eq!(
+            viewer_owns_this_account(&asserted, &fabricated, Some("  ")),
+            AccountMatch::Refused
+        );
+        // A row naming somebody else — the directory disagreeing with its own
+        // name — is refused too, rather than the hash being allowed to win.
+        assert_eq!(
+            viewer_owns_this_account(&asserted, &fabricated, Some("someone@else.com")),
+            AccountMatch::Refused
+        );
+        // And with the row present and agreeing, it is the ordinary case.
+        assert_eq!(
+            viewer_owns_this_account(&asserted, &fabricated, Some("bruno@bonando.com")),
+            AccountMatch::Owner
+        );
     }
 
     /// Both tests below mutate the process-global `OMNIAGENT_ADE_DATA_DIR`.

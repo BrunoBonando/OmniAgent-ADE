@@ -165,6 +165,7 @@ async fn local_and_remote_clients(
     // The switch and the token: the other two thirds of spec §2's condition,
     // without which the viewer below is refused before it can be seen.
     support::enable_sharing(&ctx);
+    support::sign_in_as(&ctx, support::HOST_ACCOUNT_EMAIL);
 
     let host = connect(&ctx, ClientTrust::Local)
         .hello(serde_json::json!({"client": "omniagent-native-macos"}))

@@ -118,6 +118,9 @@ async fn boot_daemon(
             )
             .unwrap();
     }
+    // Signed in: the account check compares the relay's assertion against the
+    // account directory AND that directory's own `auth_account_email` row.
+    support::sign_in_as(&ctx, support::HOST_ACCOUNT_EMAIL);
     ctx.settings_changed.notify_one();
     (ctx, stop)
 }
