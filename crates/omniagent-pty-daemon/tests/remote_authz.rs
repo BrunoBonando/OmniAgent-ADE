@@ -319,9 +319,11 @@ async fn remote_client_sharing(
     s1_script: &str,
     projection: &str,
 ) -> (Duplex, ClientContext, oneshot::Sender<()>) {
+    // Signed in, so the viewer below gets past the account check (spec §9)
+    // to reach the trust boundary this file is about.
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
-        root.join("brain-data"),
+        support::account_data_dir(&root.join("brain-data"), support::HOST_ACCOUNT_EMAIL),
     )
     .await
     .unwrap();

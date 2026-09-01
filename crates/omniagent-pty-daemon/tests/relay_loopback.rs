@@ -82,9 +82,11 @@ async fn boot_daemon(
     projection: &str,
     sharing_enabled: bool,
 ) -> (ClientContext, oneshot::Sender<()>) {
+    // Signed in, so the account check (spec §9) has an account directory to
+    // compare the relay's assertion against — the one [`open`] asserts.
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
-        root.join("brain-data"),
+        support::account_data_dir(&root.join("brain-data"), support::HOST_ACCOUNT_EMAIL),
     )
     .await
     .unwrap();

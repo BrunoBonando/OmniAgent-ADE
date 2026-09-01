@@ -143,9 +143,11 @@ fn connect(ctx: &ClientContext, trust: ClientTrust) -> Duplex {
 async fn local_and_remote_clients(
     root: &std::path::Path,
 ) -> (Duplex, Duplex, ClientContext, oneshot::Sender<()>) {
+    // Signed in, so the viewer below gets past the account check (spec §9)
+    // to reach the presence behaviour this file is about.
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
-        root.join("brain-data"),
+        support::account_data_dir(&root.join("brain-data"), support::HOST_ACCOUNT_EMAIL),
     )
     .await
     .unwrap();

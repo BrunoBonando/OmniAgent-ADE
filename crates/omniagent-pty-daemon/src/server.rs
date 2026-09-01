@@ -374,6 +374,55 @@ pub fn protected_setting_key(key: &str) -> bool {
     ) || key.starts_with(AUTH_KEY_PREFIX)
 }
 
+/// The second of two independent checks that nobody ever sees another
+/// person's sessions (spec §9, §12 invariant 10).
+///
+/// The relay already refuses a viewer whose `sub` does not own the device.
+/// This one does not trust that. Either check alone would be sufficient;
+/// neither is relied on to be, so a relay bug, a mis-spliced connection or a
+/// compromised relay still cannot hand this Mac's sessions to someone else.
+///
+/// The daemon serves exactly one account: `current-account` names it and the
+/// data dir is `<root>/accounts/<id>/` (2026-08-30 account-scoped-workspace
+/// spec). So hash the **relay-asserted** email with the same function that
+/// chose that directory and require equality. No new identifier, no new
+/// settings row, no second hash to keep in step — the check reuses the
+/// function that decided whose files these are in the first place, which is
+/// also where its case- and whitespace-normalization comes from.
+///
+/// **It reads the assertion and nothing else.** The parameter is an
+/// [`AssertedIdentity`], which only `relay.rs` can construct and only from the
+/// control channel; there is deliberately no overload, no `&HelloPayload`
+/// nearby and no email field on the self-reported type. A check run on a value
+/// the connecting client supplies checks nothing.
+///
+/// Every uncertain case fails closed:
+/// - no asserted email, or a blank one — nothing to compare, and a blank one
+///   must never become "the hash of the empty string", which is a real
+///   directory name;
+/// - a data dir that is not `…/accounts/<id>` — a **signed-out** host, which
+///   has no account for anyone to be;
+/// - a path with no final component at all.
+fn viewer_owns_this_account(asserted: &AssertedIdentity, data_dir: &Path) -> bool {
+    let Some(email) = asserted
+        .account_email
+        .as_deref()
+        .filter(|email| !email.trim().is_empty())
+    else {
+        return false;
+    };
+    // The data dir is `<root>/accounts/<id>` while signed in, so its last
+    // component *is* the account id and its parent is the accounts directory.
+    // Signed out it is the root itself, and neither half holds.
+    let Some(serving) = data_dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    data_dir
+        .parent()
+        .is_some_and(|parent| parent.ends_with(brain_core::store::ACCOUNTS_DIR))
+        && Store::account_dir_id(email) == serving
+}
+
 /// The trust boundary for relayed clients (phase 3 spec §3). `Err(reason)`
 /// means "answer with `Error`, skip dispatch".
 ///
@@ -731,6 +780,44 @@ where
         .await?;
         return Ok(());
     }
+    // **Is this caller the account this daemon serves** (spec §9, §12
+    // invariant 10)? The second of the two independent checks that nobody ever
+    // sees another person's sessions.
+    //
+    // **First of the viewer-specific refusals**, and that placement is the
+    // decision, not an accident of where it was easy to add. Every refusal
+    // below this line answers with a fact: "‹machine› is not available" names
+    // *this Mac* as it announced itself to the relay, the blocklist confirms
+    // that a viewer id is one this host has kicked, and the lease names the
+    // machine currently driving. A caller who is not this account is entitled
+    // to none of them — so it is told the one thing it may know, that it is
+    // not this account, and told it before anything else has spoken.
+    //
+    // The version check stays ahead, because it is the only refusal whose
+    // *encoding* the peer might not understand, and because the sentence it
+    // sends back contains nothing but the caller's own name for itself.
+    //
+    // It runs on the trust value, which is to say on what the relay asserted,
+    // and there is nothing else here it could run on: `identity` is the
+    // client's own `Hello` and has no email in it at all.
+    if let ClientTrust::Remote(asserted) = &trust {
+        if !viewer_owns_this_account(asserted, &data_dir) {
+            tracing::warn!(
+                asserted_email = asserted.account_email.as_deref().unwrap_or("<none>"),
+                asserted_ip = asserted.ip.as_deref().unwrap_or("<none>"),
+                asserted_country = asserted.country.as_deref().unwrap_or("<none>"),
+                serving = %data_dir.display(),
+                "refused a relayed connection: the asserted account is not the one this daemon serves"
+            );
+            send_error(
+                &writer,
+                request,
+                anyhow!("this Mac is signed in to a different OmniAgent account"),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
     // Is this machine reachable at all (spec §2 condition 3, §3 "One remote
     // session per machine, in either direction")? See
     // [`sharing_should_be_live`] for why the local-app condition is what makes
@@ -741,13 +828,11 @@ where
     // enforced this only where the tunnel is opened would be relying on the
     // tunnel to be the only way in.
     //
-    // **First of the viewer-specific refusals, and before the lease.** A
-    // machine that is not sharing owes every caller the same sentence: whether
-    // this particular viewer is also blocked, or whether someone else is
-    // driving, is not something an unshared Mac should be answering. And a
-    // refusal must never take the lease on its way out (`remote_lease.rs`).
-    // The version check stays ahead of it, because a peer on the old protocol
-    // has to be refused in a dialect it can decode.
+    // **Before the lease.** A machine that is not sharing owes every caller of
+    // its own account the same sentence: whether this particular viewer is
+    // also blocked, or whether someone else is driving, is not something an
+    // unshared Mac should be answering. And a refusal must never take the
+    // lease on its way out (`remote_lease.rs`).
     if trust.is_remote() {
         if let Some(host) = unavailable_as(&settings, &connections) {
             send_error(&writer, request, anyhow!("{host} is not available")).await?;
@@ -1749,6 +1834,60 @@ async fn send_frame(writer: &SharedWriter, frame: Frame) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn asserting(email: Option<&str>) -> AssertedIdentity {
+        AssertedIdentity {
+            account_email: email.map(str::to_owned),
+            ..AssertedIdentity::default()
+        }
+    }
+
+    /// The shapes of `data_dir` the account check has to tell apart, next to
+    /// each other — the integration tests can only reach the two realistic
+    /// ones, and the rest are exactly where a path-shaped check goes wrong.
+    #[test]
+    fn the_account_check_matches_the_account_directory_and_nothing_else() {
+        let root = Path::new("/Users/b/Library/Application Support/OmniAgent-ADE");
+        let mine = root
+            .join("accounts")
+            .join(Store::account_dir_id("bruno@bonando.com"));
+
+        assert!(viewer_owns_this_account(
+            &asserting(Some("bruno@bonando.com")),
+            &mine
+        ));
+        // Normalized the way the directory name was chosen, because it is the
+        // same function that chose it.
+        assert!(viewer_owns_this_account(
+            &asserting(Some("  Bruno@Bonando.COM ")),
+            &mine
+        ));
+        assert!(!viewer_owns_this_account(
+            &asserting(Some("someone@else.com")),
+            &mine
+        ));
+
+        // Nothing asserted, and nothing meaningful asserted.
+        assert!(!viewer_owns_this_account(&asserting(None), &mine));
+        assert!(!viewer_owns_this_account(&asserting(Some("   ")), &mine));
+
+        // Signed out: the data dir is the root, so there is no account.
+        assert!(!viewer_owns_this_account(
+            &asserting(Some("bruno@bonando.com")),
+            root
+        ));
+        // A directory that merely *ends* in the right name is not an account
+        // directory — the parent has to be `accounts`.
+        assert!(!viewer_owns_this_account(
+            &asserting(Some("bruno@bonando.com")),
+            &root.join(Store::account_dir_id("bruno@bonando.com"))
+        ));
+        // …and a path with no final component at all is not one either.
+        assert!(!viewer_owns_this_account(
+            &asserting(Some("bruno@bonando.com")),
+            Path::new("/")
+        ));
+    }
 
     /// Both tests below mutate the process-global `OMNIAGENT_ADE_DATA_DIR`.
     /// They live here (this unit-test binary) rather than in

@@ -23,6 +23,7 @@
 
 use std::time::Duration;
 
+use brain_core::Store;
 use omniagent_pty_daemon::protocol::{
     read_handshake_frame, write_frame, ErrorPayload, Frame, HelloAckPayload, MessageKind,
 };
@@ -124,8 +125,27 @@ pub async fn hold_local_client(ctx: &ClientContext) -> tokio::task::JoinHandle<(
     })
 }
 
+/// The directory a daemon signed in as `email` runs in: `<root>/accounts/<id>`
+/// with `<id> = Store::account_dir_id(email)`, which is exactly what
+/// `Store::default_data_dir()` resolves to while the `current-account` pointer
+/// names that account (2026-08-30 account-scoped-workspace spec).
+///
+/// Every harness here boots into one, because that path *is* what the daemon's
+/// account check compares the relay's assertion against — a daemon booted into
+/// a plain directory is a signed-out one, and refuses every viewer.
+pub fn account_data_dir(root: &std::path::Path, email: &str) -> std::path::PathBuf {
+    root.join("accounts").join(Store::account_dir_id(email))
+}
+
 pub async fn daemon_with_local_client() -> Daemon {
     let mut daemon = daemon_without_local_client().await;
+    daemon.reconnect_local_client().await;
+    daemon
+}
+
+/// A daemon serving `email`'s account directory, with the host's app attached.
+pub async fn daemon_for_account(email: &str) -> Daemon {
+    let mut daemon = boot(HostAccount::SignedIn(email)).await;
     daemon.reconnect_local_client().await;
     daemon
 }
@@ -135,13 +155,36 @@ pub async fn daemon_with_local_client() -> Daemon {
 /// that must refuse everyone (spec §3, "One remote session per machine, in
 /// either direction").
 pub async fn daemon_without_local_client() -> Daemon {
+    boot(HostAccount::SignedIn(HOST_ACCOUNT_EMAIL)).await
+}
+
+/// A **signed-out** host: the data directory is the root itself, with no
+/// `accounts/<id>` segment, so there is no account for an assertion to match.
+/// It has no device token in the real world either, but the check must fail
+/// closed here on its own rather than lean on that.
+pub async fn daemon_signed_out() -> Daemon {
+    let mut daemon = boot(HostAccount::SignedOut).await;
+    daemon.reconnect_local_client().await;
+    daemon
+}
+
+/// Which account a booted daemon is serving.
+enum HostAccount<'a> {
+    SignedIn(&'a str),
+    SignedOut,
+}
+
+async fn boot(account: HostAccount<'_>) -> Daemon {
     let root = tempfile::tempdir().unwrap();
-    let server = DaemonServer::bind_with_data_dir(
-        root.path().join("runtime").join("daemon.sock"),
-        root.path().join("brain-data"),
-    )
-    .await
-    .unwrap();
+    let data_root = root.path().join("brain-data");
+    let data_dir = match account {
+        HostAccount::SignedIn(email) => account_data_dir(&data_root, email),
+        HostAccount::SignedOut => data_root,
+    };
+    let server =
+        DaemonServer::bind_with_data_dir(root.path().join("runtime").join("daemon.sock"), data_dir)
+            .await
+            .unwrap();
     let ctx = server.client_context();
     let (stop, stopped) = oneshot::channel();
     tokio::spawn(server.run_until(stopped));
