@@ -291,17 +291,23 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(settings.section, .experimental, "⌘, on the page changes nothing")
     }
 
-    /// Accounts is the first section with a screen: who is signed in, and
-    /// the one button that changes it. Every other section keeps the
-    /// "Under development" line.
+    /// Accounts and General are the two sections with a screen — Accounts
+    /// names who is signed in, General carries the self-update block. The
+    /// rest still keep the "Under development" line.
     func testTheAccountsSectionNamesTheAccountAndOffersOneButton() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         let settings = controller.settingsView
 
-        controller.showSettings(section: .general)
+        // Themes is still a promise, so it is what proves the line still
+        // exists at all. General stopped being one when self-update landed.
+        controller.showSettings(section: .themes)
         XCTAssertFalse(settings.subtitleField.isHidden)
+
+        controller.showSettings(section: .general)
+        XCTAssertTrue(settings.subtitleField.isHidden, "General has the update block now")
+        XCTAssertFalse(settings.updateButton.isHidden)
         XCTAssertTrue(settings.accountField.isHidden, "the account block is Accounts' alone")
         XCTAssertTrue(settings.accountButton.isHidden)
         XCTAssertTrue(settings.githubField.isHidden)
@@ -309,6 +315,7 @@ final class NavigationSidebarTests: XCTestCase {
 
         controller.showSettings(section: .accounts)
         XCTAssertTrue(settings.subtitleField.isHidden, "a screen, not a promise")
+        XCTAssertTrue(settings.updateButton.isHidden, "the update block is General's alone")
         XCTAssertFalse(settings.accountField.isHidden)
         XCTAssertFalse(settings.accountButton.isHidden)
         XCTAssertFalse(settings.githubField.isHidden)

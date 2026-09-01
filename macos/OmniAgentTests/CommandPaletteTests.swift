@@ -30,6 +30,9 @@ final class CommandPaletteTests: XCTestCase {
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "settings:accounts:signin", "settings:accounts:github:connect",
+                // Idle offers the check; a found or downloaded update swaps
+                // this row for the one that can actually be taken.
+                "update:check",
                 "help:privacy-policy", "help:third-party-notices",
             ]
         )
