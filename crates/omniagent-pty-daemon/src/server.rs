@@ -186,6 +186,32 @@ pub fn remote_control_active(store: &Store) -> bool {
         .unwrap_or(false)
 }
 
+/// Every settings row whose key starts with this belongs to the signed-in
+/// account — `auth_signed_in`, `auth_account_email`, and whatever the app
+/// adds next. A prefix rather than a list, deliberately: see
+/// [`protected_setting_key`].
+const AUTH_KEY_PREFIX: &str = "auth_";
+
+/// Settings rows a remote client may neither read nor write (phase 3 spec §3,
+/// §12 invariant 2).
+///
+/// This is the whole security argument in five keys: a remote client must not
+/// be able to grant itself access ([`REMOTE_SHARING_KEY`],
+/// [`crate::DEVICE_TOKEN_KEY`]), unblock itself ([`BLOCKED_VIEWERS_KEY`]), or
+/// read the host's credentials (`auth_*`). The `auth_` case is a **prefix** on
+/// purpose — a row added to that family next month is protected the day it is
+/// added, without anyone remembering this function exists.
+///
+/// Both the get **and** the set arm of [`authorize_remote`] consult it: a
+/// read-only leak of a device token is as bad as a write, and a token that
+/// only leaks is a machine anyone can go on reaching.
+pub fn protected_setting_key(key: &str) -> bool {
+    matches!(
+        key,
+        REMOTE_SHARING_KEY | crate::relay::DEVICE_TOKEN_KEY | BLOCKED_VIEWERS_KEY
+    ) || key.starts_with(AUTH_KEY_PREFIX)
+}
+
 /// The one field every session-bound control payload (`AttachPayload`,
 /// `ResizePayload`, `SessionIdPayload`) has in common.
 #[derive(serde::Deserialize)]

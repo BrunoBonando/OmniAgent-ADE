@@ -8,7 +8,9 @@
 use omniagent_pty_daemon::protocol::{
     read_frame, write_frame, Frame, MessageKind, SessionListPayload, SessionSizePayload, SettingKey,
 };
-use omniagent_pty_daemon::{serve_client, ClientContext, ClientTrust, CreateSession, DaemonServer};
+use omniagent_pty_daemon::{
+    protected_setting_key, serve_client, ClientContext, ClientTrust, CreateSession, DaemonServer,
+};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -517,4 +519,28 @@ fn authorize_remote_checks_the_raw_input_session_id() {
     );
     assert!(omniagent_pty_daemon::authorize_remote(&ok, &allowed).is_ok());
     assert!(omniagent_pty_daemon::authorize_remote(&bad, &allowed).is_err());
+}
+
+/// The protected settings rows (phase 3 spec §3 and §12 invariant 2). This is
+/// the whole security argument in five keys: a remote client that could write
+/// `remote_sharing` or `relay_device_token` would be granting itself access,
+/// one that could write `remote_control_blocked` would be unblocking itself,
+/// and one that could *read* `auth_*` would be walking off with the host's
+/// credentials. The `auth_` case is a prefix on purpose — the sixth key below
+/// does not exist today, and is protected anyway.
+#[test]
+fn protected_keys_are_the_ones_that_would_grant_more_access() {
+    for key in [
+        "remote_sharing",
+        "relay_device_token",
+        "remote_control_blocked",
+        "auth_signed_in",
+        "auth_account_email",
+        "auth_anything_added_later",
+    ] {
+        assert!(protected_setting_key(key), "{key} must be protected");
+    }
+    for key in ["layout", "editor_panes_native", "roots", "persona"] {
+        assert!(!protected_setting_key(key), "{key} must stay reachable");
+    }
 }
