@@ -383,10 +383,16 @@ async fn a_resize_reaches_every_attached_client() {
 /// Phase 2 §2: the reader walks the pane level. Missing these ids denies
 /// every remote attach, so this is the load-bearing assertion of the change —
 /// and a v1 row from a Mac that has not updated yet must still parse.
+/// `remote_sharing` is set here only so `remote_control_active` — a
+/// machine-wide flag, unrelated to what `remote_control` lists — reads true;
+/// it plays no part in the pane-reading assertions.
 #[test]
 fn projection_v2_shares_every_pane_and_v1_still_parses() {
     let store = brain_core::Store::open_in_memory().unwrap();
     store.set_setting("remote_control", PROJECTION_V2).unwrap();
+    store
+        .set_setting("remote_sharing", r#"{"enabled":true}"#)
+        .unwrap();
     let ids = omniagent_pty_daemon::remote_session_ids(&store);
     assert_eq!(
         ids,
@@ -404,14 +410,18 @@ fn projection_v2_shares_every_pane_and_v1_still_parses() {
 }
 
 /// An idle Mac: a workspace is shared, its session has no panes open. Nothing
-/// is attachable, but the machine must stay reachable — that pairing is the
-/// whole reason `remote_control_active` counts workspaces and not sessions.
+/// is attachable via `remote_control`, but the machine must stay reachable —
+/// and reachability is `remote_sharing` alone now, decoupled from whatever
+/// `remote_control` does or does not list.
 #[test]
 fn a_v2_session_with_no_panes_shares_nothing_yet_keeps_the_machine_reachable() {
     const IDLE: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
     "sessions":[{"id":"g1","label":"Session 1","order":0,"panes":[]}]}]}"#;
     let store = brain_core::Store::open_in_memory().unwrap();
     store.set_setting("remote_control", IDLE).unwrap();
+    store
+        .set_setting("remote_sharing", r#"{"enabled":true}"#)
+        .unwrap();
     assert!(omniagent_pty_daemon::remote_session_ids(&store).is_empty());
     assert!(omniagent_pty_daemon::remote_control_active(&store));
 }

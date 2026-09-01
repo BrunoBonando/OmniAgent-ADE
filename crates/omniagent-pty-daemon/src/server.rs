@@ -73,6 +73,12 @@ pub type SharedWriter = Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>;
 /// workspaces (and their sessions) a remote client may ever see.
 pub const REMOTE_CONTROL_KEY: &str = "remote_control";
 
+/// The settings row holding the machine-wide sharing switch (spec §2):
+/// `{"enabled": true|false}`. It replaces the phase-1/2 pair of
+/// `remote_control` (the projection) and `remote_control_workspaces` (the
+/// intent) — sharing is no longer per-workspace, so there is no list.
+pub const REMOTE_SHARING_KEY: &str = "remote_sharing";
+
 /// The settings row listing viewer ids the host has disconnected — a JSON
 /// array of strings, `["<viewer_id>", …]` (phase 2 spec §5).
 ///
@@ -165,23 +171,19 @@ pub fn remote_session_ids(store: &Store) -> HashSet<String> {
         .collect()
 }
 
-/// Whether the projection shares at least one **workspace** — the daemon's
-/// half of "the tunnel should be up" (spec §2: the control channel is open
-/// *iff* `remote_control` lists ≥ 1 workspace **and** `relay_device_token`
-/// exists). Deliberately not `!remote_session_ids(store).is_empty()`: the app
-/// emits an enabled workspace with an empty `sessions` array on purpose, so a
-/// Mac with nothing running is still reachable — a viewer has to be able to
-/// see an idle machine *before* there is a session on it to open.
+/// Whether this machine is sharing its environment — the daemon's half of
+/// "the tunnel should be up". Phase 3 replaces the old "the projection lists
+/// ≥ 1 workspace" test with one flag; a malformed or absent row is off,
+/// because a sharing switch that fails open is not a switch. Phase 2 Task 11
+/// extends this same function with the local-connection condition.
 pub fn remote_control_active(store: &Store) -> bool {
-    let Some(raw) = store.get_setting(REMOTE_CONTROL_KEY).ok().flatten() else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    value["workspaces"]
-        .as_array()
-        .is_some_and(|workspaces| !workspaces.is_empty())
+    store
+        .get_setting(REMOTE_SHARING_KEY)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| value["enabled"].as_bool())
+        .unwrap_or(false)
 }
 
 /// The one field every session-bound control payload (`AttachPayload`,

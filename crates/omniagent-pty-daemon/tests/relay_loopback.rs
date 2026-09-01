@@ -4,9 +4,9 @@
 //! its hello, dial a data socket for every `{"open": id}`, and run the real
 //! `serve_client(…, ClientTrust::Remote)` over that data socket — so a viewer
 //! gets `HelloAck`, an `Attach` on a shared session gets `Snapshot`, and a
-//! `Kill` is refused. Emptying the projection closes the control socket, a
-//! `401` stops the daemon dialling until the token row changes, and a relay
-//! that goes silent is dropped and re-dialled.
+//! `Kill` is refused. Turning sharing off closes the control socket, a `401`
+//! stops the daemon dialling until the token row changes, and a relay that
+//! goes silent is dropped and re-dialled.
 
 use futures_util::{SinkExt, StreamExt};
 use omniagent_pty_daemon::protocol::{Frame, MessageKind};
@@ -34,25 +34,29 @@ fn command_session(id: &str, script: &str) -> CreateSession {
     }
 }
 
-/// Boots a daemon with shared session `s1`, writes the projection and a device
-/// token whose `relay_url` points at `port`, and starts the relay task —
-/// with the production ping interval, or `ping_every` when given.
+/// Boots a daemon with shared session `s1`, writes the projection, turns
+/// `remote_sharing` on, and writes a device token whose `relay_url` points
+/// at `port`, then starts the relay task — with the production ping
+/// interval, or `ping_every` when given.
 async fn start_daemon_with_relay(
     root: &std::path::Path,
     port: u16,
     ping_every: Option<Duration>,
 ) -> (ClientContext, oneshot::Sender<()>) {
-    start_daemon_with_projection(root, port, ping_every, PROJECTION).await
+    start_daemon_with_projection(root, port, ping_every, PROJECTION, true).await
 }
 
-/// [`start_daemon_with_relay`] with the `remote_control` row spelled out — the
-/// seam the "idle workspace" cases need, since what the projection *lists* is
-/// the whole question there.
+/// [`start_daemon_with_relay`] with the `remote_control` row and the
+/// `remote_sharing` switch spelled out separately — the seam the "sharing is
+/// decoupled from the projection" cases need. `remote_control` still gates
+/// which sessions a connected viewer may attach to; `sharing_enabled` alone
+/// gates whether the control socket dials at all.
 async fn start_daemon_with_projection(
     root: &std::path::Path,
     port: u16,
     ping_every: Option<Duration>,
     projection: &str,
+    sharing_enabled: bool,
 ) -> (ClientContext, oneshot::Sender<()>) {
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
@@ -69,6 +73,16 @@ async fn start_daemon_with_projection(
     {
         let store = ctx.settings.lock().unwrap();
         store.set_setting("remote_control", projection).unwrap();
+        store
+            .set_setting(
+                "remote_sharing",
+                if sharing_enabled {
+                    r#"{"enabled":true}"#
+                } else {
+                    r#"{"enabled":false}"#
+                },
+            )
+            .unwrap();
         store
             .set_setting(
                 "relay_device_token",
@@ -256,7 +270,7 @@ async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn relay_disconnects_when_the_projection_empties() {
+async fn relay_disconnects_when_sharing_is_turned_off() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -288,13 +302,13 @@ async fn relay_disconnects_when_the_projection_empties() {
     ctx.settings
         .lock()
         .unwrap()
-        .set_setting("remote_control", r#"{"workspaces":[]}"#)
+        .set_setting("remote_sharing", r#"{"enabled":false}"#)
         .unwrap();
     ctx.settings_changed.notify_one();
 
     let closed = tokio::time::timeout(Duration::from_secs(4), control.next())
         .await
-        .expect("control socket must close within 4 s of the projection emptying");
+        .expect("control socket must close within 4 s of sharing turning off");
     assert!(
         matches!(closed, None | Some(Ok(Message::Close(_))) | Some(Err(_))),
         "expected the control socket to close, got {closed:?}"
@@ -362,46 +376,43 @@ async fn a_silent_relay_is_dropped_and_redialled() {
     drop(control);
 }
 
-/// Spec §2: the control channel is up *iff* the projection lists ≥ 1
-/// **workspace**. An enabled workspace with nothing running in it is emitted
-/// with an empty `sessions` array on purpose — that idle Mac is precisely the
-/// one a viewer wants to reach — so the daemon must dial the relay for it.
+/// Spec §2: the control channel is up *iff* `remote_sharing` is on —
+/// machine-wide, not gated on what `remote_control` lists. An empty
+/// projection (no workspace, nothing running) still reaches the relay once
+/// sharing is on, because that idle Mac is precisely the one a viewer wants
+/// to find.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_enabled_workspace_with_no_sessions_still_dials_the_relay() {
+async fn sharing_enabled_dials_the_relay_even_with_an_empty_projection() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (_ctx, _stop) = start_daemon_with_projection(
-        root.path(),
-        port,
-        None,
-        r#"{"workspaces":[{"id":"/a","name":"Alpha","sessions":[]}]}"#,
-    )
-    .await;
+    let (_ctx, _stop) =
+        start_daemon_with_projection(root.path(), port, None, r#"{"workspaces":[]}"#, true).await;
 
     let (mut control, seen_path, seen_auth) = accept_ws(&listener).await;
     assert_eq!(seen_path, "/v1/device");
     assert_eq!(seen_auth, "Bearer tok");
     let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
         .await
-        .expect("an idle-but-enabled machine must still reach the relay")
+        .expect("an idle-but-shared machine must still reach the relay")
         .unwrap()
         .unwrap();
     assert!(hello.to_text().unwrap().contains("Test Mac"));
 }
 
-/// The other half of the same rule: no enabled workspace, no tunnel.
+/// The other half of the same rule: sharing off, no tunnel — even with a
+/// non-empty projection, because the projection no longer decides this.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_empty_workspace_list_never_dials_the_relay() {
+async fn sharing_disabled_never_dials_the_relay_even_with_a_populated_projection() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (_ctx, _stop) =
-        start_daemon_with_projection(root.path(), port, None, r#"{"workspaces":[]}"#).await;
+        start_daemon_with_projection(root.path(), port, None, PROJECTION, false).await;
 
     let dialled = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
     assert!(
         dialled.is_err(),
-        "the daemon dialled the relay with nothing shared"
+        "the daemon dialled the relay with sharing off"
     );
 }

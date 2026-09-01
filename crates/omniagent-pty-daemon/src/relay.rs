@@ -2,11 +2,11 @@
 //! (`docs/superpowers/specs/2026-08-30-remote-session-control-design.md`
 //! §1 Topology, §3 Daemon changes, §6 Failure modes).
 //!
-//! While the `relay_device_token` row parses **and** the `remote_control`
-//! projection lists at least one workspace, [`run_relay`] holds one outbound
-//! **control** WebSocket to the relay (`/v1/device`, `Authorization: Bearer
-//! <token>`). Every `{"open": "<conn_id>"}` the relay sends down it dials a
-//! **data** WebSocket (`/v1/device/conn/{conn_id}`) and runs the ordinary
+//! While the `relay_device_token` row parses **and** the `remote_sharing`
+//! switch is on (spec §2), [`run_relay`] holds one outbound **control**
+//! WebSocket to the relay (`/v1/device`, `Authorization: Bearer <token>`).
+//! Every `{"open": "<conn_id>"}` the relay sends down it dials a **data**
+//! WebSocket (`/v1/device/conn/{conn_id}`) and runs the ordinary
 //! per-connection handler over it with [`ClientTrust::Remote`] — the relay is
 //! a dumb pipe, so the daemon protocol (`protocol.rs`) is unchanged; binary
 //! messages carry the byte stream and frames may span messages.
@@ -17,7 +17,7 @@
 //! Settings changes arrive through `ClientContext::settings_changed`, which
 //! the `SetSetting` handler pokes after **every** key — so each wake re-reads
 //! [`relay_config`] and compares before doing anything; an unrelated write
-//! never drops the control socket. An emptied projection or removed token
+//! never drops the control socket. Sharing switched off or the token removed
 //! closes the control socket and, with it, every data connection. A `401`
 //! (or `403`) from the relay stops retrying until the token row changes. A
 //! control socket that goes silent for three ping intervals is treated as
@@ -61,12 +61,11 @@ pub struct DeviceCredential {
     pub relay_url: String,
 }
 
-/// `Some` iff the token row parses **and** the `remote_control` projection
-/// shares at least one **workspace** (spec §2) — the two conditions under
-/// which the daemon keeps a control socket open. A workspace, not a session:
-/// an enabled workspace with nothing running is emitted with an empty
-/// `sessions` array, and that machine must still be reachable, or a Mac
-/// would only ever appear on the other Mac while it happened to be busy.
+/// `Some` iff the token row parses **and** `remote_sharing` is on (spec
+/// §2) — the two conditions under which the daemon keeps a control socket
+/// open. Machine-wide, not per-workspace: an idle Mac with sharing on stays
+/// reachable regardless of what `remote_control` does or does not list, or a
+/// Mac would only ever appear on the other Mac while it happened to be busy.
 pub fn relay_config(store: &Store) -> Option<DeviceCredential> {
     let raw = store.get_setting(DEVICE_TOKEN_KEY).ok().flatten()?;
     let cred: DeviceCredential = serde_json::from_str(&raw).ok()?;
@@ -352,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_needs_both_a_token_row_and_a_non_empty_projection() {
+    fn relay_config_needs_both_a_token_row_and_sharing_enabled() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(relay_config(&store), None);
         store
@@ -363,27 +362,29 @@ mod tests {
             .unwrap();
         assert_eq!(relay_config(&store), None, "token alone is not enough");
         store
-            .set_setting(
-                crate::server::REMOTE_CONTROL_KEY,
-                r#"{"workspaces":[{"id":"w","name":"w","sessions":[{"id":"s1","title":"t","engine":"shell","group":null}]}]}"#,
-            )
+            .set_setting(crate::server::REMOTE_SHARING_KEY, r#"{"enabled":true}"#)
             .unwrap();
         assert_eq!(relay_config(&store), Some(cred("https://r")));
         store
-            .set_setting(crate::server::REMOTE_CONTROL_KEY, r#"{"workspaces":[]}"#)
+            .set_setting(crate::server::REMOTE_SHARING_KEY, r#"{"enabled":false}"#)
             .unwrap();
-        assert_eq!(relay_config(&store), None, "empty projection turns it off");
+        assert_eq!(
+            relay_config(&store),
+            None,
+            "sharing switched off turns it off"
+        );
         store.set_setting(DEVICE_TOKEN_KEY, "not json").unwrap();
         assert_eq!(relay_config(&store), None, "unparsable token row is off");
     }
 
-    /// An enabled workspace with nothing running in it is emitted with an
-    /// empty `sessions` array, and that is a machine to keep reachable: it is
-    /// exactly the idle Mac a viewer wants to open a session *on*. Gating the
-    /// tunnel on shared sessions instead of shared workspaces meant such a
-    /// machine never appeared on the other Mac at all.
+    /// Sharing is machine-wide now, not per-workspace: turning it on opens
+    /// the tunnel with `remote_control` never touched at all, and that
+    /// machine must still be reachable — it is exactly the idle Mac a viewer
+    /// wants to open a session *on*. The tunnel (`relay_config`) and the
+    /// per-session authorization list (`remote_session_ids`) are decoupled
+    /// concerns: the former no longer reads `remote_control` at all.
     #[test]
-    fn an_enabled_workspace_with_no_sessions_still_opens_the_tunnel() {
+    fn sharing_enabled_opens_the_tunnel_with_no_projection_at_all() {
         let store = Store::open_in_memory().unwrap();
         store
             .set_setting(
@@ -392,14 +393,11 @@ mod tests {
             )
             .unwrap();
         store
-            .set_setting(
-                crate::server::REMOTE_CONTROL_KEY,
-                r#"{"workspaces":[{"id":"/a","name":"Alpha","sessions":[]}]}"#,
-            )
+            .set_setting(crate::server::REMOTE_SHARING_KEY, r#"{"enabled":true}"#)
             .unwrap();
         assert_eq!(relay_config(&store), Some(cred("https://r")));
-        // …and it stays an authorization boundary of its own: sharing a
-        // workspace with no sessions shares no sessions.
+        // …and it stays an authorization boundary of its own: no projection
+        // shares no sessions, even with the tunnel up.
         assert!(crate::server::remote_session_ids(&store).is_empty());
     }
 }
