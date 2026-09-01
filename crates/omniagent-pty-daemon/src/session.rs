@@ -1193,13 +1193,17 @@ mod status_tests {
 
     #[test]
     fn an_approval_prompt_is_recognised() {
-        assert!(contains_attention_marker("Do you want to create notes.txt?"));
+        assert!(contains_attention_marker(
+            "Do you want to create notes.txt?"
+        ));
         assert!(contains_attention_marker("Would you like to continue?"));
         // The shared selection-dialog footer: AskUserQuestion, trust prompt.
         assert!(contains_attention_marker(
             "Enter to select · ↑/↓ to navigate · Esc to cancel"
         ));
-        assert!(contains_attention_marker("Enter to confirm · Esc to cancel"));
+        assert!(contains_attention_marker(
+            "Enter to confirm · Esc to cancel"
+        ));
         assert!(!contains_attention_marker("Reading src/main.rs"));
         // The busy-state hint is lowercase and must not read as blocked.
         assert!(!contains_attention_marker("esc to interrupt"));
@@ -1228,16 +1232,22 @@ mod status_tests {
     /// The finished line is the one that used to be indistinguishable.
     #[test]
     fn a_working_footer_is_recognised_and_a_finished_one_is_not() {
-        assert!(contains_working_marker("✽ Brewing… (4m 59s · ↓ 17.2k tokens)"));
+        assert!(contains_working_marker(
+            "✽ Brewing… (4m 59s · ↓ 17.2k tokens)"
+        ));
         assert!(contains_working_marker(
             "✶ Beboppin'… (2m 28s · ↓ 7.4k tokens · thought for 1s)"
         ));
         assert!(contains_working_marker("  ✻ Recombobulating… (5s)"));
         assert!(!contains_working_marker("✻ Baked for 6m 32s"));
-        assert!(!contains_working_marker("⏵⏵ auto mode on (shift+tab to cycle)"));
+        assert!(!contains_working_marker(
+            "⏵⏵ auto mode on (shift+tab to cycle)"
+        ));
         // A truncated command line ends in an ellipsis too, but does not open
         // with a spinner.
-        assert!(!contains_working_marker("  echo \"=== LOG ===\"; git log --oneli…"));
+        assert!(!contains_working_marker(
+            "  echo \"=== LOG ===\"; git log --oneli…"
+        ));
     }
 
     #[test]

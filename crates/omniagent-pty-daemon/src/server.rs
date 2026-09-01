@@ -837,12 +837,11 @@ where
             }
             MessageKind::SetSetting => {
                 let setting = decode_payload!(SettingValue);
-                let result = lock_store(&settings)
-                    .and_then(|store| {
-                        store
-                            .set_setting(&setting.key, &setting.value)
-                            .map_err(Into::into)
-                    });
+                let result = lock_store(&settings).and_then(|store| {
+                    store
+                        .set_setting(&setting.key, &setting.value)
+                        .map_err(Into::into)
+                });
                 match result {
                     Ok(()) => {
                         // Every current waiter — the relay and each remote
@@ -857,11 +856,10 @@ where
             }
             MessageKind::BrainListProjects => {
                 decode_payload!(serde_json::Value);
-                let result = lock_store(&settings)
-                    .and_then(|store| {
-                        tools::list_projects(&tool_context(&store, &data_dir), &serde_json::json!({}))
-                            .map_err(|error| anyhow!("{error}"))
-                    });
+                let result = lock_store(&settings).and_then(|store| {
+                    tools::list_projects(&tool_context(&store, &data_dir), &serde_json::json!({}))
+                        .map_err(|error| anyhow!("{error}"))
+                });
                 match result {
                     Ok(projects) => {
                         send_json(
@@ -877,14 +875,13 @@ where
             }
             MessageKind::BrainGetContext => {
                 let payload = decode_payload!(BrainGetContextPayload);
-                let result = lock_store(&settings)
-                    .and_then(|store| {
-                        tools::get_context(
-                            &tool_context(&store, &data_dir),
-                            &serde_json::json!({"project": payload.project}),
-                        )
-                        .map_err(|error| anyhow!("{error}"))
-                    });
+                let result = lock_store(&settings).and_then(|store| {
+                    tools::get_context(
+                        &tool_context(&store, &data_dir),
+                        &serde_json::json!({"project": payload.project}),
+                    )
+                    .map_err(|error| anyhow!("{error}"))
+                });
                 match result {
                     Ok(context) => {
                         send_json(
@@ -900,10 +897,9 @@ where
             }
             MessageKind::RootsStartIngest => {
                 let payload = decode_payload!(RootsStartIngestPayload);
-                let result = lock_store(&settings)
-                    .and_then(|store| {
-                        roots::start_ingest(data_dir.clone(), &store, &ingestion, &payload.path)
-                    });
+                let result = lock_store(&settings).and_then(|store| {
+                    roots::start_ingest(data_dir.clone(), &store, &ingestion, &payload.path)
+                });
                 match result {
                     Ok(()) => send_response(&writer, request).await,
                     Err(error) => send_error(&writer, request, error).await,
@@ -921,8 +917,7 @@ where
             }
             MessageKind::RootsList => {
                 decode_payload!(serde_json::Value);
-                let result = lock_store(&settings)
-                    .and_then(|store| roots::get_roots(&store));
+                let result = lock_store(&settings).and_then(|store| roots::get_roots(&store));
                 match result {
                     Ok(list) => {
                         send_json(
@@ -938,8 +933,7 @@ where
             }
             MessageKind::RootsBiggestProject => {
                 decode_payload!(serde_json::Value);
-                let result = lock_store(&settings)
-                    .and_then(|store| roots::biggest_project(&store));
+                let result = lock_store(&settings).and_then(|store| roots::biggest_project(&store));
                 match result {
                     Ok(project) => {
                         send_json(
@@ -955,16 +949,15 @@ where
             }
             MessageKind::RootsAddProject => {
                 let payload = decode_payload!(RootsAddProjectPayload);
-                let result = lock_store(&settings)
-                    .and_then(|store| {
-                        roots::add_project(
-                            &store,
-                            &data_dir,
-                            &ingestion,
-                            &payload.path,
-                            payload.name.as_deref(),
-                        )
-                    });
+                let result = lock_store(&settings).and_then(|store| {
+                    roots::add_project(
+                        &store,
+                        &data_dir,
+                        &ingestion,
+                        &payload.path,
+                        payload.name.as_deref(),
+                    )
+                });
                 match result {
                     Ok(project) => {
                         send_json(
@@ -980,8 +973,9 @@ where
             }
             MessageKind::RootsRenameProject => {
                 let payload = decode_payload!(RootsRenameProjectPayload);
-                let result = lock_store(&settings)
-                    .and_then(|store| roots::rename_project(&store, &payload.id, &payload.new_label));
+                let result = lock_store(&settings).and_then(|store| {
+                    roots::rename_project(&store, &payload.id, &payload.new_label)
+                });
                 match result {
                     Ok(()) => send_response(&writer, request).await,
                     Err(error) => send_error(&writer, request, error).await,
@@ -989,8 +983,7 @@ where
             }
             MessageKind::RootsPausedProjects => {
                 decode_payload!(serde_json::Value);
-                let result = lock_store(&settings)
-                    .and_then(|store| roots::paused_projects(&store));
+                let result = lock_store(&settings).and_then(|store| roots::paused_projects(&store));
                 match result {
                     Ok(projects) => {
                         send_json(
@@ -1007,9 +1000,7 @@ where
             MessageKind::RootsSetPaused => {
                 let payload = decode_payload!(RootsSetPausedPayload);
                 let result = lock_store(&settings)
-                    .and_then(|store| {
-                        roots::set_paused(&store, &payload.project, payload.paused)
-                    });
+                    .and_then(|store| roots::set_paused(&store, &payload.project, payload.paused));
                 match result {
                     Ok(()) => send_response(&writer, request).await,
                     Err(error) => send_error(&writer, request, error).await,
@@ -1017,8 +1008,7 @@ where
             }
             MessageKind::RootsStaleness => {
                 decode_payload!(serde_json::Value);
-                let result = lock_store(&settings)
-                    .and_then(|store| roots::staleness(&store));
+                let result = lock_store(&settings).and_then(|store| roots::staleness(&store));
                 match result {
                     Ok(projects) => {
                         send_json(
@@ -1051,14 +1041,13 @@ where
             }
             MessageKind::BrainSearch => {
                 let payload = decode_payload!(BrainSearchPayload);
-                let result = lock_store(&settings)
-                    .and_then(|store| {
-                        tools::search_brain(
-                            &tool_context(&store, &data_dir),
-                            &serde_json::json!({"query": payload.query, "scope": payload.scope}),
-                        )
-                        .map_err(|error| anyhow!("{error}"))
-                    });
+                let result = lock_store(&settings).and_then(|store| {
+                    tools::search_brain(
+                        &tool_context(&store, &data_dir),
+                        &serde_json::json!({"query": payload.query, "scope": payload.scope}),
+                    )
+                    .map_err(|error| anyhow!("{error}"))
+                });
                 match result {
                     Ok(results) => {
                         send_json(
@@ -1456,7 +1445,10 @@ mod tests {
         let data_dir = scratch.path().join("shared-brain-data");
         std::env::set_var("OMNIAGENT_ADE_DATA_DIR", &data_dir);
 
-        let socket_path = scratch.path().join("elsewhere-entirely").join("daemon.sock");
+        let socket_path = scratch
+            .path()
+            .join("elsewhere-entirely")
+            .join("daemon.sock");
         let server = DaemonServer::bind(socket_path).await.unwrap();
 
         assert_eq!(server.data_dir, data_dir);
@@ -1480,7 +1472,10 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let root = scratch.path().join("root");
         // The pre-account install: a brain.db at the root with a row in it.
-        Store::open(&root).unwrap().set_setting("layout", "legacy-layout").unwrap();
+        Store::open(&root)
+            .unwrap()
+            .set_setting("layout", "legacy-layout")
+            .unwrap();
         std::fs::write(Store::current_account_file(&root), "fc44b18d5588b1d6\n").unwrap();
         std::env::set_var("OMNIAGENT_ADE_DATA_DIR", &root);
 
@@ -1491,7 +1486,13 @@ mod tests {
         assert_eq!(server.data_dir, account_dir);
         assert!(!root.join("brain.db").exists(), "the legacy brain.db moved");
         assert_eq!(
-            server.settings.lock().unwrap().get_setting("layout").unwrap().as_deref(),
+            server
+                .settings
+                .lock()
+                .unwrap()
+                .get_setting("layout")
+                .unwrap()
+                .as_deref(),
             Some("legacy-layout"),
             "and the daemon is serving it from the account dir"
         );
