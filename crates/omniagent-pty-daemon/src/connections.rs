@@ -79,10 +79,24 @@ impl ConnectionEntry {
 }
 
 /// Every live connection, by id. Cloned into each [`crate::ClientContext`].
+///
+/// **Two locks, never held together.** `entries` and `lease` are separate
+/// mutexes, and no method in this module holds one while taking the other —
+/// that is the whole deadlock argument, and it is why
+/// [`Self::take_lease`] reads the connection's identity and drops the entries
+/// guard *before* it touches the lease.
 #[derive(Clone)]
 pub struct ConnectionRegistry {
     entries: Arc<Mutex<HashMap<u64, ConnectionEntry>>>,
     next_id: Arc<AtomicU64>,
+    /// The remote connection currently driving this machine, if any (spec §3
+    /// "The lease", §12 invariant 4) — its connection id and who it says it
+    /// is.
+    ///
+    /// The id is half the value: [`Self::release_lease`] clears the lease only
+    /// when it matches, so a release arriving late from a connection that has
+    /// already died cannot evict the viewer that took the lease after it.
+    lease: Arc<Mutex<Option<(u64, ViewerIdentity)>>>,
     /// The current roster. `watch` is exactly the right shape for presence:
     /// publishing never blocks and never fails, and a receiver always observes
     /// the **latest** roster rather than a queue of superseded ones. Two rapid
@@ -99,6 +113,7 @@ impl Default for ConnectionRegistry {
         Self {
             entries: Arc::default(),
             next_id: Arc::default(),
+            lease: Arc::default(),
             roster: Arc::new(roster),
         }
     }
@@ -112,6 +127,64 @@ impl ConnectionRegistry {
         self.entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Same reasoning as [`Self::entries`], and one more: a poisoned lease
+    /// lock that stayed poisoned would refuse every viewer for the life of the
+    /// daemon, which is the exact failure the lease is meant not to have.
+    fn lease(&self) -> MutexGuard<'_, Option<(u64, ViewerIdentity)>> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Claims the machine for this connection: `Ok(())` if it now holds the
+    /// lease, `Err(machine_name)` naming the connection that already does.
+    ///
+    /// Exclusivity is the check and the write happening under one guard —
+    /// two remote `Hello`s racing cannot both come back `Ok`. `machine` is
+    /// only a fallback label, used when the connection never named itself in
+    /// `Hello`: the identity recorded is the registered one wherever there is
+    /// one, so [`Self::lease_holder`] can offer a viewer id the host can act
+    /// on.
+    pub fn take_lease(&self, id: u64, machine: &str) -> Result<(), String> {
+        // Read the identity and let the entries guard go before the lease is
+        // touched — see the note on the struct.
+        let registered = self
+            .entries()
+            .get(&id)
+            .and_then(|entry| entry.viewer.clone());
+        let holder = registered.unwrap_or_else(|| ViewerIdentity {
+            viewer_id: String::new(),
+            machine_name: machine.to_owned(),
+        });
+        let mut lease = self.lease();
+        match lease.as_ref() {
+            Some((_, held)) => Err(held.machine_name.clone()),
+            None => {
+                *lease = Some((id, holder));
+                Ok(())
+            }
+        }
+    }
+
+    /// Frees the lease **if this connection is the one holding it**.
+    ///
+    /// The id check is not defensive tidiness. A connection that is torn down
+    /// late — a kicked viewer whose task unwinds after the host let the next
+    /// machine in — would otherwise release a lease it no longer owns and
+    /// evict a live viewer. Releasing an id that holds nothing is a no-op, so
+    /// every exit path may call this unconditionally.
+    pub fn release_lease(&self, id: u64) {
+        let mut lease = self.lease();
+        if lease.as_ref().is_some_and(|(holder, _)| *holder == id) {
+            *lease = None;
+        }
+    }
+
+    /// Who is driving this machine, if anyone.
+    pub fn lease_holder(&self) -> Option<ViewerIdentity> {
+        self.lease().as_ref().map(|(_, viewer)| viewer.clone())
     }
 
     pub fn register(&self, trust: ClientTrust, cancel: CancellationToken) -> u64 {
@@ -131,7 +204,13 @@ impl ConnectionRegistry {
 
     /// Returns whether this removed a connection a host could see — i.e.
     /// whether the roster just changed. Removing an id twice is harmless.
+    ///
+    /// The lease goes with the entry. Putting it here rather than at the call
+    /// site is what makes "the lease is always released" structural: there is
+    /// no way to take a connection out of this registry that leaves it
+    /// holding the machine.
     pub fn remove(&self, id: u64) -> bool {
+        self.release_lease(id);
         self.entries()
             .remove(&id)
             .is_some_and(|entry| entry.is_listed_viewer())
@@ -283,6 +362,15 @@ impl ConnectionRegistry {
             if let Some(entry) = entries.remove(id) {
                 entry.cancel.cancel();
             }
+        }
+        // The lease is freed here rather than when each kicked task notices
+        // its token, for the same reason the entries are: the host has just
+        // ended this connection, and the next machine must not be told "in use
+        // by" a viewer that is already gone. The guard goes first — the two
+        // locks are never held together.
+        drop(entries);
+        for id in &kicked {
+            self.release_lease(*id);
         }
         !kicked.is_empty()
     }
@@ -460,6 +548,67 @@ mod tests {
         registry.set_viewer(air, viewer("v-shared", "Air"));
         assert!(registry.cancel_viewer("v-shared"));
         assert!(!host_cancel.is_cancelled(), "and the host still survives");
+    }
+
+    /// The lease is one machine's at a time, and the refusal names the one
+    /// holding it.
+    #[test]
+    fn one_connection_holds_the_lease_and_the_next_is_told_whose_it_is() {
+        let registry = ConnectionRegistry::default();
+        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        registry.set_viewer(air, viewer("v-air", "Air"));
+        let mini = registry.register(ClientTrust::Remote, CancellationToken::new());
+
+        assert_eq!(registry.take_lease(air, "Air"), Ok(()));
+        assert_eq!(registry.take_lease(mini, "Mini"), Err("Air".to_string()));
+        assert_eq!(
+            registry.lease_holder(),
+            Some(viewer("v-air", "Air")),
+            "the holder is the registered identity, not just a machine name"
+        );
+
+        // And it is free again the moment that connection leaves the registry.
+        registry.remove(air);
+        assert!(registry.lease_holder().is_none());
+        assert_eq!(registry.take_lease(mini, "Mini"), Ok(()));
+    }
+
+    /// The reason [`ConnectionRegistry::release_lease`] matches on the id.
+    ///
+    /// A kicked viewer's `serve_client` task unwinds a beat after the kick,
+    /// which is long enough for the next machine to have connected and taken
+    /// the lease. A release that cleared whatever it found would evict that
+    /// live viewer — and nothing would say so; it would show up as a session
+    /// that ends by itself.
+    #[test]
+    fn a_late_release_from_a_dead_connection_cannot_evict_a_live_one() {
+        let registry = ConnectionRegistry::default();
+        let dead = registry.register(ClientTrust::Remote, CancellationToken::new());
+        registry.take_lease(dead, "Air").unwrap();
+        registry.release_lease(dead);
+
+        let live = registry.register(ClientTrust::Remote, CancellationToken::new());
+        registry.take_lease(live, "Mini").unwrap();
+
+        registry.release_lease(dead);
+        assert_eq!(
+            registry.lease_holder().map(|holder| holder.machine_name),
+            Some("Mini".to_string()),
+            "the dead connection's release took the live one's lease"
+        );
+    }
+
+    /// A kick frees the machine at once, rather than when the kicked task
+    /// happens to notice its cancellation token.
+    #[test]
+    fn kicking_a_viewer_frees_the_lease_with_its_entry() {
+        let registry = ConnectionRegistry::default();
+        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        registry.set_viewer(air, viewer("v-air", "Air"));
+        registry.take_lease(air, "Air").unwrap();
+
+        assert!(registry.cancel_viewer("v-air"));
+        assert!(registry.lease_holder().is_none());
     }
 
     /// Publishing is non-blocking even with nobody listening, and a feed that

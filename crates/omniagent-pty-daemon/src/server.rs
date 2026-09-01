@@ -550,6 +550,13 @@ where
         return Err(anyhow!("first client frame must be Hello"));
     }
     let identity = parse_json::<HelloPayload>(&hello.payload)?;
+    let request = hello.header.request_or_sequence;
+    // A viewer that gives an id but no name is still a machine the host must
+    // be able to see, kick, and be told the lease is held by.
+    let machine_name = identity
+        .machine_name
+        .clone()
+        .unwrap_or_else(|| "Unknown Mac".into());
     // The blocklist is checked here — before the ack, and by the daemon rather
     // than the app — because a kick has to hold against a viewer that still
     // holds a valid device token and re-dials on its own (spec §5).
@@ -558,7 +565,7 @@ where
             if blocked_viewers(&settings).contains(viewer_id) {
                 send_error(
                     &writer,
-                    hello.header.request_or_sequence,
+                    request,
                     anyhow!(
                         "viewer {viewer_id} is disconnected until Remote Control \
                          is turned off and on again"
@@ -569,19 +576,14 @@ where
             }
         }
     }
-    send_json(
-        &writer,
-        MessageKind::HelloAck,
-        hello.header.request_or_sequence,
-        &HelloAckPayload {
-            protocol_version: PROTOCOL_VERSION,
-        },
-    )
-    .await?;
 
-    // Registration starts here, past the point where a connection can be
-    // refused, and the guard is what takes it back out however this function
-    // ends — including an early `?` and an aborted task.
+    // Registration comes before the ack because the lease below is taken under
+    // a connection id, and a refused `Hello` has to be answered *instead of*
+    // the ack rather than after it. Nothing about a registered connection is
+    // visible to a host until it names itself (`is_listed_viewer`), so
+    // registering a connection that is about to be refused changes no roster.
+    // The guard is what takes the entry — and the lease with it — back out
+    // however this function ends, including an early `?` and an aborted task.
     let cancel = CancellationToken::new();
     let connection = ConnectionGuard::register(&connections, trust, cancel.clone());
     let viewer_id = identity.viewer_id.clone();
@@ -590,11 +592,7 @@ where
             connection.id,
             ViewerIdentity {
                 viewer_id,
-                // A viewer that gives an id but no name is still a machine the
-                // host must be able to see and kick.
-                machine_name: identity
-                    .machine_name
-                    .unwrap_or_else(|| "Unknown Mac".into()),
+                machine_name: machine_name.clone(),
             },
         ),
         None => false,
@@ -610,7 +608,7 @@ where
             if blocked_viewers(&settings).contains(viewer_id) {
                 send_error(
                     &writer,
-                    hello.header.request_or_sequence,
+                    request,
                     anyhow!("viewer {viewer_id} was disconnected while connecting"),
                 )
                 .await?;
@@ -618,6 +616,28 @@ where
             }
         }
     }
+    // The lease (spec §3, §12 invariant 4): one remote connection drives this
+    // machine at a time. Last of the refusals, so a connection that is going
+    // to be turned away for any other reason never holds the machine even for
+    // the instant it takes to be told — and released by the guard above on
+    // every way out of this function, because a lease that leaks is a daemon
+    // that refuses every future viewer until it restarts.
+    if trust == ClientTrust::Remote {
+        if let Err(holder) = connections.take_lease(connection.id, &machine_name) {
+            send_error(&writer, request, anyhow!("in use by {holder}")).await?;
+            return Ok(());
+        }
+    }
+    send_json(
+        &writer,
+        MessageKind::HelloAck,
+        request,
+        &HelloAckPayload {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
+    .await?;
+
     // A host is told the roster on its own `Hello`, so an app that has just
     // opened is immediately correct rather than correct at the next change.
     // The feed writes it to this one connection — never a broadcast to all —

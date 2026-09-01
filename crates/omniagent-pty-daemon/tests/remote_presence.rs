@@ -255,15 +255,21 @@ async fn a_blocked_viewer_cannot_say_hello() {
 }
 
 /// Spec §7 invariant 3: `RemoteViewers` reaches **local** connections only —
-/// a viewer never learns that another viewer exists.
+/// a viewer never learns who else is watching, itself included.
 ///
 /// The whole test is arranged so that real roster frames are written while the
-/// viewers' streams are watched, because otherwise it proves nothing: an
+/// viewer's stream is watched, because otherwise it proves nothing: an
 /// anonymous remote connection is never listed, so no roster is ever
 /// published, and a "no `RemoteViewers` arrived" assertion would hold against
-/// a daemon that pushed the roster to every writer it had. So both viewers
-/// name themselves and attach, and the host's stream is checked first to
-/// confirm the pushes really happened.
+/// a daemon that pushed the roster to every writer it had. So the viewer names
+/// itself and attaches, and the host's stream is checked first to confirm the
+/// pushes really happened.
+///
+/// Phase 3 note: this used to connect a **second** machine, so there was
+/// another viewer to be told about. The lease (spec §3) makes that
+/// arrangement impossible — the second `Hello` is refused — and the invariant
+/// is unchanged by that: the roster is the host's view of who is on its
+/// machine, and it is not a viewer's to read at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_viewer_is_never_told_about_other_viewers() {
     let root = tempfile::tempdir().unwrap();
@@ -276,54 +282,40 @@ async fn a_viewer_is_never_told_about_other_viewers() {
     .await;
     drain_until(&mut air, MessageKind::Snapshot).await;
 
-    // A second machine, so there is another viewer to be told about at all.
-    let mut studio = connect(&ctx, ClientTrust::Remote)
-        .hello(serde_json::json!({
-            "client": "omniagent-native-macos",
-            "viewer_id": "v-studio",
-            "machine_name": "Studio"}))
-        .await;
-    studio
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    drain_until(&mut studio, MessageKind::Snapshot).await;
-
     // The host really is being pushed rosters — without this the assertions
     // below would pass on a daemon that never published anything at all.
-    let mut both_machines = false;
+    let mut named_the_viewer = false;
     while let Some(frame) = host.try_read(Duration::from_millis(500)).await {
         assert_eq!(frame.header.message_kind, MessageKind::RemoteViewers);
         let roster: RemoteViewersPayload = serde_json::from_slice(&frame.payload).unwrap();
-        both_machines |= roster.viewers.len() == 2;
+        named_the_viewer |= roster
+            .viewers
+            .iter()
+            .any(|viewer| viewer.machine_name == "Air");
     }
     assert!(
-        both_machines,
-        "the host must have been pushed a roster naming both machines"
+        named_the_viewer,
+        "the host must have been pushed a roster naming the machine watching it"
     );
 
     // A local resize is the positive control: server pushes really are
-    // reaching these two connections while the roster is not.
+    // reaching the viewer's connection while the roster is not.
     ctx.registry
         .get("s1")
         .unwrap()
         .resize(90, 20, 0, 0)
         .unwrap();
 
-    for (name, viewer) in [("Air", &mut air), ("Studio", &mut studio)] {
-        let mut saw_the_resize = false;
-        while let Some(frame) = viewer.try_read(Duration::from_millis(500)).await {
-            assert_ne!(
-                frame.header.message_kind,
-                MessageKind::RemoteViewers,
-                "{name} was told about another viewer"
-            );
-            saw_the_resize |= frame.header.message_kind == MessageKind::SessionResized;
-        }
-        assert!(saw_the_resize, "{name}'s connection was live throughout");
+    let mut saw_the_resize = false;
+    while let Some(frame) = air.try_read(Duration::from_millis(500)).await {
+        assert_ne!(
+            frame.header.message_kind,
+            MessageKind::RemoteViewers,
+            "Air was told who is watching this machine"
+        );
+        saw_the_resize |= frame.header.message_kind == MessageKind::SessionResized;
     }
+    assert!(saw_the_resize, "Air's connection was live throughout");
 }
 
 /// One local client that stops draining its socket must wedge only itself.
