@@ -103,4 +103,44 @@ final class RemoteSharingModelTests: XCTestCase {
             XCTAssertFalse(model.isSharing, "\(String(describing: rawSharing)) must read as off")
         }
     }
+
+    // MARK: - Writes are never optimistic (review round 1)
+
+    /// A failed `setSharing` write must leave `isSharing` exactly as it
+    /// was, and say so through `onWriteFailed` rather than silently
+    /// swallowing it — the bug this pins: an earlier version of this file
+    /// flipped `isSharing` *before* asking the store to write, so a Settings
+    /// toggle bound to it would show "on" forever even though the daemon
+    /// never heard about it.
+    func testAFailedSetSharingWriteLeavesIsSharingUnchanged() throws {
+        let client = FakeSettingsClient()
+        client.failingWrites = [SettingsKey.remoteSharing]
+        let store = SettingsStore(client: client)
+        let model = RemoteSharingModel(store: store)
+        var failures: [Error] = []
+        model.onWriteFailed = { failures.append($0) }
+
+        model.setSharing(true)
+
+        XCTAssertFalse(model.isSharing, "a failed write must not be believed")
+        XCTAssertNil(client.rows["remote_sharing"], "nothing reached the store either")
+        XCTAssertEqual(failures.count, 1, "the failure must be surfaced, not swallowed")
+    }
+
+    /// The same guarantee for `unblock`: a failed write leaves
+    /// `blockedViewerIDs` exactly as it was.
+    func testAFailedUnblockWriteLeavesTheBlockedListUnchanged() throws {
+        let client = FakeSettingsClient(rows: ["remote_control_blocked": #"["mac-a"]"#])
+        client.failingWrites = [SettingsKey.remoteControlBlocked]
+        let store = SettingsStore(client: client)
+        let model = RemoteSharingModel(store: store)
+        var failures: [Error] = []
+        model.onWriteFailed = { failures.append($0) }
+
+        model.unblock("mac-a")
+
+        XCTAssertEqual(model.blockedViewerIDs, ["mac-a"], "a failed write must not be believed")
+        XCTAssertEqual(client.rows["remote_control_blocked"], #"["mac-a"]"#, "nothing reached the store")
+        XCTAssertEqual(failures.count, 1)
+    }
 }

@@ -7,7 +7,8 @@ import Foundation
 /// switch for the whole Mac, not a set of enabled workspaces
 /// (`WorkspaceContextMenu`/`WorkspacesTree`'s globe are deleted with it).
 ///
-/// Two rows, read once at construction and kept live from there:
+/// Two rows, restored once `configure(store:)`/`init(store:)` supplies a
+/// store, kept live from there:
 /// - `remote_sharing` = `{"enabled":bool}` (`SettingsKey.remoteSharing`) —
 ///   this Mac's own intent. Decoded the same way the daemon decodes it
 ///   (Task 1's `remote_control_active`,
@@ -36,69 +37,167 @@ import Foundation
 /// unblocks it in Settings › Remote. This is a deliberate behavior change,
 /// not a bug — `testTurningSharingOnDoesNotClearTheBlockedList` pins it so
 /// nobody "fixes" `setSharing` back to clearing the list.
+///
+/// **Writes are never optimistic.** `isSharing`/`blockedViewerIDs` change
+/// only after the daemon confirms the write; a failure leaves the previous
+/// value standing and calls `onWriteFailed` instead. A control bound to
+/// this (Settings › Remote's switch, Task 3) must never show a state that
+/// is not actually on disk — the review round that added this doc comment
+/// caught an earlier version of this file mutating both properties
+/// *before* the write, with no rollback on failure.
 @MainActor
 final class RemoteSharingModel {
-    /// `.shared`'s own connection, resolved to the same socket
-    /// `AppDelegate` dials — but **not started**: nothing here calls
-    /// `connect()`. `AppDelegate` owns the app's one real connection and its
-    /// lifecycle (`docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`,
-    /// "There is exactly one local connection"); wiring `.shared` into that
-    /// lifecycle — or replacing this with the app's own connection object —
-    /// is later work. Until then this fails closed exactly like an absent
-    /// row would: an unconnected socket answers every read with a failure,
-    /// which leaves `isSharing`/`blockedViewerIDs` at their safe defaults.
-    static let shared = RemoteSharingModel(
-        store: SettingsStore(
-            client: SessionConnection(
-                socketURL: DaemonPaths.resolve(
-                    channel: DaemonBuildChannel.resolve(bundleIdentifier: Bundle.main.bundleIdentifier)
-                ).socketURL
-            )
-        )
-    )
+    /// Configured once, by `AppDelegate`, with the app's own real
+    /// connection — `SettingsStore(client: connection)` wraps the exact
+    /// `SessionConnection` `AppDelegate.swift` builds and
+    /// `WorkspaceWindowController.start()` connects, the same object every
+    /// other settings row in this app reads and writes through
+    /// (`WorkspaceWindowController.init`'s own `SettingsStore(client:
+    /// settingsClient ?? connection)`). `.shared` previously built its
+    /// *own*, never-`connect()`ed `SessionConnection` here, so every read
+    /// and write failed with `.disconnected` forever — that bug is what
+    /// `configure(store:)` exists to fix: reuse the connection the app
+    /// already dials rather than mint a second, dead one.
+    static let shared = RemoteSharingModel()
 
     private(set) var isSharing = false
     private(set) var blockedViewerIDs: [String] = []
-    /// Fires whenever either row changes — the menu bar icon and Settings ›
-    /// Remote both redraw off this rather than polling.
+    /// Fires whenever either row actually changes — the menu bar icon and
+    /// Settings › Remote both redraw off this rather than polling.
     var onChange: (() -> Void)?
+    /// Fires when `setSharing`/`unblock`'s write fails — the daemon
+    /// unreachable, the socket down, or (for `.shared` specifically) asked
+    /// before `configure(store:)` has run. Whoever binds a control to this
+    /// model listens here to say so, rather than trusting a state change
+    /// that never reached disk.
+    var onWriteFailed: ((Error) -> Void)?
 
-    private let store: SettingsStore
+    /// `nil` until `configure(store:)` (`.shared`'s path) or `init(store:)`
+    /// (every other path, tests included) supplies one. Every operation
+    /// below fails closed — same as an unreachable daemon — while it is.
+    private var store: SettingsStore?
+    private var restoreDispatched = false
+    /// Bounds `restore()`'s retry against the ordinary launch race: `.shared`
+    /// is configured before `workspace.start()` calls `connect()`, so the
+    /// very first restore attempt predictably loses that race every time.
+    /// Retried a handful of times on a short fixed delay rather than wired
+    /// into `WorkspaceWindowController`'s `.connected` callback, so this
+    /// model's only dependency stays the abstract `SettingsClient` seam
+    /// (`init(store:)`'s tests exercise the same code every real launch
+    /// runs). Capped, not unbounded: a daemon that is never coming back is
+    /// already showing errors everywhere else in the app, and this row
+    /// polling forever would just be a quiet leak of that same fact.
+    private var restoreRetriesRemaining = 5
+    private static let restoreRetryDelay: TimeInterval = 1
 
+    /// The test / explicit-construction path: a store is already known, so
+    /// this restores immediately (synchronously, against the fakes every
+    /// test in this file uses).
     init(store: SettingsStore) {
         self.store = store
         restore()
     }
 
+    /// `.shared`'s own path: no store yet, nothing to restore.
+    /// `configure(store:)` supplies one once the app's real connection
+    /// exists.
+    private init() {}
+
+    /// Called once, by `AppDelegate`, right after it builds the app's
+    /// connection. Restores immediately, and re-arms its own retry even if
+    /// this is a second call (defensive — production calls this exactly
+    /// once, but nothing here assumes that).
+    func configure(store: SettingsStore) {
+        self.store = store
+        restoreDispatched = false
+        restoreRetriesRemaining = 5
+        restore()
+    }
+
     /// Turns sharing on or off. Writes only `remote_sharing` — the blocked
-    /// list is untouched (see the type's own doc comment above).
+    /// list is untouched (see the type's own doc comment above). `isSharing`
+    /// changes only once the write actually lands; a failure leaves it
+    /// exactly as it was and calls `onWriteFailed` instead of guessing.
     func setSharing(_ on: Bool) {
-        isSharing = on
-        store.set(SettingsKey.remoteSharing, Self.encodeSharing(on))
-        onChange?()
+        guard let store else {
+            onWriteFailed?(RemoteSharingModelError.notConfigured)
+            return
+        }
+        store.set(SettingsKey.remoteSharing, Self.encodeSharing(on)) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                isSharing = on
+                onChange?()
+            case let .failure(error):
+                onWriteFailed?(error)
+            }
+        }
     }
 
     /// Rewrites `remote_control_blocked` without `viewerID` — the only way
     /// the app ever removes an entry from it. A no-op, with no write and no
     /// `onChange`, when the id was not blocked to begin with.
+    /// `blockedViewerIDs` changes only once the write actually lands; a
+    /// failure leaves it exactly as it was and calls `onWriteFailed`.
     func unblock(_ viewerID: String) {
+        guard blockedViewerIDs.contains(viewerID) else { return }
+        guard let store else {
+            onWriteFailed?(RemoteSharingModelError.notConfigured)
+            return
+        }
         var ids = Set(blockedViewerIDs)
-        guard ids.remove(viewerID) != nil else { return }
-        blockedViewerIDs = ids.sorted()
-        store.set(SettingsKey.remoteControlBlocked, RemoteControlProjection.encodeEnabled(ids))
-        onChange?()
+        ids.remove(viewerID)
+        let sorted = ids.sorted()
+        store.set(SettingsKey.remoteControlBlocked, RemoteControlProjection.encodeEnabled(ids)) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                blockedViewerIDs = sorted
+                onChange?()
+            case let .failure(error):
+                onWriteFailed?(error)
+            }
+        }
     }
 
+    /// Reads both rows, `remoteSharing` first then `remoteControlBlocked` —
+    /// nested, `restoreRemoteControlIfNeeded`'s exact shape
+    /// (`WorkspaceWindowController.swift`), so either failing re-arms the
+    /// whole pair rather than leaving one half silently stale. Retried on
+    /// `Self.restoreRetryDelay` up to `restoreRetriesRemaining` times before
+    /// giving up for this `configure(store:)`/`init(store:)` call.
     private func restore() {
+        guard let store, !restoreDispatched else { return }
+        restoreDispatched = true
         store.get(SettingsKey.remoteSharing) { [weak self] result in
-            guard let self, case let .success(raw) = result else { return }
-            isSharing = Self.decodeSharing(raw)
-            onChange?()
+            guard let self else { return }
+            switch result {
+            case let .success(raw):
+                isSharing = Self.decodeSharing(raw)
+                onChange?()
+                store.get(SettingsKey.remoteControlBlocked) { [weak self] result in
+                    guard let self else { return }
+                    switch result {
+                    case let .success(raw):
+                        blockedViewerIDs = RemoteControlProjection.decodeEnabled(raw).sorted()
+                        onChange?()
+                    case .failure:
+                        retryRestoreIfPossible()
+                    }
+                }
+            case .failure:
+                retryRestoreIfPossible()
+            }
         }
-        store.get(SettingsKey.remoteControlBlocked) { [weak self] result in
-            guard let self, case let .success(raw) = result else { return }
-            blockedViewerIDs = RemoteControlProjection.decodeEnabled(raw).sorted()
-            onChange?()
+    }
+
+    private func retryRestoreIfPossible() {
+        restoreDispatched = false
+        guard restoreRetriesRemaining > 0 else { return }
+        restoreRetriesRemaining -= 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.restoreRetryDelay) { [weak self] in
+            self?.restore()
         }
     }
 
@@ -123,4 +222,13 @@ final class RemoteSharingModel {
         }
         return enabled
     }
+}
+
+/// `setSharing`/`unblock` called before `.shared` has been
+/// `configure(store:)`d — a real possibility only if something reaches for
+/// `.shared` before `AppDelegate.applicationDidFinishLaunching` runs, which
+/// nothing in this app currently does. Every other path (`init(store:)`)
+/// always has a store.
+enum RemoteSharingModelError: Error {
+    case notConfigured
 }

@@ -8,6 +8,13 @@ final class FakeSettingsClient: SettingsClient {
     private(set) var rows: [String: String]
     private(set) var setCalls: [(key: String, value: String)] = []
     var failing: Set<String> = []
+    /// Keys whose *write* fails — `failing`'s counterpart for `setSetting`.
+    /// Separate from `failing` on purpose: a row can be readable and still
+    /// refuse a write (a socket that drops mid-request), and
+    /// `RemoteSharingModelTests` needs exactly that to pin "a failed write
+    /// leaves the in-memory value unchanged" without also faking a read
+    /// failure.
+    var failingWrites: Set<String> = []
 
     init(rows: [String: String] = [:]) {
         self.rows = rows
@@ -22,6 +29,10 @@ final class FakeSettingsClient: SettingsClient {
     }
 
     func setSetting(key: String, value: String, completion: ((Result<Void, Error>) -> Void)?) {
+        if failingWrites.contains(key) {
+            completion?(.failure(SessionConnectionError.disconnected))
+            return
+        }
         rows[key] = value
         setCalls.append((key, value))
         completion?(.success(()))

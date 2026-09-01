@@ -26,6 +26,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let daemonPersistence = DaemonPersistenceController(paths: paths)
         daemonPersistence.start()
         let connection = SessionConnection(socketURL: paths.socketURL)
+        // `RemoteSharingModel.shared` reads and writes through this same
+        // connection — never a second one of its own — so its rows reach
+        // the real daemon the moment `workspace.start()` below connects it.
+        // See `RemoteSharingModel.shared`'s own doc comment.
+        RemoteSharingModel.shared.configure(store: SettingsStore(client: connection))
         // The viewer side of remote session control: one connection per
         // online machine on the account, polled while signed in. Constructed
         // idle; the window starts it once the launch gate says signed in.

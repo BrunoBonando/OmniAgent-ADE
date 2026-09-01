@@ -889,9 +889,18 @@ final class RemotePanesTests: XCTestCase {
         XCTAssertTrue(layout.contains("alpha"), "the local session is persisted as ever: \(layout)")
         XCTAssertFalse(layout.contains("s1"), "the layout row must not carry a remote pane: \(layout)")
         XCTAssertFalse(layout.contains("remote:d1"))
-        for (key, value) in writes where key == SettingsKey.remoteControl {
-            XCTAssertFalse(value.contains("s1"), "the projection must not re-share a remote session: \(value)")
-        }
+        // `remote_control` is not written at all right now: the
+        // per-workspace toggle that used to gate `persistRemoteControlProjection`
+        // is deleted (2026-09-01 remote environment sharing spec §1) and
+        // nothing replaces it yet — that wiring is deliberately parked for a
+        // later task. This asserts that current fact directly, rather than
+        // a loop over zero elements that would pass no matter what the code
+        // did: if a future change starts writing this row again, this
+        // fails, and whoever changed it has to update this test on purpose.
+        XCTAssertFalse(
+            writes.contains { $0.0 == SettingsKey.remoteControl },
+            "remote_control has no write path yet; if this fires, wire this test's assertion to the new one"
+        )
     }
 
     @MainActor
