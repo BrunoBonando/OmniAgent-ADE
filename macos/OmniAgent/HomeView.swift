@@ -506,8 +506,21 @@ final class HomeSurfaceView: NSView {
     var selectedModelForSession: ModelChoice? { selectedModel }
 
     private let column = NSStackView()
+    /// The frame every page destination wears (flow-layout spec §5): the
+    /// "Home" title, the hairline under it, and the scrolling body this
+    /// screen's column lives in. No tabs — Home is one page.
+    let shell: PageShellView
+    /// The two cards of the last row. Held rather than local so the row can
+    /// pin them to one height, and so a test can prove they sit side by side.
+    let upNextCard = HomeCardView()
+    let whatsNewCard = HomeCardView()
 
     init() {
+        // The scrolling document, owned by the shell from here on — a local
+        // rather than a property, as on the Insights page.
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        shell = PageShellView(title: "Home", body: content)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -515,57 +528,63 @@ final class HomeSurfaceView: NSView {
         column.alignment = .centerX
         column.spacing = 0
         column.translatesAutoresizingMaskIntoConstraints = false
-
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(column)
 
-        // No fade and no inset: the page starts at the content card's own edge
-        // now (flow-layout spec §2), so there is no title strip left for
-        // content to dissolve under as it scrolls away.
-        let scroll = ShellScrollView(documentView: content)
-        addSubview(scroll)
+        addSubview(shell)
         NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            shell.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shell.trailingAnchor.constraint(equalTo: trailingAnchor),
+            shell.topAnchor.constraint(equalTo: topAnchor),
+            shell.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            // The design's centred 880pt column, giving way on thin windows.
-            // The top air is a share of the visible height — 22.5%, which
-            // is where GitHub Copilot's mark sits on the same screen
-            // (measured 2026-08-27: ~400pt on a 1774pt-tall window, where
-            // a fixed 200pt read as "stuck to the top"). A share, not a
-            // centring, so a small laptop window still gets the composer
-            // well above the fold. (A spacer view carries it: a top anchor
-            // cannot be tied to a height with a multiplier directly.)
+            // The column fills the content card now instead of sitting in a
+            // fixed 880pt lane: centred, capped at 1080, never closer than
+            // 40 to either side. The 22.5%-of-height top air went with the
+            // title strip it hung under — the shell's header is the page's
+            // boundary, so the hero starts right below it (spec §7).
             column.topAnchor.constraint(equalTo: content.topAnchor),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 40),
+            column.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -40),
         ])
-        let width = column.widthAnchor.constraint(equalToConstant: 880)
-        width.priority = .defaultHigh
-        width.isActive = true
-
-        let topAir = NSView()
-        topAir.translatesAutoresizingMaskIntoConstraints = false
-        column.addArrangedSubview(topAir)
-        topAir.heightAnchor.constraint(equalTo: scroll.heightAnchor, multiplier: 0.225).isActive = true
+        let cap = column.widthAnchor.constraint(lessThanOrEqualToConstant: 1080)
+        cap.priority = .defaultHigh
+        cap.isActive = true
+        // Under the cap the column is simply the body less its margins, so a
+        // narrow window loses nothing to the sides. Lowest priority of the
+        // three: the cap and the margins both outrank it.
+        let fill = column.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -80)
+        fill.priority = .defaultLow
+        fill.isActive = true
 
         let heroIcon = buildHeroIcon()
         column.addArrangedSubview(heroIcon)
-        column.setCustomSpacing(48, after: heroIcon)
+        column.setCustomSpacing(32, after: heroIcon)
 
         let composer = buildComposer()
         column.addArrangedSubview(composer)
         composer.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         column.addSubview(composerGlow, positioned: .above, relativeTo: composer)
-        column.setCustomSpacing(40, after: composer)
+        column.setCustomSpacing(32, after: composer)
         buildSuggestions()
-        buildUpNext()
         buildExtend()
-        buildWhatsNew()
+
+        // Up next and What's new take half the row each (spec §7): a section
+        // header over a card, equal widths from `fillEqually` and equal
+        // heights pinned card-to-card, the same way the suggestion row keeps
+        // its three level.
+        let highlights = NSStackView(views: [buildUpNext(), buildWhatsNew()])
+        highlights.orientation = .horizontal
+        highlights.alignment = .top
+        highlights.distribution = .fillEqually
+        highlights.spacing = 16
+        column.addArrangedSubview(highlights)
+        NSLayoutConstraint.activate([
+            highlights.widthAnchor.constraint(equalTo: column.widthAnchor),
+            upNextCard.heightAnchor.constraint(equalTo: whatsNewCard.heightAnchor),
+        ])
+        column.setCustomSpacing(40, after: highlights)
         buildFooter()
     }
 
@@ -1065,15 +1084,16 @@ final class HomeSurfaceView: NSView {
         for card in cards.dropFirst() {
             card.heightAnchor.constraint(equalTo: cards[0].heightAnchor).isActive = true
         }
-        column.setCustomSpacing(72, after: row)
+        column.setCustomSpacing(32, after: row)
     }
 
-    private func buildUpNext() {
-        addSectionHeader(
+    /// The left half of the last row — the header over the empty state.
+    private func buildUpNext() -> NSView {
+        let header = sectionHeader(
             "Up next",
             sub: "Recently updated sessions and tasks across your workspaces."
         )
-        let card = HomeCardView()
+        let card = upNextCard
         let icon = symbol("checkmark.circle", pointSize: 20, weight: .regular, color: ShellPalette.inkTertiary)
         let title = ShellFont.label(
             "You're all caught up",
@@ -1087,13 +1107,16 @@ final class HomeSurfaceView: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 56),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -56),
+            // Centred, with the 56pt padding as a floor rather than a pin:
+            // the card's height is its neighbour's now, and an empty state
+            // pinned to both edges would either fight that or leave its
+            // graphic stranded against the top.
+            stack.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            stack.topAnchor.constraint(greaterThanOrEqualTo: card.topAnchor, constant: 56),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: card.bottomAnchor, constant: -56),
             stack.centerXAnchor.constraint(equalTo: card.centerXAnchor),
         ])
-        column.addArrangedSubview(card)
-        card.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        column.setCustomSpacing(72, after: card)
+        return rowHalf(header: header, card: card)
     }
 
     private func buildExtend() {
@@ -1148,13 +1171,15 @@ final class HomeSurfaceView: NSView {
         for card in cards.dropFirst() {
             card.heightAnchor.constraint(equalTo: cards[0].heightAnchor).isActive = true
         }
-        column.setCustomSpacing(72, after: row)
+        column.setCustomSpacing(32, after: row)
     }
 
-    private func buildWhatsNew() {
-        addSectionHeader("What's new", sub: "Explore the changes included in the latest release.")
+    /// The right half of the last row — the release column, the rule, and
+    /// what changed.
+    private func buildWhatsNew() -> NSView {
+        let header = sectionHeader("What's new", sub: "Explore the changes included in the latest release.")
 
-        let card = HomeCardView()
+        let card = whatsNewCard
 
         let releaseTile = NSView()
         releaseTile.translatesAutoresizingMaskIntoConstraints = false
@@ -1245,10 +1270,13 @@ final class HomeSurfaceView: NSView {
 
             release.topAnchor.constraint(equalTo: card.topAnchor, constant: 26),
             release.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 24),
-            release.widthAnchor.constraint(equalToConstant: 232),
+            // Proportional, not the old fixed 232/280 pair: the card is half
+            // a row wide now and narrows with the window, so a fixed release
+            // column would eat the changes beside it.
+            release.widthAnchor.constraint(equalTo: card.widthAnchor, multiplier: 0.4),
             release.bottomAnchor.constraint(lessThanOrEqualTo: card.bottomAnchor, constant: -26),
 
-            divider.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 280),
+            divider.leadingAnchor.constraint(equalTo: release.trailingAnchor, constant: 24),
             divider.topAnchor.constraint(equalTo: card.topAnchor),
             divider.bottomAnchor.constraint(equalTo: card.bottomAnchor),
             divider.widthAnchor.constraint(equalToConstant: 1),
@@ -1259,9 +1287,7 @@ final class HomeSurfaceView: NSView {
             changes.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -26),
         ])
 
-        column.addArrangedSubview(card)
-        card.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        column.setCustomSpacing(88, after: card)
+        return rowHalf(header: header, card: card)
     }
 
     private func buildFooter() {
@@ -1292,16 +1318,39 @@ final class HomeSurfaceView: NSView {
 
     // MARK: Shared pieces
 
-    private func addSectionHeader(_ title: String, sub: String) {
+    /// A heading over its subtitle. A view rather than a column entry, so
+    /// the half-width sections in the last row build the same pair the
+    /// full-width ones do.
+    private func sectionHeader(_ title: String, sub: String) -> NSView {
         let heading = ShellFont.label(title, font: ShellFont.ui(15, .semibold), color: ShellPalette.ink)
         let subtitle = ShellFont.label(sub, font: ShellFont.ui(13), color: ShellPalette.inkMuted)
         let stack = NSStackView(views: [heading, subtitle])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 5
+        return stack
+    }
+
+    private func addSectionHeader(_ title: String, sub: String) {
+        let stack = sectionHeader(title, sub: sub)
         column.addArrangedSubview(stack)
         stack.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         column.setCustomSpacing(22, after: stack)
+    }
+
+    /// One half of the Up next / What's new row: its header over its card,
+    /// both as wide as the half — the 22pt gap is the one every section
+    /// leaves between a header and what it introduces.
+    private func rowHalf(header: NSView, card: NSView) -> NSView {
+        let stack = NSStackView(views: [header, card])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 22
+        NSLayoutConstraint.activate([
+            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            card.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        return stack
     }
 
     private func symbol(
