@@ -1169,8 +1169,9 @@ final class ContentCardView: NSView {
 
 // MARK: - Placeholder
 
-/// What the content half shows for a destination that has no screen yet: To
-/// Do List, and Insights until its page lands.
+/// What the content half shows for a destination that has no screen yet —
+/// To Do List, and only it: Insights stood here until its own page landed
+/// (flow-layout spec §6).
 final class WorkspacePlaceholderView: NSView {
     private let titleField = ShellFont.label(font: ShellFont.ui(16, .semibold), color: ShellPalette.ink)
     private let subtitleField = ShellFont.label(font: ShellFont.ui(12.5), color: ShellPalette.inkMuted)

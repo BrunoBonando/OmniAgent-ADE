@@ -149,6 +149,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Home's real screen — the placeholder now only covers To Do List.
     /// Internal, not private: the tests assert its routing.
     let homeView = HomeSurfaceView()
+    /// The Insights page (flow-layout spec §6): usage KPIs and charts on one
+    /// tab, the agent-activity timeline across every session on the other.
+    /// Internal, not private: the tests assert its routing and its lanes.
+    let insightsView = InsightsSurfaceView()
     /// The in-window Settings page — the sidebar's foot, ⌘, and the palette
     /// land here.
     let settingsView = SettingsSurfaceView()
@@ -1195,7 +1199,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         contentCard.addSubview(workspace)
         contentCard.addSubview(placeholder)
         contentCard.addSubview(homeView)
+        contentCard.addSubview(insightsView)
         contentCard.addSubview(settingsView)
+        // Picking Activity is what makes the timeline current — the page's
+        // own version of the review panel's tab-activation rule.
+        insightsView.onSelectTab = { [weak self] tab in
+            guard tab == .activity else { return }
+            self?.syncPageInsights()
+        }
         // The floating panel rides above every destination.
         settingsPanel.isHidden = true
         contentCard.addSubview(settingsPanel)
@@ -1226,7 +1237,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // window's top edge and inset their own scrolling under the title
         // strip; the card's edge is the boundary now, so nothing runs under
         // the strip and there is one offset — none — for all four.
-        for view in [workspace, placeholder, homeView, settingsView] as [NSView] {
+        for view in [workspace, placeholder, homeView, insightsView, settingsView] as [NSView] {
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: contentCard.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: contentCard.trailingAnchor),
@@ -1392,6 +1403,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Home has a real screen now; the placeholder covers To Do List only.
         homeView.isHidden = destination != .home
         if destination == .home { refreshHomeChips() }
+        // Insights has a real screen too, and its numbers are read on the way
+        // in — never held live, so a page nobody is looking at costs nothing.
+        insightsView.isHidden = destination != .insights
+        if destination == .insights { refreshInsights() }
         settingsView.isHidden = destination != .settings
         // The panel docks with the page and goes with it — and off the page
         // nothing is "here": the pick is forgotten, so ⌘, and the sidebar's
@@ -1406,10 +1421,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             settingsPanel.apply(selected: nil)
         }
         placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
-        // To Do List has no screen — and neither has Insights until its page
-        // lands — so both stand on the placeholder, which names whichever it
-        // is showing for.
-        let isPlaceholder = destination == .todo || destination == .insights
+        // To Do List is the last destination with no screen of its own, so
+        // the placeholder is now its alone — Insights took its page in the
+        // flow-layout pass.
+        let isPlaceholder = destination == .todo
         placeholder.isHidden = !isPlaceholder
         if isPlaceholder { placeholder.show(destination) }
         // Home, To Do List and Insights name no session, so the bar goes
@@ -3529,6 +3544,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             applyDestination(destination)
         case let .showSettingsSection(section):
             showSettings(section: section)
+        case let .showInsightsTab(tab):
+            // The page first, then the tab: showing the destination is what
+            // reads the numbers, and `select` is what feeds the timeline.
+            applyDestination(.insights)
+            insightsView.select(tab)
         case .startBranchSession:
             newSession(nil)
         case .signIn:
@@ -4957,15 +4977,70 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             workspace.descriptor(for: $0)?.group == group
                 && workspace.descriptor(for: $0)?.kind == .terminal
         }
-        let lanes = paneIDs.map { id in
+        reviewPanelInsights.apply(
+            lanes: insightsLanes(for: paneIDs, now: now) { id in
+                // One session's panes: the pane's own name is the whole
+                // title, since the session is the panel's subject.
+                workspace.descriptor(for: id).map(SessionOutline.paneLabel) ?? id
+            },
+            activities: paneIDs.compactMap { activity.activity(for: $0) },
+            now: now
+        )
+    }
+
+    /// The lanes a set of panes makes: each pane's recorded status series as
+    /// drawable segments, titled by the caller. Both Insights surfaces are
+    /// this call — the review panel's tab over one session's panes, the
+    /// Insights page over every session's — and they differ in nothing else.
+    private func insightsLanes(
+        for paneIDs: [String],
+        now: Double,
+        title: (String) -> String
+    ) -> [ReviewPanelInsightsView.Lane] {
+        paneIDs.map { id in
             ReviewPanelInsightsView.Lane(
                 paneID: id,
-                title: workspace.descriptor(for: id).map(SessionOutline.paneLabel) ?? id,
+                title: title(id),
                 segments: statusSeries.segments(for: id, until: now)
             )
         }
-        reviewPanelInsights.apply(
-            lanes: lanes,
+    }
+
+    /// Everything the Insights page shows, read on the way in. The usage
+    /// model is rebuilt from the recorder rather than held — the same
+    /// snapshot-per-open contract `SettingsWindowController.present` states,
+    /// for the same reason: a stale readout is a lie, and a live one is a
+    /// subscription nobody asked for.
+    private func refreshInsights() {
+        let model = UsageViewModel(store: usageRecorder.store, projectDirectory: connection)
+        insightsView.applyInsights(model.insights)
+        insightsView.applyUsage(model: model)
+        syncPageInsights()
+    }
+
+    /// The Insights page's Activity tab: the review panel's timeline over
+    /// **every** terminal pane in the window rather than one session's, lanes
+    /// named "session · pane" because a lane called "Claude 1" says nothing
+    /// once there are five sessions on the tape. Guarded exactly like its
+    /// sibling — off the page, or on the Usage tab, it costs nothing.
+    private func syncPageInsights() {
+        guard destination == .insights, insightsView.selectedTab == .activity else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        // The sidebar's own naming rule, so a lane and the tree can never
+        // print two different names for one session (the derived
+        // `Session N` included).
+        var sessionLabels: [String: String] = [:]
+        for node in SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID) {
+            for session in node.sessions { sessionLabels[session.id] = session.label }
+        }
+        let paneIDs = panes.filter { $0.kind == .terminal }.map(\.sessionID)
+        insightsView.activity.apply(
+            lanes: insightsLanes(for: paneIDs, now: now) { id in
+                guard let pane = workspace.descriptor(for: id) else { return id }
+                let session = sessionLabels[pane.group] ?? pane.group
+                return "\(session) · \(SessionOutline.paneLabel(pane))"
+            },
             activities: paneIDs.compactMap { activity.activity(for: $0) },
             now: now
         )
@@ -5261,10 +5336,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             status: event.status,
             at: Date().timeIntervalSince1970 * 1000
         )
-        // The Insights tab shows this very event stream: while it is on
-        // screen, each event redraws it (guarded inside to visible+active,
-        // so a closed panel costs nothing).
+        // Both Insights surfaces show this very event stream: while either is
+        // on screen, each event redraws it (guarded inside to visible+active,
+        // so a closed panel and an unvisited page both cost nothing).
         syncReviewPanelInsights()
+        syncPageInsights()
         notifier.record(
             NotificationContext(
                 event: event,

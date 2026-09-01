@@ -1456,7 +1456,8 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             "the To Do List placeholder is a child of the card"
         )
         let pages: [NSView] = [
-            controller.workspaceView, controller.homeView, controller.settingsView, placeholder,
+            controller.workspaceView, controller.homeView, controller.insightsView,
+            controller.settingsView, placeholder,
         ]
         for page in pages {
             XCTAssertTrue(page.superview === card, "\(type(of: page)) hangs off the card")
@@ -1466,6 +1467,92 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(
             controller.sessionTitleField.superview === column,
             "while the session name stays in the strip, outside the card"
+        )
+    }
+
+    /// Insights is a real page now (flow-layout spec §6), so it shows its own
+    /// screen and every other destination — the To Do placeholder it used to
+    /// borrow included — goes away under it.
+    func testInsightsShowsItsOwnPageRatherThanThePlaceholder() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.applyDestination(.insights)
+
+        XCTAssertFalse(controller.insightsView.isHidden)
+        XCTAssertTrue(controller.homeView.isHidden)
+        XCTAssertTrue(controller.workspaceView.isHidden)
+        XCTAssertTrue(controller.settingsView.isHidden)
+        let placeholder = try XCTUnwrap(
+            controller.contentCard.subviews.compactMap { $0 as? WorkspacePlaceholderView }.first
+        )
+        XCTAssertTrue(placeholder.isHidden, "the placeholder is To Do List's alone now")
+        // Showing the page is what reads the numbers.
+        XCTAssertEqual(controller.insightsView.kpiCards.count, 3)
+        for card in controller.insightsView.kpiCards {
+            XCTAssertNotEqual(card.valueField.stringValue, InsightsSurfaceView.placeholderValue)
+        }
+
+        controller.applyDestination(.home)
+        XCTAssertTrue(controller.insightsView.isHidden)
+    }
+
+    /// The Activity tab is the review panel's timeline over every session:
+    /// fed on the way in, and again on each status event while it is the tab
+    /// on screen — with lanes named "session · pane", since a lane called
+    /// "Shell 1" says nothing once five sessions share the tape.
+    func testAStatusEventFeedsTheInsightsPagesActivityTimeline() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.sessionKiller = { _ in }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1", groupLabel: "Build"),
+                    PersistedTab(project: "beta", engine: .shell, cwd: "/b", id: "sess-b", group: "g2", groupLabel: "Ship"),
+                ])
+            )
+        )
+
+        controller.recordNotification(
+            for: SessionStatusEvent(id: "sess-a", status: .thinking, notify: false, engine: "shell")
+        )
+        XCTAssertTrue(
+            controller.insightsView.activity.lanes.isEmpty,
+            "an unvisited page is fed nothing"
+        )
+
+        controller.applyDestination(.insights)
+        XCTAssertTrue(
+            controller.insightsView.activity.lanes.isEmpty,
+            "and neither is the Usage tab"
+        )
+
+        controller.insightsView.select(.activity)
+        XCTAssertEqual(
+            controller.insightsView.activity.lanes.map(\.paneID),
+            ["sess-a", "sess-b"],
+            "every session's terminals, not just the one on the Desk"
+        )
+        XCTAssertEqual(
+            controller.insightsView.activity.lanes.map(\.title),
+            ["Build · Shell 1", "Ship · Shell 1"]
+        )
+        XCTAssertEqual(
+            controller.insightsView.activity.lanes.first?.segments.map(\.status),
+            [.thinking]
+        )
+
+        // And the stream keeps redrawing it while it is the tab on screen.
+        controller.recordNotification(
+            for: SessionStatusEvent(id: "sess-b", status: .toolExecution, notify: false, engine: "shell")
+        )
+        XCTAssertEqual(
+            controller.insightsView.activity.lanes.last?.segments.map(\.status),
+            [.toolExecution]
         )
     }
 
@@ -2473,6 +2560,13 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.run(.showSettingsSection(.accounts))
         XCTAssertEqual(controller.destination, .settings)
         XCTAssertEqual(controller.settingsView.section, .accounts)
+
+        // The Insights tabs: the page, then the tab on it.
+        controller.run(.showInsightsTab(.activity))
+        XCTAssertEqual(controller.destination, .insights)
+        XCTAssertEqual(controller.insightsView.selectedTab, .activity)
+        controller.run(.showInsightsTab(.usage))
+        XCTAssertEqual(controller.insightsView.selectedTab, .usage)
 
         controller.run(.selectWorkspace(id: "alpha"))
         XCTAssertEqual(controller.selectedProjectID, "alpha")

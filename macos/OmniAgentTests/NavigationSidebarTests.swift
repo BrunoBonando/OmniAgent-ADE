@@ -552,14 +552,13 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(placeholder.titleText, WorkspaceDestination.todo.title)
         XCTAssertEqual(placeholder.subtitleText, "Under development")
 
-        // Insights has no page yet either, and the placeholder names the one
-        // it is standing in for rather than keeping To Do List's title.
+        // Insights has a page of its own now, so the placeholder it used to
+        // borrow goes away with every other destination.
         controller.applyDestination(.insights)
         XCTAssertTrue(controller.workspaceView.isHidden)
         XCTAssertTrue(controller.homeView.isHidden)
-        XCTAssertFalse(placeholder.isHiddenOrHasHiddenAncestor)
-        XCTAssertEqual(placeholder.titleText, "Insights")
-        XCTAssertEqual(placeholder.subtitleText, "Under development")
+        XCTAssertTrue(placeholder.isHidden)
+        XCTAssertFalse(controller.insightsView.isHiddenOrHasHiddenAncestor)
 
         controller.applyDestination(.terminals)
         XCTAssertFalse(controller.workspaceView.isHidden)

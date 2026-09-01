@@ -28,6 +28,7 @@ final class CommandPaletteTests: XCTestCase {
                 "session:new-branch",
                 "destination:home", "destination:todo", "destination:insights",
                 "destination:terminals", "destination:settings",
+                "insights:usage", "insights:activity",
                 "sidebar:help",
                 "titlebar:notifications", "titlebar:account",
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
@@ -448,6 +449,36 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(destinations.map(\.icon), [
             "house", "checklist", "chart.bar.xaxis", "rectangle.split.2x2", "gearshape",
         ])
+    }
+
+    /// The Insights page's two tabs are rows of their own (the flow layout
+    /// spec's §8) — the destination row lands on whichever tab the page is
+    /// showing, so "Activity" needs a name to type.
+    func testTheInsightsTabsAreSpotlightRows() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil
+        )
+
+        let usage = try XCTUnwrap(commands.first { $0.id == "insights:usage" })
+        let activity = try XCTUnwrap(commands.first { $0.id == "insights:activity" })
+        XCTAssertEqual([usage.title, activity.title], ["Insights › Usage", "Insights › Activity"])
+        XCTAssertEqual([usage.action, activity.action], [
+            .showInsightsTab(.usage), .showInsightsTab(.activity),
+        ])
+        for row in [usage, activity] {
+            XCTAssertEqual(row.symbol, "chart.bar.xaxis")
+            XCTAssertEqual(row.subtitle, "Insights")
+            XCTAssertEqual(row.keywords, "insights usage tokens sessions activity timeline")
+            XCTAssertEqual(row.section, .places)
+        }
+
+        // And they answer to what someone would actually type.
+        var model = CommandPaletteModel(commands: commands)
+        model.update(query: "timeline")
+        XCTAssertEqual(
+            model.matches.map(\.id).filter { $0.hasPrefix("insights:") },
+            ["insights:usage", "insights:activity"]
+        )
     }
 
     /// The sidebar's foot in the spotlight: Settings is already a destination

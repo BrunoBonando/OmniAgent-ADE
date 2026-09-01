@@ -36,6 +36,11 @@ enum PaletteAction: Equatable {
     /// One Settings section, straight from the spotlight — the page opens
     /// on it, the way the docked panel's own row would.
     case showSettingsSection(SettingsSection)
+    /// One tab of the Insights page (the flow-layout spec's §8). A row of
+    /// its own per tab, the same reasoning as the Settings sections above:
+    /// "Activity" is a place you go, and the destination row only ever
+    /// lands on the tab the page happens to be showing.
+    case showInsightsTab(InsightsTab)
     /// Opens the focused branch/session setup flow for the current workspace.
     case startBranchSession
     /// The title bar's two popovers (the flow layout spec's §1). Rows of their
@@ -652,6 +657,23 @@ struct CommandPaletteModel: Equatable {
                     section: .places,
                     subtitle: destination.subtitle,
                     symbol: destination.paletteSymbol
+                )
+            )
+        }
+        // The two tabs *inside* the Insights page — the standing rule again:
+        // the items in a page are findable as soon as the page is real.
+        // `allCases`, so a third tab appears here the day it is added.
+        for tab in InsightsTab.allCases {
+            commands.append(
+                PaletteCommand(
+                    id: "insights:\(tab.title.lowercased())",
+                    title: "Insights › \(tab.title)",
+                    detail: nil,
+                    action: .showInsightsTab(tab),
+                    keywords: "insights usage tokens sessions activity timeline",
+                    section: .places,
+                    subtitle: "Insights",
+                    symbol: "chart.bar.xaxis"
                 )
             )
         }

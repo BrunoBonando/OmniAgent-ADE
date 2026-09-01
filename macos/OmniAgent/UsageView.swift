@@ -37,12 +37,16 @@ final class UsageViewModel: ObservableObject {
 /// a compact summary a settings-adjacent window can host.
 struct UsageView: View {
     @ObservedObject var model: UsageViewModel
+    /// The totals grid. Off on the Insights page (spec §6), which prints the
+    /// headline numbers as its own KPI cards above this view and would
+    /// otherwise say them twice.
+    var showsTotals = true
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 projectPicker
-                totalsRow
+                if showsTotals { totalsRow }
                 dailyChart
                 hourlyChart
             }
