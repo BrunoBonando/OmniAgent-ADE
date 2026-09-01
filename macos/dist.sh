@@ -133,6 +133,35 @@ EOF
   echo "$0 sign: signing embedded daemon ($daemon)..." >&2
   codesign --force --options runtime --timestamp --sign "$identity" "$daemon"
 
+  # Sparkle.framework is not one binary, it is five: the framework itself, a
+  # command-line Autoupdate tool, an Updater.app, and two XPC services. Every
+  # one is independently loadable code, so every one needs its own signature
+  # with our identity -- the app's outer signature does not cover them, and
+  # notarization rejects (or Gatekeeper later kills) whatever is left carrying
+  # only Sparkle's own ad-hoc one.
+  #
+  # Inner-out, and NOT with `codesign --deep`: --deep re-signs nested code with
+  # the *outer* entitlements and is explicitly discouraged by Apple for exactly
+  # this shape. The helpers get no entitlements of their own, which is what
+  # they want -- they are not sandboxed and inherit nothing.
+  sparkle="$app/Contents/Frameworks/Sparkle.framework"
+  if [ -d "$sparkle" ]; then
+    echo "$0 sign: signing Sparkle's helpers..." >&2
+    # Deepest first. The XPC services and Updater.app are bundles; Autoupdate
+    # is a bare Mach-O. Globs that match nothing are skipped rather than
+    # signed literally.
+    for helper in \
+      "$sparkle/Versions/B/XPCServices/Downloader.xpc" \
+      "$sparkle/Versions/B/XPCServices/Installer.xpc" \
+      "$sparkle/Versions/B/Updater.app" \
+      "$sparkle/Versions/B/Autoupdate"
+    do
+      [ -e "$helper" ] || continue
+      codesign --force --options runtime --timestamp --sign "$identity" "$helper"
+    done
+    codesign --force --options runtime --timestamp --sign "$identity" "$sparkle"
+  fi
+
   echo "$0 sign: signing app bundle ($app)..." >&2
   codesign --force --options runtime --timestamp \
     --entitlements "$entitlements" --sign "$identity" "$app"
@@ -268,6 +297,30 @@ preflight() {
   [ "$app_team" = "$daemon_team" ] || fail "daemon Team ID ($daemon_team) != app Team ID ($app_team)"
   codesign -dv "$daemon" 2>&1 | grep -q 'flags=.*runtime' || fail "daemon lacks hardened runtime"
 
+  # Sparkle ships four independently loadable helpers inside its framework,
+  # and the app's own signature covers none of them. Anything left carrying
+  # Sparkle's ad-hoc signature is a notarization rejection at best and a
+  # helper Gatekeeper refuses to launch mid-update at worst -- which would
+  # fail exactly once, in the field, on the step that replaces the app.
+  sparkle_fw="$app/Contents/Frameworks/Sparkle.framework"
+  if [ -d "$sparkle_fw" ]; then
+    for helper in \
+      "$sparkle_fw" \
+      "$sparkle_fw/Versions/B/Autoupdate" \
+      "$sparkle_fw/Versions/B/Updater.app" \
+      "$sparkle_fw/Versions/B/XPCServices/Downloader.xpc" \
+      "$sparkle_fw/Versions/B/XPCServices/Installer.xpc"
+    do
+      [ -e "$helper" ] || continue
+      name=$(basename "$helper")
+      helper_team=$(codesign -dv "$helper" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+      [ "$helper_team" = "$app_team" ] \
+        || fail "Sparkle $name Team ID ($helper_team) != app Team ID ($app_team)"
+      codesign -dv "$helper" 2>&1 | grep -q 'flags=.*runtime' \
+        || fail "Sparkle $name lacks hardened runtime"
+    done
+  fi
+
   echo "$0 preflight: entitlements ----------------------------------------" >&2
   ents=$(codesign -d --entitlements :- "$app" 2>/dev/null || true)
   echo "$ents" | grep -q 'get-task-allow' && fail "com.apple.security.get-task-allow present (debug entitlement)"
@@ -275,8 +328,11 @@ preflight() {
 
   echo "$0 preflight: bundle metadata -------------------------------------" >&2
   [ -f "$app/Contents/Resources/PrivacyInfo.xcprivacy" ] || fail "PrivacyInfo.xcprivacy missing"
+  # SUFeedURL/SUPublicEDKey are as load-bearing as the rest: an app shipped
+  # without them cannot update itself and nothing at runtime says so.
   for key in LSApplicationCategoryType NSHumanReadableCopyright ITSAppUsesNonExemptEncryption \
-             NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription; do
+             NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription \
+             SUFeedURL SUPublicEDKey; do
     /usr/libexec/PlistBuddy -c "Print :$key" "$info" >/dev/null 2>&1 || fail "Info.plist lacks $key"
   done
   plist=$(find "$app/Contents/Library/LaunchAgents" -name '*.plist' | head -1)

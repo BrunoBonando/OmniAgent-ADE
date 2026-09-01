@@ -9,4 +9,16 @@
     <key>CFBundleURLName</key><string>digital.bruno.omniagent.auth</string>
     <key>CFBundleURLSchemes</key><array><string>omniagent</string></array>
   </dict></array>
+  <!-- Sparkle. The app drives updates through its own SPUUserDriver
+       (UpdateController.swift), so none of Sparkle's own windows ever appear
+       -- but the update *cycle* is still Sparkle's, and these are the keys it
+       reads. SUAutomaticallyUpdate is false on purpose: we check on a
+       schedule and show the sidebar widget, and nothing downloads until the
+       user presses it. The public key's private half lives only in Bruno's
+       login keychain; `generate_keys` prints this half. -->
+  <key>SUFeedURL</key><string>https://dl.omni-agent.ai/releases/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>T0sOk4CTEQr4rq/OwArM+EB69ihOTVVRgxtvTx6R9xE=</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><false/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
 </dict></plist>

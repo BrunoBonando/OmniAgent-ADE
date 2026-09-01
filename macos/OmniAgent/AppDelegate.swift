@@ -194,6 +194,7 @@ enum ApplicationMenus {
         application.addItem(
             item("About OmniAgent", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
         )
+        application.addItem(item("Check for Updates…", Selector(("checkForUpdates:"))))
         application.addItem(.separator())
         // Task 6b-2's SwiftUI settings screen — the standard macOS
         // Settings/Preferences slot (⌘,), traveling the responder chain

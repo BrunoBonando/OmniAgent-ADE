@@ -999,6 +999,9 @@ final class NavigationSidebarView: NSView {
     var onShowViewers: ((String) -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []
+    /// The self-update strip, above every nav row — hidden until there is an
+    /// update to talk about (`SidebarUpdateWidget.swift`).
+    let updateWidget = SidebarUpdateWidgetView()
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
     let workspacesTree = WorkspacesTreeView()
     let claudeLimits = SidebarClaudeLimitsView()
@@ -1044,13 +1047,18 @@ final class NavigationSidebarView: NSView {
             return row
         }
 
-        let navStack = NSStackView(views: navRows)
+        // The update widget rides in the stack rather than being pinned above
+        // it so that hiding it actually removes it: NSStackView drops hidden
+        // arranged subviews from the layout, where a pinned view would keep
+        // its height constraint and leave a gap over Home.
+        updateWidget.isHidden = true
+        let navStack = NSStackView(views: [updateWidget] + navRows)
         navStack.orientation = .vertical
         navStack.alignment = .leading
         navStack.spacing = 2
         navStack.edgeInsets = NSEdgeInsets(top: 10, left: 8, bottom: 0, right: 8)
         navStack.translatesAutoresizingMaskIntoConstraints = false
-        for row in navRows {
+        for row in navRows + [updateWidget] {
             row.widthAnchor.constraint(equalTo: navStack.widthAnchor, constant: -16).isActive = true
         }
 

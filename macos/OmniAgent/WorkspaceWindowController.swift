@@ -125,6 +125,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// out that way. `SessionOutline`'s grouping rules live on and are what
     /// the tree is built from.
     let shellSidebar = NavigationSidebarView()
+    /// Self-update. Owned here because every surface that shows it -- the
+    /// sidebar widget, Settings > General, Home, the palette -- is this
+    /// window's, and they must all read one value.
+    let updateController = UpdateController()
     /// The content half of the split: the pane workspace and the placeholder
     /// both live here permanently, and the destination only toggles which is
     /// hidden. Unmounting `PaneWorkspaceView` would tear down live SwiftTerm
@@ -862,6 +866,42 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // The gear offers the Settings panel (or puts it back): the pick is
         // what opens the page.
         shellSidebar.onOpenSettings = { [weak self] in self?.toggleSettingsPanel() }
+        // Self-update: the widget is the only thing the updater talks through,
+        // and the controller is the only thing that knows the state.
+        shellSidebar.updateWidget.onDownload = { [weak self] in
+            self?.updateController.downloadUpdate()
+        }
+        shellSidebar.updateWidget.onRestart = { [weak self] in
+            self?.updateController.restartToUpdate()
+        }
+        shellSidebar.updateWidget.onRetry = { [weak self] in
+            self?.updateController.checkForUpdates()
+        }
+        updateController.onStateChange = { [weak self] state in
+            self?.applyUpdateState(state)
+        }
+        updateController.confirmRestart = { [weak self] decide in
+            guard let self else { return decide(false) }
+            confirmRestartForUpdate(decide)
+        }
+        updateController.daemonStopper = { [weak self] proceed in
+            guard let self else { return proceed() }
+            stopDaemonForUpdate(then: proceed)
+        }
+        // Home's pill and the Settings page's button reach the same three
+        // actions the widget does.
+        homeView.onUpdatePillPressed = { [weak self] in
+            guard let self else { return }
+            switch updateController.state {
+            case .available: updateController.downloadUpdate()
+            case .readyToRestart: updateController.restartToUpdate()
+            case .idle, .failed: updateController.checkForUpdates()
+            case .checking, .updating: break
+            }
+        }
+        settingsView.onCheckForUpdates = { [weak self] in self?.updateController.checkForUpdates() }
+        settingsView.onDownloadUpdate = { [weak self] in self?.updateController.downloadUpdate() }
+        settingsView.onRestartUpdate = { [weak self] in self?.updateController.restartToUpdate() }
         shellSidebar.onOpenAccount = { [weak self] in self?.showSettings(section: .accounts) }
         // The header's plus menu: a session in any listed workspace, or a
         // brand new workspace from a folder (the one flow where a chooser is
@@ -876,12 +916,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onAddLocalFolder = { [weak self] in self?.openWorkspaceFolder(nil) }
         // Home's project/session dropdowns — `HomeDropdown`, the same
         // glass-and-icons look every other Home chip uses, not the
-        // sidebar's stock `NSMenu`. Home only ever picks *what a session
-        // would start with*, never starts one: clicking a workspace here
-        // must not jump you off Home the way the sidebar's identically-
-        // shaped "+" menu does, so this targets `homeSelectedProjectID`,
-        // never `selectedProjectID`/`startSession` — see `homeSessions(for:)`
-        // for the session list's source.
+        // sidebar's stock `NSMenu`. Picking here updates Home's launch
+        // inputs; Send is what turns them into a new session.
         homeView.onRequestProjectMenu = { [weak self] anchor in
             guard let self else { return }
             let current = homeSelectedProjectID
@@ -1463,6 +1499,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     func start() {
+        // Sparkle's own cycle: a check shortly after launch, then daily. The
+        // widget stays hidden until one of them finds something.
+        updateController.start()
         connection.onStateChange = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -3399,7 +3438,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 remotePaneFocused: focusedRemoteTerminal() != nil,
                 // And who is watching this Mac right now — the popover the
                 // sidebar's count opens, by name (phase 2 §5).
-                watchedWorkspaces: watchedPaletteWorkspaces()
+                watchedWorkspaces: watchedPaletteWorkspaces(),
+                // Which of the three update rows can be taken right now.
+                updateState: updateController.state
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
@@ -3466,6 +3507,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             disconnectGitHub()
         case .deleteAccount:
             deleteAccount()
+        case .checkForUpdates:
+            updateController.checkForUpdates()
+        case .downloadUpdate:
+            updateController.downloadUpdate()
+        case .restartToUpdate:
+            updateController.restartToUpdate()
         case let .openFile(path):
             openFileInEditor(URL(fileURLWithPath: path), pinned: true)
             // `openFileInEditor` focuses the pane it landed in but knows
@@ -5765,6 +5812,70 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// restore pass only runs again after a `resetForAccountSwitch` that a
     /// dropped ask never performs. Next launch, `presentLaunchGate` arms it
     /// again anyway (still no pointer), so this is belt and braces.
+    // MARK: - Self-update
+
+    /// One state, every surface. The sidebar widget is the primary one; Home
+    /// and the Settings page mirror it so the update is findable from where
+    /// the user happens to be looking.
+    private func applyUpdateState(_ state: UpdateState) {
+        shellSidebar.updateWidget.apply(state)
+        homeView.applyUpdateState(state)
+        settingsView.applyUpdateState(state)
+    }
+
+    /// The Check for Updates… command -- the OmniAgent menu, the Settings
+    /// page's button, Home's card and the palette all land here.
+    @objc func checkForUpdates(_ sender: Any?) {
+        updateController.checkForUpdates()
+    }
+
+
+    /// The self-update controller's `confirmRestart`. Restarting into a new
+    /// build ends every live terminal session, so this is the house ask --
+    /// same shape as `switchAccount`'s, for the same reason: ending a user's
+    /// running agents is never ours to decide (standing rule, 2026-08-30).
+    ///
+    /// Asked *before* anything is installed. Once Sparkle has swapped the
+    /// bundle there is no longer a "no" to offer.
+    func confirmRestartForUpdate(_ decide: @escaping (Bool) -> Void) {
+        let sessions = localTerminalSessionCount()
+        guard sessions > 0 else {
+            decide(true)
+            return
+        }
+        let presented = presentWindowAsk(
+            title: "Restart to finish updating?",
+            message: "This ends \(Self.runningSessionsPhrase(sessions)).",
+            severity: .critical,
+            options: [
+                PaneAskOption("Not now") { _ in decide(false) },
+                PaneAskOption("Restart now", isPrimary: true) { _ in decide(true) },
+            ],
+            onCancel: { decide(false) }
+        )
+        // The ask could not be shown (one is already up, or there is no
+        // content view yet). Nothing was decided, so decide nothing: the
+        // update stays ready and the widget keeps offering the restart.
+        if !presented { decide(false) }
+    }
+
+    /// The self-update controller's `daemonStopper`.
+    ///
+    /// The daemon is a binary *inside the bundle being replaced*. Leave it
+    /// running and the relaunched app finds something already listening on the
+    /// socket, does not respawn it (`DaemonPersistence.shouldSpawn`), and goes
+    /// on talking to the old daemon from an unlinked inode -- so every
+    /// daemon-side change in the update looks shipped and is not. This is the
+    /// same failure `scripts/rebuild-app.sh` exists to prevent for installs.
+    ///
+    /// `proceed` runs either way: a daemon that will not die must not strand
+    /// the user in a half-finished update with no app coming back. The new app
+    /// respawns one on launch regardless, and a survivor is a stale-daemon
+    /// problem, not a no-app problem.
+    func stopDaemonForUpdate(then proceed: @escaping () -> Void) {
+        terminateDaemon { _ in proceed() }
+    }
+
     func switchAccount(toEmail email: String, isLegacyAdoption: Bool = false, completion: @escaping () -> Void) {
         let id = AccountDirectory.accountID(forEmail: email)
         guard currentAccountID != id else {

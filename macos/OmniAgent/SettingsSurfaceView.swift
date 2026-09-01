@@ -343,6 +343,20 @@ final class SettingsSurfaceView: NSView {
     var onConnectGitHub: (() -> Void)?
     var onDisconnectGitHub: (() -> Void)?
     var onDeleteAccount: (() -> Void)?
+    /// General's update block: which version is running, what the updater is
+    /// doing, and the one button that advances it. General rather than a
+    /// section of its own -- it is where macOS apps put this, and a whole
+    /// section for three controls is a menu entry nobody needs.
+    let updateVersionField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkSecondary)
+    let updateStatusField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
+    let updateButton = NSButton(title: "Check for Updates", target: nil, action: nil)
+    /// The three things the button can mean, by state. The view dispatches so
+    /// the caller does not have to re-derive what is on screen.
+    var onCheckForUpdates: (() -> Void)?
+    var onDownloadUpdate: (() -> Void)?
+    var onRestartUpdate: (() -> Void)?
+    private(set) var updateState: UpdateState = .idle
+
     /// The section on screen. Sticks for as long as the app lives, like
     /// Home's own picks.
     private(set) var section: SettingsSection = .general
@@ -371,9 +385,19 @@ final class SettingsSurfaceView: NSView {
         deleteAccountButton.translatesAutoresizingMaskIntoConstraints = false
         applyAccount(email: nil, signedIn: false)
 
+        updateButton.bezelStyle = .rounded
+        updateButton.controlSize = .regular
+        updateButton.font = ShellFont.ui(13)
+        updateButton.target = self
+        updateButton.action = #selector(updateButtonPressed)
+        updateButton.translatesAutoresizingMaskIntoConstraints = false
+        let running = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        updateVersionField.stringValue = "OmniAgent \(running ?? "")"
+        applyUpdateState(.idle)
+
         let column = NSStackView(views: [
             titleField, subtitleField, accountField, accountButton, githubField, githubButton,
-            deleteAccountButton,
+            deleteAccountButton, updateVersionField, updateStatusField, updateButton,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -386,6 +410,7 @@ final class SettingsSurfaceView: NSView {
         // Its own gap again: deleting the account is not a third line of the
         // GitHub block.
         column.setCustomSpacing(22, after: githubButton)
+        column.setCustomSpacing(14, after: updateStatusField)
         column.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -434,6 +459,58 @@ final class SettingsSurfaceView: NSView {
         githubField.isHidden = !isAccounts
         githubButton.isHidden = !isAccounts
         deleteAccountButton.isHidden = !(isAccounts && accountSignedIn)
+        // General has a screen too now: the update block. Which means General
+        // no longer says "Under development" either.
+        let isGeneral = section == .general
+        subtitleField.isHidden = isAccounts || isGeneral
+        updateVersionField.isHidden = !isGeneral
+        updateStatusField.isHidden = !isGeneral
+        updateButton.isHidden = !isGeneral
+    }
+
+    /// The update story, on the Settings page. Same states as the sidebar
+    /// widget, spelled out because there is room here to spell them out.
+    func applyUpdateState(_ state: UpdateState) {
+        updateState = state
+        let status: String
+        let title: String
+        switch state {
+        case .idle:
+            status = "OmniAgent checks for updates automatically, once a day."
+            title = "Check for Updates"
+        case .checking:
+            status = "Checking…"
+            title = "Checking…"
+        case let .available(version):
+            status = "Version \(version) is available."
+            title = "Download Update"
+        case let .updating(fraction):
+            status = fraction.map { "Updating… \(Int($0 * 100))%" } ?? "Updating…"
+            title = "Updating…"
+        case let .readyToRestart(version):
+            let named = version.isEmpty ? "An update" : "Version \(version)"
+            status = "\(named) is ready. Restarting ends any running terminal sessions."
+            title = "Restart to Update"
+        case let .failed(message):
+            status = "Update failed — \(message)"
+            title = "Try Again"
+        }
+        updateStatusField.stringValue = status
+        updateButton.title = title
+        // Nothing to press while work is in flight; the label already says so.
+        switch state {
+        case .checking, .updating: updateButton.isEnabled = false
+        default: updateButton.isEnabled = true
+        }
+    }
+
+    @objc private func updateButtonPressed() {
+        switch updateState {
+        case .available: onDownloadUpdate?()
+        case .readyToRestart: onRestartUpdate?()
+        case .idle, .failed: onCheckForUpdates?()
+        case .checking, .updating: break
+        }
     }
 
     /// The account as the page shows it, handed in by the controller — this

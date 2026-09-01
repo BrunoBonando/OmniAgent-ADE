@@ -470,6 +470,13 @@ final class HomeSurfaceView: NSView {
     /// is set, the one it would branch *from*.
     private(set) var selectedBranch: String?
     private(set) var newBranchName: String?
+    /// "What's new"'s update pill. Drawn inert with the rest of the screen;
+    /// it is the self-update controller that gives it something to say.
+    let updatePill = HomePillView("Check for updates")
+    /// Pressed: check, download, or restart, depending on what the pill
+    /// currently says. The controller routes it -- Home does not track state.
+    var onUpdatePillPressed: (() -> Void)?
+    private(set) var updateState: UpdateState = .idle
     let versionLabel = ShellFont.label(
         font: ShellFont.ui(13.5, .semibold),
         color: ShellPalette.ink
@@ -1172,7 +1179,8 @@ final class HomeSurfaceView: NSView {
 
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         versionLabel.stringValue = "OmniAgent ADE \(version ?? "")"
-        let release = NSStackView(views: [releaseTile, versionLabel, HomePillView("Check for updates")])
+        updatePill.onPress = { [weak self] in self?.onUpdatePillPressed?() }
+        let release = NSStackView(views: [releaseTile, versionLabel, updatePill])
         release.orientation = .vertical
         release.alignment = .leading
         release.spacing = 14
@@ -1266,6 +1274,23 @@ final class HomeSurfaceView: NSView {
             color: ShellPalette.inkFaint
         )
         column.addArrangedSubview(footer)
+    }
+
+    /// The update story, on Home. Same states as the sidebar widget, in the
+    /// one place on this screen that was already about the version.
+    func applyUpdateState(_ state: UpdateState) {
+        updateState = state
+        let title: String
+        switch state {
+        case .idle: title = "Check for updates"
+        case .checking: title = "Checking…"
+        case let .available(version): title = "Download \(version)"
+        case .updating: title = "Updating…"
+        case .readyToRestart: title = "Restart to update"
+        case .failed: title = "Update failed — retry"
+        }
+        updatePill.label.stringValue = title
+        updatePill.setAccessibilityLabel(title)
     }
 
     // MARK: Shared pieces

@@ -51,6 +51,12 @@ enum PaletteAction: Equatable {
     /// signed in: deleting nothing is a dead end, not an offer — which is
     /// why this one is not half of a pair like the two above.
     case deleteAccount
+    /// Self-update, in its three takeable forms. Like the account rows
+    /// above, only the one the current state actually allows becomes a row —
+    /// offering "Restart to Update" with nothing downloaded is a dead end.
+    case checkForUpdates
+    case downloadUpdate
+    case restartToUpdate
     /// A file open in some editor pane, chosen from the spotlight — reveals
     /// the pane holding it and brings that tab forward.
     case openFile(path: String)
@@ -406,7 +412,10 @@ struct CommandPaletteModel: Equatable {
         remotePaneFocused: Bool = false,
         /// This Mac's shared workspaces that somebody is watching right now,
         /// for the "Viewers of …" rows.
-        watchedWorkspaces: [PaletteWatchedWorkspace] = []
+        watchedWorkspaces: [PaletteWatchedWorkspace] = [],
+        /// What the self-update controller is doing, which decides which of
+        /// the three update rows is offered.
+        updateState: UpdateState = .idle
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -720,6 +729,55 @@ struct CommandPaletteModel: Equatable {
                     symbol: "person.crop.circle.badge.minus"
                 )
             )
+        }
+        // Self-update. One row, whichever one can be taken right now — the
+        // same rule the account pair follows. `Spotlight finds everything`
+        // (the repo's standing rule) is why these exist at all: the sidebar
+        // widget is a thing you can navigate to, so it is typeable.
+        let updateKeywords = "update upgrade version release download install new sparkle"
+        switch updateState {
+        case let .available(version):
+            commands.append(
+                PaletteCommand(
+                    id: "update:download",
+                    title: "Download Update",
+                    detail: version,
+                    action: .downloadUpdate,
+                    keywords: updateKeywords,
+                    section: .places,
+                    subtitle: "Version \(version) is available",
+                    symbol: "arrow.down.circle"
+                )
+            )
+        case let .readyToRestart(version):
+            commands.append(
+                PaletteCommand(
+                    id: "update:restart",
+                    title: "Restart to Update",
+                    detail: version.isEmpty ? nil : version,
+                    action: .restartToUpdate,
+                    keywords: updateKeywords + " restart relaunch quit",
+                    section: .places,
+                    subtitle: "Ends any running terminal sessions",
+                    symbol: "checkmark.circle"
+                )
+            )
+        case .idle, .failed:
+            commands.append(
+                PaletteCommand(
+                    id: "update:check",
+                    title: "Check for Updates",
+                    detail: nil,
+                    action: .checkForUpdates,
+                    keywords: updateKeywords + " check",
+                    section: .places,
+                    subtitle: "Settings › General",
+                    symbol: "arrow.triangle.2.circlepath"
+                )
+            )
+        // Nothing to offer while a check or a download is already running.
+        case .checking, .updating:
+            break
         }
         // The View menu's zoom items, while there is a remote pane to zoom.
         // A viewer never resizes the host's grid — it draws all of it, scaled
