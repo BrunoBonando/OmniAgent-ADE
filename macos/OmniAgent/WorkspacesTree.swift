@@ -20,13 +20,8 @@ struct WorkspaceTreeEntry: Equatable {
     /// The customization's folder colour, already resolved to a tint —
     /// `nil` keeps `ShellPalette.folderGlyph`.
     let tint: NSColor?
-    /// Remote Control is on for this workspace — its row wears the globe
-    /// (the remote-session-control spec's §2). Defaulted so every existing
-    /// call site keeps compiling and reads "not shared", which is the truth
-    /// for a workspace nobody has enabled.
-    let remoteControl: Bool
     /// The machines watching a pane of this workspace right now (the phase 2
-    /// spec's §5) — the count beside the globe, and the tooltip's list.
+    /// spec's §5) — the count beside the badge, and the tooltip's list.
     /// Empty is the overwhelmingly common case and wears no badge at all.
     let viewerNames: [String]
 
@@ -35,14 +30,12 @@ struct WorkspaceTreeEntry: Equatable {
         label: String,
         sessions: [SessionGroupNode],
         tint: NSColor? = nil,
-        remoteControl: Bool = false,
         viewerNames: [String] = []
     ) {
         self.id = id
         self.label = label
         self.sessions = sessions
         self.tint = tint
-        self.remoteControl = remoteControl
         self.viewerNames = viewerNames
     }
 }
@@ -495,7 +488,6 @@ final class WorkspacesTreeView: NSView {
                 label: entry.label,
                 expanded: expanded,
                 tint: entry.tint,
-                remoteControl: entry.remoteControl,
                 viewerNames: entry.viewerNames
             )
             workspaceRow.onPress = { [weak self] in self?.toggle(entry.id) }

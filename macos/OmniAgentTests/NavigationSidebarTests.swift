@@ -787,7 +787,7 @@ final class NavigationSidebarTests: XCTestCase {
         let payload = RemoteControlProjection.build(
             panes: [pane("s1", group: "g1", project: "/a", groupLabel: "Session 1"),
                     pane("s2", group: "g1", project: "/a", groupLabel: "Session 1")],
-            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
+            workspaceLabels: ["/a": "Alpha"], tints: [:])
         view.reloadWorkspaces(
             workspaces: [],
             panes: [],
@@ -822,7 +822,7 @@ final class NavigationSidebarTests: XCTestCase {
         let payload = RemoteControlProjection.build(
             panes: [pane("e1", group: "g1", project: "/a", groupLabel: "Session 1", kind: .editor),
                     pane("t1", group: "g1", project: "/a", groupLabel: "Session 1")],
-            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
+            workspaceLabels: ["/a": "Alpha"], tints: [:])
         view.reloadWorkspaces(
             workspaces: [],
             panes: [],
@@ -851,7 +851,7 @@ final class NavigationSidebarTests: XCTestCase {
         view.onOpenRemoteSession = { _, _, _ in XCTFail("there is nothing here to attach to") }
         let payload = RemoteControlProjection.build(
             panes: [pane("e1", group: "g1", project: "/a", groupLabel: "Notes", kind: .editor)],
-            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
+            workspaceLabels: ["/a": "Alpha"], tints: [:])
         view.reloadWorkspaces(
             workspaces: [], panes: [], focusedPaneID: nil, statuses: [:], projectLabels: [:],
             remoteMachines: [

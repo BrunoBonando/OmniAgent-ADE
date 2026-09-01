@@ -1204,7 +1204,6 @@ final class NavigationSidebarView: NSView {
         eventTimes: [String: Double] = [:],
         customizations: [String: WorkspaceCustomization] = [:],
         sessionMeta: [String: SessionMeta] = [:],
-        remoteControlWorkspaceIDs: Set<String> = [],
         remoteMachines: [RemoteMachineTreeEntry] = [],
         /// Which machines are watching each workspace right now, workspace
         /// id -> machine names (the phase 2 spec's §5). Empty for all but the
@@ -1223,7 +1222,6 @@ final class NavigationSidebarView: NSView {
                     label: custom?.displayName ?? workspace.label,
                     sessions: grouped.first { $0.project == workspace.id }?.sessions ?? [],
                     tint: custom?.color?.tint,
-                    remoteControl: remoteControlWorkspaceIDs.contains(workspace.id),
                     viewerNames: remoteViewerNames[workspace.id] ?? []
                 )
             )
@@ -1237,7 +1235,6 @@ final class NavigationSidebarView: NSView {
                         ?? SessionOutline.projectLabel(node.project, labels: projectLabels),
                     sessions: node.sessions,
                     tint: custom?.color?.tint,
-                    remoteControl: remoteControlWorkspaceIDs.contains(node.project),
                     viewerNames: remoteViewerNames[node.project] ?? []
                 )
             )

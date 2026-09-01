@@ -12,10 +12,13 @@ import XCTest
 /// it. Everything under this is already landed — the daemon keeps the
 /// registry, pushes `RemoteViewers` and answers `DisconnectViewer` — so what
 /// these tests pin is the last mile: the roster becoming a number beside the
-/// globe, a machine name under the pane's card, a kick that reaches the
-/// daemon, and the one thing the app owes the daemon in return — clearing
-/// `remote_control_blocked` when sharing is switched back on, without which
-/// a kick is permanent.
+/// workspace row, a machine name under the pane's card, and a kick that
+/// reaches the daemon.
+///
+/// Clearing `remote_control_blocked` on enable was this suite's fourth
+/// thing, and is deleted with it: the 2026-09-01 remote environment sharing
+/// spec (§2, §7) stops forgiving a blocked machine on enable at all —
+/// `RemoteSharingModelTests` pins the replacement (explicit Unblock only).
 final class RemotePresenceTests: XCTestCase {
     // MARK: - The three the plan named
 
@@ -28,17 +31,6 @@ final class RemotePresenceTests: XCTestCase {
             .init(viewerID: "v2", machineName: "MBP", sessions: ["s1"], since: "2026-08-31T10:01:00Z")])
         XCTAssertEqual(controller.remoteViewerCount(forWorkspace: "/a"), 2)
         XCTAssertEqual(controller.remoteViewerNames(forPane: "s1"), ["Air", "MBP"])
-    }
-
-    /// The daemon only ever *adds* to `remote_control_blocked` — it is the
-    /// enforcer, and the kick has to hold with the app closed. Clearing it is
-    /// the app's half of that contract, and the deliberate act the spec picks
-    /// is turning Remote Control on.
-    func testEnablingRemoteControlClearsTheBlocklist() {
-        let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
-        controller.toggleRemoteControl(workspaceID: "/a")      // on
-        XCTAssertEqual(controller.lastWrittenSetting(SettingsKey.remoteControlBlocked), "[]",
-                       "turning sharing back on is how a kicked Mac is forgiven")
     }
 
     /// Disconnect reaches the daemon with the viewer id, and the machine
@@ -103,7 +95,6 @@ final class RemotePresenceTests: XCTestCase {
     /// many", never "who".
     func testTheWorkspaceRowWearsTheCountOnlyWhileSomeoneIsWatching() throws {
         let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
-        controller.toggleRemoteControl(workspaceID: "/a")
         let row = try XCTUnwrap(firstWorkspaceRow(in: controller.shellSidebar.workspacesTree))
         XCTAssertTrue(row.viewerBadge.isHidden, "nobody watching, no badge")
 
@@ -123,7 +114,6 @@ final class RemotePresenceTests: XCTestCase {
     /// action.
     func testClickingTheCountAsksForTheViewerList() throws {
         let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
-        controller.toggleRemoteControl(workspaceID: "/a")
         controller.applyRemoteViewers([
             .init(viewerID: "v1", machineName: "Air", sessions: ["s1"], since: "…"),
         ])
@@ -191,23 +181,6 @@ final class RemotePresenceTests: XCTestCase {
         XCTAssertEqual(RemoteViewersView.connectedText(since: start, now: base.addingTimeInterval(300)), "5 min")
         XCTAssertEqual(RemoteViewersView.connectedText(since: start, now: base.addingTimeInterval(7_200)), "2 hr")
         XCTAssertEqual(RemoteViewersView.connectedText(since: "…", now: base), "")
-    }
-
-    /// The one the dedupe in `write(_:to:)` would otherwise eat. The daemon
-    /// writes this row too, so "the app already wrote `[]`" is never proof
-    /// that the row on disk *is* `[]` — a second enable after a kick has to
-    /// reach disk or the kicked Mac is blocked forever.
-    func testASecondEnableClearsTheBlocklistAgainAfterADaemonSideKick() {
-        let controller = makeController(panes: [pane("s1", project: "/a", group: "g1")])
-        controller.toggleRemoteControl(workspaceID: "/a")   // on  — clears
-        controller.connectionDouble.written.removeValue(forKey: SettingsKey.remoteControlBlocked)
-        controller.toggleRemoteControl(workspaceID: "/a")   // off — no clear
-        XCTAssertNil(
-            controller.lastWrittenSetting(SettingsKey.remoteControlBlocked),
-            "turning sharing off forgives nobody"
-        )
-        controller.toggleRemoteControl(workspaceID: "/a")   // on  — clears again
-        XCTAssertEqual(controller.lastWrittenSetting(SettingsKey.remoteControlBlocked), "[]")
     }
 
     /// The standing "Spotlight finds everything" rule over the popover: the

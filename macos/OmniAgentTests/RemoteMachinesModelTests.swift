@@ -880,7 +880,6 @@ final class RemotePanesTests: XCTestCase {
         controller.sessionEnsurer = { _ in }
         controller.showWindow(nil)
         controller.applyRestoredPanes([])
-        controller.toggleRemoteControl(workspaceID: "remote:d1")
         writes.removeAll()
 
         controller.openRemoteSession(deviceID: "d1", sessionID: "s1", title: "Build")

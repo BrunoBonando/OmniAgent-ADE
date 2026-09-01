@@ -89,26 +89,22 @@ enum RemoteControlProjection {
         }
     }
 
-    /// The host's tree, projected: enabled workspaces only — every one of
-    /// them, in the order their first pane appears (the sidebar's order),
-    /// with the enabled ones that have nothing running after them, sorted so
-    /// the row is stable.
+    /// The host's tree, projected: **every** workspace with a live pane, in
+    /// the order their first pane appears (the sidebar's order). Until
+    /// 2026-09-01 this filtered to a per-workspace enable set
+    /// (`enabledWorkspaceIDs`); the remote environment sharing spec deletes
+    /// that set (§1) — sharing is now the single `remote_sharing` switch
+    /// (`RemoteSharingModel`), so what this Mac *offers* is simply what this
+    /// Mac has open, unconditionally. A workspace nobody may reach is kept
+    /// unreachable by the daemon's own gating (`remote_sharing.enabled` plus
+    /// the lease/allowlist), not by leaving it out of this row.
     ///
     /// Grouped by `SessionOutline.group` — the *same* function the host
     /// sidebar uses — which is what guarantees the two structures cannot
     /// drift: one session with three panes is one row with three pane dots on
     /// both Macs, named the same thing, in the same order.
-    ///
-    /// An enabled workspace with no sessions is listed with an empty
-    /// `sessions` array rather than dropped. That is load-bearing: the daemon
-    /// keeps its control channel open *iff* the projection lists ≥ 1
-    /// workspace, so dropping the empty ones would close the tunnel the
-    /// instant a user enabled Remote Control on a workspace that happens to
-    /// have nothing running — the machine would go OFFLINE seconds after
-    /// being turned on, which is the opposite of what the toggle says.
     static func build(
         panes: [PaneDescriptor],
-        enabledWorkspaceIDs: Set<String>,
         workspaceLabels: [String: String],
         tints: [String: NSColor]
     ) -> Payload {
@@ -118,13 +114,11 @@ enum RemoteControlProjection {
         // re-shared (`localPaneDescriptors` already filters those out at the
         // call site; this is the same rule stated where the trust boundary
         // lives).
-        let shared = panes.filter { pane in
-            enabledWorkspaceIDs.contains(pane.project) && !pane.sessionID.isEmpty && !pane.isRemote
-        }
+        let shared = panes.filter { pane in !pane.sessionID.isEmpty && !pane.isRemote }
         var descriptors: [String: PaneDescriptor] = [:]
         for pane in shared { descriptors[pane.sessionID] = pane }
 
-        var workspaces = SessionOutline.group(shared, focusedPaneID: nil)
+        let workspaces = SessionOutline.group(shared, focusedPaneID: nil)
             .enumerated()
             .map { index, node in
                 Workspace(
@@ -154,21 +148,6 @@ enum RemoteControlProjection {
                     }
                 )
             }
-
-        // Enabled but with nothing running: appended in sorted order, so the
-        // list is stable across runs (`Set` has no order of its own).
-        let listed = Set(workspaces.map(\.id))
-        for project in enabledWorkspaceIDs.sorted() where !listed.contains(project) {
-            workspaces.append(
-                Workspace(
-                    id: project,
-                    name: name(project, labels: workspaceLabels),
-                    tint: tints[project].flatMap(hex),
-                    order: workspaces.count,
-                    sessions: []
-                )
-            )
-        }
         return Payload(workspaces: workspaces)
     }
 

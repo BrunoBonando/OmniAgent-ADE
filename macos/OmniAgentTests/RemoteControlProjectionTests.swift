@@ -8,13 +8,19 @@ import XCTest
 /// phase-2 shape ("The viewer's sidebar mirrors the host",
 /// docs/superpowers/specs/2026-08-31-remote-session-control-phase-2-design.md).
 ///
-/// Three facts are pinned here because both the Rust side and the viewer
-/// depend on them: the projection carries *only* enabled workspaces (it is
-/// the whole trust boundary — nothing else on this Mac is ever visible
-/// remotely), the JSON keys are the exact contract `relay.rs`/`server.rs`
-/// deserialize, and the tree is the host's own — workspace → session → panes,
-/// derived from the same `SessionOutline.group` the local sidebar renders,
-/// which is what makes the two sidebars structurally identical.
+/// Two facts are pinned here because both the Rust side and the viewer
+/// depend on them: the JSON keys are the exact contract
+/// `relay.rs`/`server.rs` deserialize, and the tree is the host's own —
+/// workspace → session → panes, derived from the same `SessionOutline.group`
+/// the local sidebar renders, which is what makes the two sidebars
+/// structurally identical.
+///
+/// Until 2026-09-01 a third fact lived here too: the projection carried only
+/// an *enabled* subset of workspaces, which was the whole trust boundary.
+/// The remote environment sharing spec deletes that subset (§1) — every
+/// workspace with a live pane is projected now, unconditionally, and what a
+/// remote client may actually reach is the daemon's `remote_sharing` gate
+/// and allowlist, not this row's contents.
 final class RemoteControlProjectionTests: XCTestCase {
     private func pane(
         _ id: String,
@@ -43,7 +49,7 @@ final class RemoteControlProjectionTests: XCTestCase {
             panes: [pane("s1", project: "/a", group: "g1", groupLabel: "Session 1", label: "claude"),
                     pane("s2", project: "/a", group: "g1", groupLabel: "Session 1", label: "shell"),
                     pane("s3", project: "/a", group: "g1", groupLabel: "Session 1", label: "logs")],
-            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
+            workspaceLabels: ["/a": "Alpha"], tints: [:])
 
         XCTAssertEqual(payload.version, 2)
         XCTAssertEqual(payload.workspaces.count, 1)
@@ -59,7 +65,7 @@ final class RemoteControlProjectionTests: XCTestCase {
     func testOrderingAndTintSurviveTheRoundTrip() {
         let payload = RemoteControlProjection.build(
             panes: [pane("s1", project: "/b", group: "g2"), pane("s2", project: "/a", group: "g1")],
-            enabledWorkspaceIDs: ["/a", "/b"], workspaceLabels: ["/a": "Alpha", "/b": "Beta"],
+            workspaceLabels: ["/a": "Alpha", "/b": "Beta"],
             tints: ["/a": NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)])
         XCTAssertEqual(payload.workspaces.map(\.order), [0, 1])
         XCTAssertEqual(payload.workspaces.first { $0.id == "/a" }?.tint, "#FF0000")
@@ -84,7 +90,7 @@ final class RemoteControlProjectionTests: XCTestCase {
         let payload = RemoteControlProjection.build(
             panes: [pane("s1", project: "/a", group: "g1", groupLabel: "Session 1"),
                     pane("s2", project: "/a", group: "g1", groupLabel: "Session 1")],
-            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
+            workspaceLabels: ["/a": "Alpha"], tints: [:])
         let entries = RemoteControlProjection.treeEntries(payload)
         XCTAssertEqual(entries.map(\.label), ["Alpha"])
         XCTAssertEqual(entries[0].sessions.count, 1)
@@ -101,7 +107,6 @@ final class RemoteControlProjectionTests: XCTestCase {
     func testEncodedJSONIsTheDaemonsContract() {
         let payload = RemoteControlProjection.build(
             panes: [pane("s1", project: "/a", group: "g1", groupLabel: "one", label: "editor", engine: .claude)],
-            enabledWorkspaceIDs: ["/a"],
             workspaceLabels: ["/a": "Alpha"],
             tints: ["/a": NSColor(srgbRed: 0, green: 0.5, blue: 1, alpha: 1)]
         )
@@ -111,51 +116,35 @@ final class RemoteControlProjectionTests: XCTestCase {
         )
     }
 
-    /// Only enabled workspaces are ever projected — the projection *is* the
-    /// trust boundary, so a workspace nobody shared has to be absent, not
-    /// merely unlisted somewhere else.
-    func testOnlyEnabledWorkspacesAreProjected() {
+    /// Every workspace with a live pane is projected now — no enable set to
+    /// filter by (2026-09-01 remote environment sharing spec §1/§2: sharing
+    /// is the single `remote_sharing` switch, and what a remote client may
+    /// actually reach is the daemon's own gate, not this row's contents).
+    /// This is `testOnlyEnabledWorkspacesAreProjected`'s replacement: the
+    /// case that used to assert `/b` was excluded now asserts it is included.
+    func testEveryWorkspaceWithALivePaneIsProjected() throws {
         let payload = RemoteControlProjection.build(
             panes: [pane("s1", project: "/a", group: "g1", label: "one"),
                     pane("s2", project: "/b", group: "g2")],
-            enabledWorkspaceIDs: ["/a"],
-            workspaceLabels: ["/a": "Alpha"],
+            workspaceLabels: ["/a": "Alpha", "/b": "Beta"],
             tints: [:]
         )
-        XCTAssertEqual(payload.workspaces.map(\.id), ["/a"])
-        XCTAssertEqual(payload.workspaces[0].name, "Alpha")
-        XCTAssertEqual(payload.workspaces[0].sessions.flatMap(\.panes).map(\.id), ["s1"])
-        XCTAssertEqual(payload.workspaces[0].sessions[0].panes[0].engine, "shell")
-        XCTAssertEqual(payload.workspaces[0].sessions[0].panes[0].kind, "terminal")
+        XCTAssertEqual(payload.workspaces.map(\.id).sorted(), ["/a", "/b"])
+        let alpha = try XCTUnwrap(payload.workspaces.first { $0.id == "/a" })
+        XCTAssertEqual(alpha.name, "Alpha")
+        XCTAssertEqual(alpha.sessions.flatMap(\.panes).map(\.id), ["s1"])
+        XCTAssertEqual(alpha.sessions[0].panes[0].engine, "shell")
+        XCTAssertEqual(alpha.sessions[0].panes[0].kind, "terminal")
+        XCTAssertEqual(payload.workspaces.first { $0.id == "/b" }?.name, "Beta")
     }
 
-    /// An enabled workspace with nothing running is listed with an empty
-    /// `sessions` array, not dropped. The daemon keeps its control channel
-    /// open iff the projection lists >= 1 workspace, so dropping it would
-    /// close the tunnel the instant a user enabled Remote Control on an idle
-    /// workspace — the Mac would read as offline seconds after being turned
-    /// on. Idle workspaces sort after the busy ones, so the row is stable
-    /// across runs (`Set` has no order of its own).
-    func testAnEnabledWorkspaceWithNoSessionsIsStillProjected() {
+    /// No live panes at all is an empty projection, not an absent row: the
+    /// daemon closes its control channel on exactly this value (independent
+    /// of `remote_sharing` now, but still the value a launch with nothing
+    /// open writes).
+    func testNoPanesProjectsNoWorkspaces() {
         let payload = RemoteControlProjection.build(
-            panes: [pane("s1", project: "/a", group: "g1")],
-            enabledWorkspaceIDs: ["/a", "/b", "/c"],
-            workspaceLabels: ["/b": "Beta"],
-            tints: [:]
-        )
-        XCTAssertEqual(payload.workspaces.map(\.id), ["/a", "/b", "/c"])
-        XCTAssertEqual(payload.workspaces.map(\.order), [0, 1, 2])
-        XCTAssertEqual(payload.workspaces[1].name, "Beta")
-        XCTAssertEqual(payload.workspaces[1].sessions, [])
-        XCTAssertEqual(payload.workspaces[2].sessions, [])
-    }
-
-    /// Nothing enabled is an empty projection, not an absent row: the daemon
-    /// closes its control channel on exactly this value.
-    func testNothingEnabledProjectsNoWorkspaces() {
-        let payload = RemoteControlProjection.build(
-            panes: [pane("s1", project: "/a", group: "g1")],
-            enabledWorkspaceIDs: [],
+            panes: [],
             workspaceLabels: [:],
             tints: [:]
         )

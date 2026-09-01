@@ -145,8 +145,10 @@ enum SettingsKey {
     /// **A contract with the Rust daemon, not with the web build** — the
     /// remote-session-control spec's §2
     /// (docs/superpowers/specs/2026-08-30-remote-session-control-design.md).
-    /// What this Mac offers to remote viewers, derived from the layout and
-    /// `remoteControlWorkspaces`:
+    /// What this Mac offers to remote viewers, derived from the live layout —
+    /// every workspace, unconditionally, since the 2026-09-01 remote
+    /// environment sharing spec (§1/§2) deletes the per-workspace enable set
+    /// this used to be filtered by:
     /// `{"workspaces":[{"id","name","sessions":[{"id","title","engine","group"}]}]}`
     /// — see `RemoteControlProjection`. The daemon deserializes this row on
     /// every authorization decision for a remote connection, so the key names
@@ -154,12 +156,15 @@ enum SettingsKey {
     /// alone. No TypeScript twin, by design.
     static let remoteControl = "remote_control"
 
-    /// Native-only — the workspace ids the user turned Remote Control on
-    /// for, as a JSON array of ids (`ClosedWorkspacesCodec`'s shape). The
-    /// user's *intent*; `remoteControl` above is what that intent projects
-    /// to right now. Kept apart so enabling a workspace with nothing running
-    /// survives until something does.
-    static let remoteControlWorkspaces = "remote_control_workspaces"
+    /// The machine-wide sharing switch (2026-09-01 remote environment
+    /// sharing spec §2): `{"enabled":true|false}`. Replaces
+    /// `remoteControlWorkspaces` (deleted with this change — sharing is one
+    /// switch, not a set of enabled workspaces) and, eventually,
+    /// `remoteControl` above, which survives until Phase 5 only because the
+    /// viewer's sidebar still reads it. Read and written by
+    /// `RemoteSharingModel`; the daemon's `remote_control_active` reads this
+    /// exact row and shape.
+    static let remoteSharing = "remote_sharing"
 
     /// **A contract with the Rust daemon** — the spec's §2 "Host
     /// authentication — device tokens". `{"device_id","token","name","relay_url"}`,

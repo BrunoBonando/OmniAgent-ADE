@@ -208,11 +208,14 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(WorkspaceRowView(id: "p1", label: "A", expanded: false).folderGlyph.glyph, .folder)
     }
 
-    /// A workspace offered to other machines wears the globe, and one that
-    /// is not wears nothing — the only place the sidebar admits that
-    /// something on this Mac is reachable from elsewhere (the
-    /// remote-session-control spec's §2).
-    func testTheGlobeShowsOnlyWhileRemoteControlIsOn() throws {
+    /// The globe is gone from the local tree (2026-09-01 remote environment
+    /// sharing spec §1: sharing is one machine-wide switch, not a
+    /// per-workspace checkmark) — but `WorkspaceRowView` still carries the
+    /// remote glyph itself, since the mirrored tree's `.viewing` rows
+    /// (`renderRemoteMachines`) still wear it for a workspace shared *from
+    /// another Mac*. This pins both halves: the glyph mechanism still works
+    /// when asked for directly, and the local project tree never asks.
+    func testTheRemoteGlyphStillWorksButTheLocalTreeNeverShowsIt() throws {
         XCTAssertFalse(WorkspaceRowView(id: "p1", label: "A", expanded: true, remoteControl: true).remoteGlyph.isHidden)
         XCTAssertTrue(WorkspaceRowView(id: "p1", label: "A", expanded: true).remoteGlyph.isHidden)
 
@@ -223,12 +226,12 @@ final class WorkspaceShellTests: XCTestCase {
         tree.frame = NSRect(x: 0, y: 0, width: ShellMetrics.sidebarWidth, height: 500)
         tree.reload(
             entries: [
-                WorkspaceTreeEntry(id: "p1", label: "Alpha", sessions: [], remoteControl: true),
+                WorkspaceTreeEntry(id: "p1", label: "Alpha", sessions: []),
             ],
             focusedPaneID: nil,
             statuses: [:]
         )
-        XCTAssertFalse(try XCTUnwrap(tree.descendant(WorkspaceRowView.self)).remoteGlyph.isHidden)
+        XCTAssertTrue(try XCTUnwrap(tree.descendant(WorkspaceRowView.self)).remoteGlyph.isHidden)
     }
 
     /// The session row aggregates its blocked terminals minus the focused one
