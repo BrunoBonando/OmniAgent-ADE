@@ -22,21 +22,25 @@ final class MenuBarControllerTests: XCTestCase {
             into: menu,
             summary: MenuBarSummary(),
             accountLabel: "Bruno Bonando",
+            shareState: .off,
             revealSession: { _ in XCTFail("nothing to reveal") },
             createInWorkspace: { _ in },
             chooseFolder: {},
+            toggleSharing: {},
             showSettings: {},
             quit: {}
         )
 
         // Account line, headline, separator, Create Session…, separator,
-        // Settings…, separator, Quit — nothing about sessions when there
-        // are none.
+        // Share this environment, separator, Settings…, separator, Quit —
+        // nothing about sessions when there are none.
         XCTAssertEqual(menu.items.map(\.title), [
             "Logged in as Bruno Bonando",
             "0 sessions · 0 terminals · 0 working agents",
             "",
             "Create Session…",
+            "",
+            "Share this environment",
             "",
             "Settings…",
             "",
@@ -63,9 +67,11 @@ final class MenuBarControllerTests: XCTestCase {
             into: menu,
             summary: summary,
             accountLabel: "Bruno Bonando",
+            shareState: .off,
             revealSession: { _ in },
             createInWorkspace: { _ in },
             chooseFolder: {},
+            toggleSharing: {},
             showSettings: {},
             quit: {}
         )
@@ -88,9 +94,11 @@ final class MenuBarControllerTests: XCTestCase {
             into: menu,
             summary: summary,
             accountLabel: "Bruno Bonando",
+            shareState: .off,
             revealSession: { revealed = $0 },
             createInWorkspace: { _ in },
             chooseFolder: {},
+            toggleSharing: {},
             showSettings: {},
             quit: {}
         )
@@ -109,9 +117,11 @@ final class MenuBarControllerTests: XCTestCase {
             into: menu,
             summary: summary,
             accountLabel: "Bruno Bonando",
+            shareState: .off,
             revealSession: { _ in },
             createInWorkspace: { startedIn = $0 },
             chooseFolder: { choseFolder = true },
+            toggleSharing: {},
             showSettings: {},
             quit: {}
         )
@@ -136,9 +146,11 @@ final class MenuBarControllerTests: XCTestCase {
             into: menu,
             summary: MenuBarSummary(),
             accountLabel: "Bruno Bonando",
+            shareState: .off,
             revealSession: { _ in },
             createInWorkspace: { _ in },
             chooseFolder: {},
+            toggleSharing: {},
             showSettings: { openedSettings = true },
             quit: { quit = true }
         )
@@ -182,6 +194,90 @@ final class MenuBarControllerTests: XCTestCase {
         delegate.signedInStateChanged(true, workspace: workspace)
         XCTAssertNotNil(delegate.menuBar, "signing back in puts the item back up")
         XCTAssertFalse(delegate.menuBar === first, "a fresh controller, not the released one")
+    }
+
+    // MARK: - Sharing icon (2026-09-01 remote environment sharing spec §2)
+
+    /// Tinting a template image would leave a wash the same colour every
+    /// state, so `.sharing`/`.connected` must turn `isTemplate` off to show
+    /// their colour at all — `.off` stays a template so it keeps adapting to
+    /// light/dark menu bars the way every other status icon does.
+    func testShareIconIsTemplateOnlyWhenSharingIsOff() {
+        XCTAssertTrue(MenuBarMenu.shareIcon(.off).isTemplate)
+        XCTAssertFalse(MenuBarMenu.shareIcon(.sharing).isTemplate)
+        XCTAssertFalse(MenuBarMenu.shareIcon(.connected).isTemplate)
+    }
+
+    /// The menu's own checkmark, `WorkspacesHeaderMenus.groupBy`'s pattern —
+    /// on while sharing (or connected), off while sharing is off.
+    func testSharingToggleItemReflectsState() {
+        for (state, expected) in [(MenuBarShareState.off, NSControl.StateValue.off), (.sharing, .on), (.connected, .on)] {
+            let menu = NSMenu()
+            MenuBarMenu.build(
+                into: menu,
+                summary: MenuBarSummary(),
+                accountLabel: "Bruno",
+                shareState: state,
+                revealSession: { _ in },
+                createInWorkspace: { _ in },
+                chooseFolder: {},
+                toggleSharing: {},
+                showSettings: {},
+                quit: {}
+            )
+            let item = try! XCTUnwrap(menu.items.first { $0.title == "Share this environment" })
+            XCTAssertEqual(item.state, expected, "for \(state)")
+        }
+    }
+
+    /// Clicking the item is the one way this menu can turn sharing on or
+    /// off — `testClickingASessionRevealsIt`'s pattern.
+    func testClickingTheShareItemFiresToggleSharing() {
+        var toggled = false
+        let menu = NSMenu()
+        MenuBarMenu.build(
+            into: menu,
+            summary: MenuBarSummary(),
+            accountLabel: "Bruno",
+            shareState: .off,
+            revealSession: { _ in },
+            createInWorkspace: { _ in },
+            chooseFolder: {},
+            toggleSharing: { toggled = true },
+            showSettings: {},
+            quit: {}
+        )
+        let item = try! XCTUnwrap(menu.items.first { $0.title == "Share this environment" } as? ShellMenuItem)
+        item.performForTesting()
+        XCTAssertTrue(toggled)
+    }
+
+    /// `refreshShareIcon` is the live push `RemoteSharingModel.onChange`
+    /// drives (through `WorkspaceWindowController.onRemoteSharingChanged`,
+    /// wired by `AppDelegate`) — the icon has to update the instant sharing
+    /// is switched on from Settings, not only the next time the menu opens.
+    @MainActor
+    func testRefreshShareIconReflectsTheWorkspacesSharingState() throws {
+        let store = SettingsStore(client: FakeSettingsClient())
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-menubar-share-test.sock")),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: store),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+        let menuBar = MenuBarController(workspace: controller)
+
+        // Seeded at construction: sharing starts off.
+        XCTAssertEqual(menuBar.statusItem.button?.image?.isTemplate, true)
+
+        controller.toggleRemoteSharing()
+        XCTAssertTrue(controller.isSharingEnvironment, "the fake store's write always succeeds")
+        menuBar.refreshShareIcon()
+        XCTAssertEqual(
+            menuBar.statusItem.button?.image?.isTemplate, false,
+            "the icon turns non-template — tinted — the moment sharing goes on, without opening the menu"
+        )
     }
 
     /// A suite of its own, torn down after — never the real app's defaults,

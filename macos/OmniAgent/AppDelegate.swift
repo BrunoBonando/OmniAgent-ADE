@@ -59,6 +59,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspace.runWhenConnected {
             RemoteSharingModel.shared.configure(store: SettingsStore(client: connection))
         }
+        // The menu bar icon's live push (Task 4, §2): `workspace` is the
+        // sole subscriber to `RemoteSharingModel.shared.onChange` and has no
+        // reference to `menuBar` of its own (`menuBar` is this object's,
+        // created and released on sign-in/out), so it calls back here
+        // instead. A weak lookup through `self`, not captured once at
+        // sign-in: `menuBar` is nil while signed out and a fresh object
+        // every sign-in after the first, and this always wants whichever one
+        // currently exists.
+        workspace.onRemoteSharingChanged = { [weak self] in self?.menuBar?.refreshShareIcon() }
         // The menu bar item follows the account: created when the gate
         // resolves signed in, gone on log-out.
         workspace.onSignedInStateChanged = { [weak self, weak workspace] signedIn in
