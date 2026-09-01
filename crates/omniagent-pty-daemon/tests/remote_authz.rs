@@ -15,7 +15,12 @@
 //!    host's credentials.
 //!
 //! The end-to-end cases run the real `serve_client` handler over an in-memory
-//! `tokio::io::duplex` pipe — no unix socket, no peer-UID path.
+//! `tokio::io::duplex` pipe — no unix socket, no peer-UID path — with the
+//! machine arranged to be sharing at all (spec §2: the switch on, a device
+//! token, and the host's own app attached), since without that every remote
+//! `Hello` here would be refused before any of this file's subject came up.
+
+mod support;
 
 use omniagent_pty_daemon::protocol::{
     read_frame, write_frame, Frame, MessageKind, SessionListPayload, SessionSizePayload,
@@ -339,6 +344,10 @@ async fn remote_client_sharing(
         .unwrap()
         .set_setting("auth_signed_in", "true")
         .unwrap();
+    // Spec §2: a machine that is not sharing refuses every remote `Hello`
+    // before the trust boundary this file tests is ever reached.
+    support::enable_sharing(&ctx);
+    support::hold_local_client(&ctx).await;
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     tokio::spawn(serve_client(server_side, ctx.clone(), ClientTrust::Remote));
     (

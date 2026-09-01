@@ -29,6 +29,10 @@ use std::time::SystemTime;
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+// `tokio`'s clock rather than `std`'s, so the sharing grace
+// (`server::sharing_should_be_live`) can be moved by `tokio::time::advance`
+// in tests instead of by sleeping through it.
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocol::{
@@ -99,11 +103,14 @@ impl ConnectionEntry {
 
 /// Every live connection, by id. Cloned into each [`crate::ClientContext`].
 ///
-/// **Two locks, never held together.** `entries` and `lease` are separate
-/// mutexes, and no method in this module holds one while taking the other —
-/// that is the whole deadlock argument. [`Self::take_lease`] touches only the
-/// lease; [`Self::remove`] releases before it locks the entries map, and
-/// [`Self::cancel_viewer`] drops its guard before it releases.
+/// **Three locks, and one strict order.** `entries`, `lease` and
+/// `local_gone_since` are separate mutexes. `lease` is never held with either
+/// of the others — [`Self::take_lease`] touches only the lease,
+/// [`Self::remove`] releases it before it locks the entries map, and
+/// [`Self::cancel_viewer`] drops its guard before it releases. `entries` may
+/// be held while taking `local_gone_since` (that is [`Self::remove`], which
+/// has to change both in one section) and **never the reverse**: the readers
+/// of `local_gone_since` take nothing else.
 #[derive(Clone)]
 pub struct ConnectionRegistry {
     entries: Arc<Mutex<HashMap<u64, ConnectionEntry>>>,
@@ -116,6 +123,14 @@ pub struct ConnectionRegistry {
     /// when it matches, so a release arriving late from a connection that has
     /// already died cannot evict the viewer that took the lease after it.
     lease: Arc<Mutex<Option<(u64, LeaseHolder)>>>,
+    /// When the last [`ClientTrust::Local`] connection went away — the clock
+    /// the sharing grace runs on (`server::sharing_should_be_live`).
+    ///
+    /// `None` means *either* "a local connection is attached" *or* "none ever
+    /// has been", and no caller has to tell those apart: [`Self::has_local`]
+    /// is asked first and short-circuits the first case, while the second is
+    /// a daemon whose app has not started yet, which shares nothing anyway.
+    local_gone_since: Arc<Mutex<Option<Instant>>>,
     /// The current roster. `watch` is exactly the right shape for presence:
     /// publishing never blocks and never fails, and a receiver always observes
     /// the **latest** roster rather than a queue of superseded ones. Two rapid
@@ -133,6 +148,7 @@ impl Default for ConnectionRegistry {
             entries: Arc::default(),
             next_id: Arc::default(),
             lease: Arc::default(),
+            local_gone_since: Arc::default(),
             roster: Arc::new(roster),
         }
     }
@@ -155,6 +171,35 @@ impl ConnectionRegistry {
         self.lease
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Same reasoning as [`Self::entries`]: a poisoned lock still holds the
+    /// truth, and this one decides whether the machine is shared at all.
+    fn local_gone(&self) -> MutexGuard<'_, Option<Instant>> {
+        self.local_gone_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether the host's own app is attached right now — spec §2 condition 3,
+    /// the "icon in the menu bar" rule.
+    ///
+    /// A `Local` entry is a connection that came through the unix socket's
+    /// peer-UID check, which is to say the app on this Mac. Nothing else can
+    /// produce one: a relayed client is [`ClientTrust::Remote`] by
+    /// construction, so this cannot be satisfied from the other end of the
+    /// relay.
+    pub fn has_local(&self) -> bool {
+        self.entries()
+            .values()
+            .any(|entry| entry.trust == ClientTrust::Local)
+    }
+
+    /// When the last local connection went away, for the grace that
+    /// [`crate::sharing_should_be_live`] applies to [`Self::has_local`].
+    /// `None` while one is attached, and while none ever has been.
+    pub fn local_gone_since(&self) -> Option<Instant> {
+        *self.local_gone()
     }
 
     /// Claims the machine for this connection: `Ok(())` if it now holds the
@@ -207,6 +252,13 @@ impl ConnectionRegistry {
                 since: SystemTime::now(),
             },
         );
+        if trust == ClientTrust::Local {
+            // The app is back, so there is no absence to time. Clearing is not
+            // load-bearing — `has_local` is asked first and would short-circuit
+            // a stale timestamp — but a marker that outlived what it recorded
+            // is a trap for the next reader.
+            *self.local_gone() = None;
+        }
         id
     }
 
@@ -217,11 +269,29 @@ impl ConnectionRegistry {
     /// site is what makes "the lease is always released" structural: there is
     /// no way to take a connection out of this registry that leaves it
     /// holding the machine.
+    ///
+    /// The grace clock starts here too, for the same reason: the moment the
+    /// host's *last* local connection leaves this map is the moment sharing
+    /// has a deadline on it, and there is no other way out of the map.
     pub fn remove(&self, id: u64) -> bool {
         self.release_lease(id);
-        self.entries()
-            .remove(&id)
-            .is_some_and(|entry| entry.is_listed_viewer())
+        let mut entries = self.entries();
+        let removed = entries.remove(&id);
+        let was_local = removed
+            .as_ref()
+            .is_some_and(|entry| entry.trust == ClientTrust::Local);
+        if was_local
+            && !entries
+                .values()
+                .any(|entry| entry.trust == ClientTrust::Local)
+        {
+            // Under the entries guard on purpose: "no local is left" and "the
+            // absence started now" have to become true together, or a local
+            // connection arriving in between would leave behind a timestamp
+            // for an absence that never happened.
+            *self.local_gone() = Some(Instant::now());
+        }
+        removed.is_some_and(|entry| entry.is_listed_viewer())
     }
 
     /// Returns whether the roster changed.

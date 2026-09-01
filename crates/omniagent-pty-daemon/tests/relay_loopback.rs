@@ -9,6 +9,8 @@
 //! stops the daemon dialling until the token row changes, and a relay that
 //! goes silent is dropped and re-dialled.
 
+mod support;
+
 use futures_util::{SinkExt, StreamExt};
 use omniagent_pty_daemon::protocol::{Frame, MessageKind};
 use omniagent_pty_daemon::{run_relay, run_relay_with, ClientContext, CreateSession, DaemonServer};
@@ -59,6 +61,27 @@ async fn start_daemon_with_projection(
     projection: &str,
     sharing_enabled: bool,
 ) -> (ClientContext, oneshot::Sender<()>) {
+    let (ctx, stop) = boot_daemon(root, port, projection, sharing_enabled).await;
+    // The host's own app. Spec §2's third condition: the daemon holds no
+    // control channel at all without a local connection, so every test here
+    // that expects a dial has to arrange one — and the two tests that use
+    // [`boot_daemon`] directly are the ones about not having it.
+    support::hold_local_client(&ctx).await;
+    match ping_every {
+        Some(every) => tokio::spawn(run_relay_with(ctx.clone(), every)),
+        None => tokio::spawn(run_relay(ctx.clone())),
+    };
+    (ctx, stop)
+}
+
+/// The daemon, the session, the settings rows — everything except the host's
+/// own app and the relay task, which the local-app tests arrange themselves.
+async fn boot_daemon(
+    root: &std::path::Path,
+    port: u16,
+    projection: &str,
+    sharing_enabled: bool,
+) -> (ClientContext, oneshot::Sender<()>) {
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
         root.join("brain-data"),
@@ -94,10 +117,6 @@ async fn start_daemon_with_projection(
             .unwrap();
     }
     ctx.settings_changed.notify_one();
-    match ping_every {
-        Some(every) => tokio::spawn(run_relay_with(ctx.clone(), every)),
-        None => tokio::spawn(run_relay(ctx.clone())),
-    };
     (ctx, stop)
 }
 
@@ -422,6 +441,85 @@ async fn sharing_enabled_dials_the_relay_even_with_an_empty_projection() {
         .unwrap()
         .unwrap();
     assert!(hello.to_text().unwrap().contains("Test Mac"));
+}
+
+/// Spec §2 condition 3 at the tunnel, and with it the no-chaining property of
+/// §3: with the switch on and the token written, a machine whose app is not
+/// attached does not dial the relay at all — and it becomes reachable, with no
+/// settings write of any kind, the moment its app connects.
+///
+/// That second half is the one a `Notify` alone cannot do: a local connection
+/// appearing pokes nothing, so the relay has to be re-testing on a tick or an
+/// app restart would leave the machine dark until the next time anything wrote
+/// a setting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_local_app_means_no_tunnel_until_one_connects() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // Everything `start_daemon_with_relay` does, minus the host's own app.
+    let (ctx, _stop) = boot_daemon(root.path(), port, PROJECTION, true).await;
+    tokio::spawn(run_relay(ctx.clone()));
+
+    let dialled = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+    assert!(
+        dialled.is_err(),
+        "a Mac with no app attached dialled the relay"
+    );
+
+    support::hold_local_client(&ctx).await;
+    let (mut control, path, _) = accept_ws(&listener).await;
+    assert_eq!(path, "/v1/device");
+    let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .expect("the tunnel must come up once the app is attached")
+        .unwrap()
+        .unwrap();
+    assert!(hello.to_text().unwrap().contains("Test Mac"));
+}
+
+/// The grace, at the tunnel: the app going away holds the control channel open
+/// for a few seconds and then closes it.
+///
+/// Real seconds, deliberately — this is the one test that exercises the timer
+/// wiring rather than the condition, and a paused clock cannot be mixed with
+/// the real sockets this file is built on without making every I/O timeout
+/// fire early.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_tunnel_closes_once_the_local_app_has_been_gone_past_the_grace() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ctx, _stop) = boot_daemon(root.path(), port, PROJECTION, true).await;
+    let app = support::hold_local_client(&ctx).await;
+    tokio::spawn(run_relay(ctx.clone()));
+
+    let (mut control, _, _) = accept_ws(&listener).await;
+    let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(hello.to_text().unwrap().contains("Test Mac"));
+
+    // The app quits — a `rebuild-app.sh` restart, or an app that has gone to
+    // drive another Mac. Aborting the task that owns it drops its end of the
+    // pipe, which is what quitting does.
+    app.abort();
+    let inside_the_grace = tokio::time::timeout(Duration::from_secs(2), control.next()).await;
+    assert!(
+        inside_the_grace.is_err(),
+        "the control socket closed inside the grace: {inside_the_grace:?}"
+    );
+
+    let closed = tokio::time::timeout(Duration::from_secs(8), control.next())
+        .await
+        .expect("the control socket must close once the grace expires");
+    assert!(
+        matches!(closed, None | Some(Ok(Message::Close(_))) | Some(Err(_))),
+        "expected the control socket to close, got {closed:?}"
+    );
 }
 
 /// The other half of the same rule: sharing off, no tunnel — even with a

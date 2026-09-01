@@ -184,11 +184,112 @@ pub fn remote_session_ids(store: &Store) -> HashSet<String> {
         .collect()
 }
 
+/// How long sharing survives the last local connection going away (spec §2).
+///
+/// An app reconnect must not flap a live remote session, and a
+/// `rebuild-app.sh` restart — which quits the app, replaces the bundle and
+/// relaunches — is routine here. Five seconds is far longer than either takes
+/// and far shorter than a machine's app staying away for any other reason.
+pub const LOCAL_ABSENCE_GRACE: Duration = Duration::from_secs(5);
+
+/// Whether this machine should be reachable at all: the three-way test of
+/// spec §2, and the daemon's answer to "is the icon in the menu bar".
+///
+/// 1. the sharing switch is on ([`remote_control_active`]),
+/// 2. a device token exists, so this Mac is paired with the relay,
+/// 3. the host's own app is attached — or was, within
+///    [`LOCAL_ABSENCE_GRACE`].
+///
+/// **Condition 3 is what makes chaining structurally impossible** (spec §3,
+/// "One remote session per machine, in either direction"), and that is a
+/// security property rather than a nicety. A Mac that is driving another has
+/// swapped its single app connection away from its own daemon: it has no
+/// local connection, so this test fails on it, its relay control channel
+/// closes and it refuses everyone inbound. So a machine being driven can
+/// never be made to reach onward to a third, and a machine that is driving
+/// cannot simultaneously be driven — with no rule to enforce, no list to keep
+/// and nothing to get out of sync. When the driving app comes home its local
+/// connection returns and sharing resumes by itself.
+///
+/// The corollary is the thing to protect, and it is **the app's half of an
+/// invariant this function cannot hold alone**: while it drives another
+/// machine, the app must not still be attached to its own daemon. A second
+/// connection kept for any reason satisfies condition 3 on a machine that is
+/// busy driving, and chaining becomes possible again with nothing here
+/// failing and no test going red. The phase-2 app model — a connection per
+/// remote machine alongside the local one (`RemoteMachinesModel`,
+/// `WorkspaceWindowController.connection(forPane:)`) — is exactly that shape,
+/// which is why spec §1/§3 replace it with a single connection the window
+/// *swaps*. Anyone adding a second local connection is undoing this.
+///
+/// Both callers pass the same two things: `relay.rs` asks it to decide
+/// whether to hold the control channel, and the `Hello` arm asks it again
+/// before admitting a remote client, because the relay's answer can be up to
+/// a recheck interval stale and a refusal is cheap.
+pub fn sharing_should_be_live(store: &Store, connections: &ConnectionRegistry) -> bool {
+    remote_control_active(store)
+        && store
+            .get_setting(crate::relay::DEVICE_TOKEN_KEY)
+            .ok()
+            .flatten()
+            .is_some()
+        && local_app_attached(connections)
+}
+
+/// Condition 3 of [`sharing_should_be_live`], with its grace.
+///
+/// The grace is deliberately read off the registry rather than kept by a
+/// timer: there is no task to cancel, nothing to reset on a reconnect, and no
+/// state that can survive the connection it describes. `has_local` first, so
+/// an attached app never consults a timestamp at all.
+fn local_app_attached(connections: &ConnectionRegistry) -> bool {
+    connections.has_local()
+        || connections
+            .local_gone_since()
+            .is_some_and(|gone| gone.elapsed() < LOCAL_ABSENCE_GRACE)
+}
+
+/// `Some(name)` when a remote `Hello` has to be refused because this machine
+/// is not sharing, `None` when it may proceed.
+///
+/// The name is **this Mac's own**, as it announced itself to the relay at
+/// pairing, because "‹machine› is not available" is a sentence a viewer shows
+/// about the machine it dialled — naming the caller instead would tell a
+/// MacBook Pro that MacBook Pro is unavailable. Before pairing, or with a
+/// token row that does not parse, the daemon does not know what it is called
+/// and says so generically; both are states in which it is refusing anyway.
+///
+/// A store that cannot be locked refuses too: a sharing switch that fails
+/// open is not a switch.
+fn unavailable_as(
+    settings: &std::sync::Mutex<Store>,
+    connections: &ConnectionRegistry,
+) -> Option<String> {
+    const UNNAMED_HOST: &str = "This Mac";
+    let Ok(store) = lock_store(settings) else {
+        return Some(UNNAMED_HOST.to_owned());
+    };
+    if sharing_should_be_live(&store, connections) {
+        return None;
+    }
+    Some(
+        store
+            .get_setting(crate::relay::DEVICE_TOKEN_KEY)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<crate::relay::DeviceCredential>(&raw).ok())
+            .map(|credential| credential.name)
+            .unwrap_or_else(|| UNNAMED_HOST.to_owned()),
+    )
+}
+
 /// Whether this machine is sharing its environment — the daemon's half of
 /// "the tunnel should be up". Phase 3 replaces the old "the projection lists
 /// ≥ 1 workspace" test with one flag; a malformed or absent row is off,
-/// because a sharing switch that fails open is not a switch. Phase 2 Task 11
-/// extends this same function with the local-connection condition.
+/// because a sharing switch that fails open is not a switch.
+///
+/// This is the *settings* half only. The whole condition, local app included,
+/// is [`sharing_should_be_live`], which wraps this.
 pub fn remote_control_active(store: &Store) -> bool {
     store
         .get_setting(REMOTE_SHARING_KEY)
@@ -592,6 +693,29 @@ where
         )
         .await?;
         return Ok(());
+    }
+    // Is this machine reachable at all (spec §2 condition 3, §3 "One remote
+    // session per machine, in either direction")? See
+    // [`sharing_should_be_live`] for why the local-app condition is what makes
+    // chaining impossible rather than merely forbidden.
+    //
+    // Asked here as well as in `relay.rs` because the relay's answer is a
+    // second old at worst — it re-tests on a tick — and because a daemon that
+    // enforced this only where the tunnel is opened would be relying on the
+    // tunnel to be the only way in.
+    //
+    // **First of the viewer-specific refusals, and before the lease.** A
+    // machine that is not sharing owes every caller the same sentence: whether
+    // this particular viewer is also blocked, or whether someone else is
+    // driving, is not something an unshared Mac should be answering. And a
+    // refusal must never take the lease on its way out (`remote_lease.rs`).
+    // The version check stays ahead of it, because a peer on the old protocol
+    // has to be refused in a dialect it can decode.
+    if trust == ClientTrust::Remote {
+        if let Some(host) = unavailable_as(&settings, &connections) {
+            send_error(&writer, request, anyhow!("{host} is not available")).await?;
+            return Ok(());
+        }
     }
     // The blocklist is checked here — before the ack, and by the daemon rather
     // than the app — because a kick has to hold against a viewer that still

@@ -3,13 +3,17 @@
 //!
 //! It is the same shape `remote_authz.rs` uses inline — a real
 //! [`DaemonServer`], its [`ClientContext`] cloned into [`serve_client`] over
-//! an in-memory pipe, no unix socket and no peer-UID path — with one addition
-//! the connection-admission tests all need: a `ClientTrust::Local` client is
-//! attached and past `Hello` **before** any remote one connects. Nothing
-//! enforces that as a precondition yet; the spec's condition ("a remote
-//! connection is accepted only while a local app connection exists") lands
-//! later, and every test written against this harness inherits the
-//! arrangement it will need then.
+//! an in-memory pipe, no unix socket and no peer-UID path — with two additions
+//! the connection-admission tests all need: the sharing rows are written
+//! (`remote_sharing` on, a `relay_device_token`), and a `ClientTrust::Local`
+//! client is attached and past `Hello` **before** any remote one connects.
+//! Those three things are exactly the condition of spec §2, and the daemon now
+//! enforces them: without them every remote `Hello` here is refused with
+//! "‹machine› is not available" instead of reaching the behaviour under test.
+//!
+//! [`daemon_without_local_client`] is the same arrangement minus the third
+//! condition — the shape of a Mac whose app is away, which is a Mac that is
+//! driving another one.
 //!
 //! Not a test target itself: `tests/support/` is a directory module, so cargo
 //! compiles it into each test binary that says `mod support;` rather than
@@ -22,7 +26,10 @@ use std::time::Duration;
 use omniagent_pty_daemon::protocol::{
     read_handshake_frame, write_frame, ErrorPayload, Frame, HelloAckPayload, MessageKind,
 };
-use omniagent_pty_daemon::{serve_client, ClientContext, ClientTrust, DaemonServer};
+use omniagent_pty_daemon::{
+    serve_client, sharing_should_be_live, ClientContext, ClientTrust, DaemonServer,
+    DEVICE_TOKEN_KEY, LOCAL_ABSENCE_GRACE, REMOTE_SHARING_KEY,
+};
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
 
@@ -30,12 +37,14 @@ use tokio::sync::oneshot;
 /// behaviour missing rather than slow.
 const PATIENCE: Duration = Duration::from_secs(4);
 
-/// A running daemon with one local client on it.
+/// A running daemon, sharing switched on, with or without a local client.
 pub struct Daemon {
     pub ctx: ClientContext,
-    /// The local app's connection. Held because dropping it would close the
-    /// pipe and take away the local client the harness exists to provide.
-    _local: Client,
+    /// The local app's connection. Held because dropping it closes the pipe —
+    /// which is exactly what [`Daemon::drop_local_client`] does on purpose.
+    /// `None` once it has, and from the start for
+    /// [`daemon_without_local_client`].
+    local: Option<Client>,
     /// Ends [`DaemonServer::run_until`] when the harness drops.
     _stop: oneshot::Sender<()>,
     /// The data directory, which must outlive the store the daemon opened in
@@ -43,7 +52,61 @@ pub struct Daemon {
     _root: tempfile::TempDir,
 }
 
+/// The two settings conditions of spec §2 — the switch on, a device token
+/// present — written straight into the store.
+///
+/// This harness never starts the relay, so the token's `relay_url` names a
+/// port nothing listens on: the row is here to be *present*, and to give the
+/// daemon this Mac's own name for the refusal it writes.
+pub fn enable_sharing(ctx: &ClientContext) {
+    let store = ctx.settings.lock().unwrap();
+    store
+        .set_setting(REMOTE_SHARING_KEY, r#"{"enabled":true}"#)
+        .unwrap();
+    store
+        .set_setting(
+            DEVICE_TOKEN_KEY,
+            r#"{"device_id":"dev","token":"tok","name":"Mac Studio","relay_url":"http://127.0.0.1:1"}"#,
+        )
+        .unwrap();
+}
+
+/// Attaches a local client to `ctx` and keeps it attached for as long as the
+/// test runtime lives.
+///
+/// For the harnesses that hold no handle on the host's own app and only need
+/// one to exist, since every remote `Hello` now does (spec §2 condition 3). It
+/// is owned by a task that never speaks on it, and nothing drains it, which is
+/// safe by construction — a local connection's roster feed is its own task and
+/// can stall only itself.
+///
+/// **Abort the returned handle to quit the app**: that drops the client and
+/// with it the pipe, which is what an app quitting looks like to the daemon.
+/// Merely dropping the handle does not (a `JoinHandle` is not an owner), so a
+/// caller that wants the app to stay may discard it.
+pub async fn hold_local_client(ctx: &ClientContext) -> tokio::task::JoinHandle<()> {
+    let mut local = connect(ctx, ClientTrust::Local, "Mac Studio", None);
+    match local.hello().await {
+        HelloResult::Ack(_) => {}
+        other => panic!("the host's own connection was refused: {other:?}"),
+    }
+    tokio::spawn(async move {
+        let _local = local;
+        std::future::pending::<()>().await;
+    })
+}
+
 pub async fn daemon_with_local_client() -> Daemon {
+    let mut daemon = daemon_without_local_client().await;
+    daemon.reconnect_local_client().await;
+    daemon
+}
+
+/// A daemon that is sharing and paired but has **no app attached** — the shape
+/// of a Mac whose app has gone to drive another one, and therefore of a Mac
+/// that must refuse everyone (spec §3, "One remote session per machine, in
+/// either direction").
+pub async fn daemon_without_local_client() -> Daemon {
     let root = tempfile::tempdir().unwrap();
     let server = DaemonServer::bind_with_data_dir(
         root.path().join("runtime").join("daemon.sock"),
@@ -54,15 +117,11 @@ pub async fn daemon_with_local_client() -> Daemon {
     let ctx = server.client_context();
     let (stop, stopped) = oneshot::channel();
     tokio::spawn(server.run_until(stopped));
+    enable_sharing(&ctx);
 
-    let mut local = connect(&ctx, ClientTrust::Local, "Mac Studio", None);
-    match local.hello().await {
-        HelloResult::Ack(_) => {}
-        other => panic!("the host's own connection was refused: {other:?}"),
-    }
     Daemon {
         ctx,
-        _local: local,
+        local: None,
         _stop: stop,
         _root: root,
     }
@@ -79,6 +138,62 @@ impl Daemon {
     /// that has not been updated.
     pub fn connect_remote_with_version(&self, machine: &str, version: u8) -> Client {
         connect(&self.ctx, ClientTrust::Remote, machine, Some(version))
+    }
+
+    /// Whether this daemon would hold a relay control channel right now —
+    /// spec §2's three-way condition, asked exactly as `relay.rs` asks it.
+    pub fn sharing_is_live(&self) -> bool {
+        let store = self.ctx.settings.lock().unwrap();
+        sharing_should_be_live(&store, &self.ctx.connections)
+    }
+
+    /// Closes the host app's connection, the way quitting the app or
+    /// `rebuild-app.sh` does — and, in the case this whole condition exists
+    /// for, the way an app that has gone to drive *another* Mac does.
+    ///
+    /// Waits for the daemon to notice, because the grace starts when the
+    /// connection leaves the registry rather than when the pipe closes, and a
+    /// test that measured from the wrong moment would be measuring nothing.
+    pub async fn drop_local_client(&mut self) {
+        drop(
+            self.local
+                .take()
+                .expect("there was no local client to drop"),
+        );
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        while self.ctx.connections.has_local() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the daemon still had a local connection {PATIENCE:?} after the pipe closed"
+            );
+            // A millisecond of a paused clock, auto-advanced the moment the
+            // daemon's task has nothing left to do — so this costs a
+            // negligible slice of the grace rather than a real sleep.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// The app coming back: a fresh local connection past `Hello`.
+    pub async fn reconnect_local_client(&mut self) {
+        let mut local = connect(&self.ctx, ClientTrust::Local, "Mac Studio", None);
+        match local.hello().await {
+            HelloResult::Ack(_) => {}
+            other => panic!("the host's own connection was refused: {other:?}"),
+        }
+        self.local = Some(local);
+    }
+
+    /// Moves the paused clock on — only meaningful under
+    /// `#[tokio::test(start_paused = true)]`, which is how the grace is tested
+    /// rather than by sleeping through five real seconds.
+    pub async fn advance(&self, by: Duration) {
+        tokio::time::advance(by).await;
+    }
+
+    /// Past [`LOCAL_ABSENCE_GRACE`], with a second to spare.
+    pub async fn advance_past_the_grace(&self) {
+        self.advance(LOCAL_ABSENCE_GRACE + Duration::from_secs(1))
+            .await;
     }
 
     /// Blocks until no connection holds the lease.
@@ -133,6 +248,21 @@ impl Client {
     pub async fn hello(&mut self) -> HelloResult {
         let viewer_id = format!("v-{}", self.machine.to_lowercase().replace(' ', "-"));
         self.say_hello(Some(viewer_id)).await
+    }
+
+    /// Whether the daemon still has this connection open.
+    ///
+    /// **Terminal**: it reads, so any frame that arrives during the check is
+    /// consumed. Call it last. A closed pipe fails the read at once; an open
+    /// one simply has nothing to say, which under a paused clock costs no real
+    /// time at all.
+    pub async fn is_open(&mut self) -> bool {
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            read_handshake_frame(&mut self.stream),
+        )
+        .await
+        .map_or(true, |read| read.is_ok())
     }
 
     /// [`Self::hello`] from a client that sends no `viewer_id` — an app older

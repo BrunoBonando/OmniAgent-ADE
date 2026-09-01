@@ -5,7 +5,12 @@
 //! it and there is no way to end the connection. These tests drive the real
 //! `serve_client` handler over in-memory `tokio::io::duplex` pipes — one
 //! `Local` connection standing in for the host app, one `Remote` connection
-//! standing in for the viewer relayed from the other Mac.
+//! standing in for the viewer relayed from the other Mac. The host's app is
+//! attached first, which since Task 10 is a precondition of the viewer being
+//! admitted at all (spec §2 condition 3) rather than only the arrangement
+//! these tests want.
+
+mod support;
 
 use omniagent_pty_daemon::protocol::{
     read_frame, write_frame, Frame, MessageKind, RemoteViewersPayload,
@@ -155,6 +160,9 @@ async fn local_and_remote_clients(
         .unwrap()
         .set_setting("remote_control", PROJECTION)
         .unwrap();
+    // The switch and the token: the other two thirds of spec §2's condition,
+    // without which the viewer below is refused before it can be seen.
+    support::enable_sharing(&ctx);
 
     let host = connect(&ctx, ClientTrust::Local)
         .hello(serde_json::json!({"client": "omniagent-native-macos"}))
