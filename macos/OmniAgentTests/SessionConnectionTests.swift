@@ -1019,10 +1019,15 @@ final class SessionConnectionTests: XCTestCase {
     /// This asserts on the **code** `server.rs` sends for each
     /// (`RefusalCode`, Task 14 item 2), not on any sentence — the whole point
     /// of the code is that a copy edit to the sentence cannot move this
-    /// result. This is the classifier on its own; the two cases below run it
-    /// through a real socket.
+    /// result. Every case here passes a `message` that would say the
+    /// *opposite* of the code's own answer if the classifier were still
+    /// reading it — proof that once a code is present, the message is
+    /// ignored entirely. This is the classifier on its own; the cases below
+    /// run it through a real socket.
     func testOnlyTheVersionRefusalIsTerminal() {
-        XCTAssertTrue(SessionConnection.isTerminalRefusal("version_skew"))
+        XCTAssertTrue(
+            SessionConnection.isTerminalRefusal("version_skew", message: "in use by Mac mini")
+        )
         for transient in [
             "lease_held",
             "machine_unavailable",
@@ -1031,24 +1036,65 @@ final class SessionConnectionTests: XCTestCase {
             "blocked",
         ] {
             XCTAssertFalse(
-                SessionConnection.isTerminalRefusal(transient),
-                "\(transient) clears itself and must not park the connection"
+                SessionConnection.isTerminalRefusal(transient, message: "update OmniAgent on Mac mini"),
+                "\(transient) clears itself and must not park the connection, whatever the message says"
             )
         }
     }
 
     /// The other half of the same classifier: a code this build has never
     /// heard of — added by a daemon ahead of this app for some refusal
-    /// neither side has written yet — and no code at all — every refusal a
-    /// daemon built before this contract existed sends, version skew
-    /// included — must both be handled the safe way: **non-terminal**. The
-    /// alternative direction, parking a connection this build merely failed
-    /// to recognise, strands it exactly the way phase 1 did.
+    /// neither side has written yet — is handled the safe way: non-terminal,
+    /// regardless of its message. So is no code at all, *except* for the one
+    /// bounded case covered by the next test. The alternative direction,
+    /// parking a connection this build merely failed to recognise, strands it
+    /// exactly the way phase 1 did.
     func testAnUnrecognisedOrAbsentRefusalCodeIsNotTerminal() {
-        XCTAssertFalse(SessionConnection.isTerminalRefusal(nil))
         XCTAssertFalse(
-            SessionConnection.isTerminalRefusal("some_future_refusal_this_build_does_not_know")
+            SessionConnection.isTerminalRefusal(nil, message: "in use by Mac mini"),
+            "an absent code with an ordinary transient message must not park the connection"
         )
+        XCTAssertFalse(
+            SessionConnection.isTerminalRefusal(
+                "some_future_refusal_this_build_does_not_know",
+                message: "update OmniAgent on Mac mini"
+            ),
+            "an unrecognised code must not park the connection, even with a version-skew-shaped message"
+        )
+    }
+
+    /// **Fix round 1, FIX 1** — the case the general "absent is non-terminal"
+    /// rule does not cover, and the one this whole feature targets: two Macs
+    /// updated independently, the *daemon* side still old. A daemon built
+    /// before Task 14 item 2 has no `code` field on `ErrorPayload` at all, and
+    /// on genuine version skew it still sends `send_handshake_error`'s
+    /// "update OmniAgent on …" sentence — the one sentence stable enough to
+    /// be a designed-for fallback rather than a hypothetical one. Without this
+    /// case, a new app would redial forever against an old, version-skewed
+    /// daemon that cannot change without a human updating it: phase 1's
+    /// dead-keyboard failure, back in the one pairing remote sharing exists
+    /// for.
+    func testAnAbsentCodeWithTheVersionSkewSentenceIsTerminal() {
+        XCTAssertTrue(
+            SessionConnection.isTerminalRefusal(nil, message: "update OmniAgent on Mac mini"),
+            "an old daemon's version-skew refusal has no code and must still park the connection"
+        )
+    }
+
+    /// **Fix round 1, FIX 2** — the mirror image of
+    /// `refusal_code_wire_values_are_frozen`
+    /// (`crates/omniagent-pty-daemon/tests/protocol.rs`). Neither test can
+    /// prevent the two enums drifting apart on its own; together, a wire
+    /// string changed on either side without the other turns exactly one of
+    /// them red, which is the cheap version of a compiler for a contract with
+    /// none.
+    func testRefusalCodeWireValuesMatchTheRustEnum() {
+        XCTAssertEqual(RefusalCode.versionSkew.rawValue, "version_skew")
+        XCTAssertEqual(RefusalCode.leaseHeld.rawValue, "lease_held")
+        XCTAssertEqual(RefusalCode.machineUnavailable.rawValue, "machine_unavailable")
+        XCTAssertEqual(RefusalCode.hostSignedOut.rawValue, "host_signed_out")
+        XCTAssertEqual(RefusalCode.wrongAccount.rawValue, "wrong_account")
+        XCTAssertEqual(RefusalCode.blocked.rawValue, "blocked")
     }
 
     /// "in use by ‹machine›" is transient — the other Mac disconnects, or the
@@ -1120,6 +1166,49 @@ final class SessionConnectionTests: XCTestCase {
 
         // The inverted expectation is what the timeout is spent on: at a 0.02s
         // seed delay, a looping client would have dialled dozens of times.
+        wait(for: [refused, redialled], timeout: 2)
+        XCTAssertEqual(reported, "update OmniAgent on Mac mini")
+        connection.disconnect()
+        server.stop()
+    }
+
+    /// The same property, through a real socket, for the pairing fix round 1
+    /// added: an **old daemon** — no `code` field on `ErrorPayload` at all —
+    /// on genuine version skew. This is the case
+    /// `testAnAbsentCodeWithTheVersionSkewSentenceIsTerminal` pins as a unit;
+    /// this is the same thing end to end, so the legacy bridge is proven
+    /// against the actual connect/reconnect loop, not only the classifier.
+    func testAnOldDaemonsVersionSkewRefusalStillEndsTheDialInsteadOfLooping() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let refused = expectation(description: "the refusal reaches the caller")
+        let redialled = expectation(description: "a second dial")
+        redialled.isInverted = true
+
+        server.run { client in
+            // No `code:` — exactly what a daemon built before Task 14 item 2
+            // sends.
+            try Self.refuse(on: client, with: "update OmniAgent on Mac mini")
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var reported: String?
+        connection.onError = { error in
+            guard reported == nil else { return }
+            reported = error.localizedDescription
+            refused.fulfill()
+        }
+        var dials = 0
+        connection.onStateChange = { state in
+            guard state == .connecting else { return }
+            dials += 1
+            if dials > 1 { redialled.fulfill() }
+        }
+        connection.connect()
+
         wait(for: [refused, redialled], timeout: 2)
         XCTAssertEqual(reported, "update OmniAgent on Mac mini")
         connection.disconnect()

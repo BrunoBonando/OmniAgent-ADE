@@ -907,8 +907,9 @@ final class SessionConnection {
         }
     }
 
-    /// Whether a `Hello` refusal's **code** — never its sentence — is one
-    /// that dialling again cannot fix (Task 14 item 2).
+    /// Whether a `Hello` refusal's **code** — never its sentence, with one
+    /// narrow, bounded exception below — is one that dialling again cannot
+    /// fix (Task 14 item 2; fix round 1).
     ///
     /// Only `RefusalCode.versionSkew` is. Version skew is a refusal with a
     /// human in its way: nothing changes until someone updates the other Mac,
@@ -923,28 +924,52 @@ final class SessionConnection {
     /// shape: the host turning sharing off and on lifts it, with nothing for
     /// this end to do but keep asking on the backoff it already has.
     ///
-    /// **Absent or unrecognised is not a sixth meaning — it defaults to
-    /// non-terminal, on purpose.** No code at all is what a daemon built
-    /// before this contract existed sends, for every refusal including
-    /// version skew; a code this build has never heard of is what a daemon
-    /// ahead of this app sends, for some future refusal neither side has
-    /// written yet. Both keep dialling rather than park. That is the
-    /// deliberate direction to fail in: wrongly continuing to retry costs one
-    /// more backoff cycle, and self-corrects the moment either side is
-    /// current. Wrongly parking strands the connection exactly the way phase
-    /// 1 did, with no cause visible anywhere on this end — the one failure
-    /// this whole feature exists to end. Only a value this build positively
-    /// recognises as `versionSkew` may end the dial.
+    /// **An unrecognised code defaults to non-terminal, on purpose.** A code
+    /// this build has never heard of is what a daemon ahead of this app sends,
+    /// for some future refusal neither side has written yet — wrongly
+    /// continuing to retry costs one more backoff cycle and self-corrects the
+    /// moment this app updates; wrongly parking strands the connection with no
+    /// cause visible anywhere on this end.
     ///
-    /// This used to be a prefix match on the sentence itself, one string
-    /// literal on each side of the wire that happened to agree — a routine
-    /// copy edit to `server.rs`'s "update OmniAgent on …" could silently turn
-    /// a terminal refusal into an infinite retry loop, and nothing caught it.
-    /// The code is the fix: `message` stays free to reword because nothing
-    /// here reads it any more.
-    static func isTerminalRefusal(_ code: String?) -> Bool {
-        code.flatMap(RefusalCode.init(rawValue:)) == .versionSkew
+    /// **An absent code is not the same question, and does not get the same
+    /// answer.** No code at all is what a daemon *built before this contract
+    /// existed* sends — for every refusal, version skew included — and that is
+    /// exactly the pairing remote sharing exists for: two Macs updated
+    /// independently, one of them old. Treating an absent code as uniformly
+    /// non-terminal would make a genuinely version-skewed old daemon redial
+    /// forever against a peer that cannot change without a human updating
+    /// it — phase 1's dead-keyboard failure, reintroduced in the one case this
+    /// whole feature targets. So there is a narrow, bounded legacy bridge for
+    /// this one case only: **no code, and the message carries the stable
+    /// `"update OmniAgent"` prefix `server.rs`'s `send_handshake_error` has
+    /// always sent for version skew** (that function exists specifically so a
+    /// skewed peer can still decode its own refusal, so this is a designed-for
+    /// path, not a hypothetical one). Any other message with no code stays
+    /// non-terminal. This is not the general string contract coming back —
+    /// every *other* classification here keys on the code alone — it is one
+    /// fallback for peers old enough to predate `code` entirely, and it can be
+    /// deleted once no un-updated daemon can be met.
+    ///
+    /// Before this field existed, the whole classification was a prefix match
+    /// on the sentence — one string literal on each side of the wire that
+    /// happened to agree — and a routine copy edit to `server.rs`'s "update
+    /// OmniAgent on …" could silently turn a terminal refusal into an infinite
+    /// retry loop, with nothing to catch it. The code is the fix for every
+    /// case a current daemon can send; the prefix survives only as the
+    /// narrowly-scoped bridge above.
+    static func isTerminalRefusal(_ code: String?, message: String) -> Bool {
+        guard let code else {
+            return message.hasPrefix(Self.legacyVersionSkewPrefix)
+        }
+        return RefusalCode(rawValue: code) == .versionSkew
     }
+
+    /// The opening of the daemon's version-skew sentence
+    /// (`crates/omniagent-pty-daemon/src/server.rs`, `send_handshake_error`),
+    /// read only when a `Hello` refusal carries no `code` at all — a daemon
+    /// built before Task 14 item 2. See `isTerminalRefusal` for why this one
+    /// case still reads the sentence.
+    private static let legacyVersionSkewPrefix = "update OmniAgent"
 
     /// The daemon answered `Hello` with an `Error` instead of a `HelloAck` —
     /// it looked at who is connecting and said no.
@@ -957,7 +982,7 @@ final class SessionConnection {
         let payload = try? decoder.decode(ErrorPayload.self, from: frame.payload)
         let message = payload?.message ?? "The daemon refused the connection."
         helloRequest = nil
-        if Self.isTerminalRefusal(payload?.code) {
+        if Self.isTerminalRefusal(payload?.code, message: message) {
             shouldReconnect = false
             nextReconnectDelay = reconnectDelay
         }
@@ -1416,7 +1441,15 @@ private struct ErrorPayload: Codable {
 /// sides must agree, kept in step by hand since nothing generates one side
 /// from the other. Read only by `isTerminalRefusal`; every other user of a
 /// refusal reads `ErrorPayload.message` instead, which stays free to reword.
-private enum RefusalCode: String {
+///
+/// Internal rather than `private`, solely so
+/// `testRefusalCodeWireValuesMatchTheRustEnum` (`SessionConnectionTests.swift`,
+/// via `@testable import`) can pin each case's raw value against a literal
+/// list identical to Rust's `refusal_code_wire_values_are_frozen`
+/// (`crates/omniagent-pty-daemon/tests/protocol.rs`) — the mirror-image half
+/// of that test, so a wire string changed on either side without the other
+/// turns exactly one of the two red (fix round 1, FIX 2).
+enum RefusalCode: String {
     case versionSkew = "version_skew"
     case leaseHeld = "lease_held"
     case machineUnavailable = "machine_unavailable"
