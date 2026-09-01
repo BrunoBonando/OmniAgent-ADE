@@ -249,13 +249,15 @@ final class SettingsSidebarView: NSView, NSTextFieldDelegate {
 /// The Settings page's content: the picked section's name and body in
 /// Home's centred 880pt column, clear of the docked panel on the left —
 /// from the top, though, not from a share of the height. Transparent, like
-/// Home: `PaneGroundView` behind it is the ground. The panel itself and the
+/// Home: `ContentCardView` behind it is the ground. The panel itself and the
 /// "Settings" title above it are the controller's — see `settingsPanel` and
 /// `refreshTitle`.
 final class SettingsSurfaceView: NSView {
-    /// The room the docked panel takes on the left: the title's 12pt inset,
-    /// the panel, and a gutter.
+    /// The room the docked panel takes on the left: the card's own 12pt
+    /// inset, the panel, and a gutter.
     static let panelRoom = 12 + SettingsSidebarView.width + 16
+    /// How far the section's heading sits below the card's top edge.
+    private static let headingAir: CGFloat = 104
 
     /// The picked section's name, heading its content.
     let titleField = ShellFont.label(font: ShellFont.ui(22, .semibold), color: ShellPalette.ink)
@@ -371,11 +373,10 @@ final class SettingsSurfaceView: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(column)
 
-        let scroll = ShellScrollView(
-            documentView: content,
-            topFade: ShellScrollView.pageFade,
-            topInset: WorkspaceTitleBarView.height
-        )
+        // No fade and no inset: the page starts at the content card's own edge
+        // now (flow-layout spec §2), so there is no title strip left for
+        // content to dissolve under as it scrolls away.
+        let scroll = ShellScrollView(documentView: content)
         addSubview(scroll)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.panelRoom),
@@ -383,11 +384,12 @@ final class SettingsSurfaceView: NSView {
             scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            // Past the fade band, so the heading is whole at rest.
-            column.topAnchor.constraint(
-                equalTo: content.topAnchor,
-                constant: ShellScrollView.pageFade - WorkspaceTitleBarView.height + 8
-            ),
+            // The heading's air under the card's top edge. The same air it
+            // had before the card: the page ran up under the title strip and
+            // started past the fade band, which put the heading exactly here.
+            // Stated rather than derived, since the fade it was derived from
+            // is gone.
+            column.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.headingAir),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 24),

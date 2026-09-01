@@ -1424,6 +1424,51 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNotNil(controller.titleBar.superview, "the bar is installed, not just built")
     }
 
+    /// The content is one inset floating card on the column's ground
+    /// (flow-layout spec §2): 12pt off the leading, trailing and bottom edges,
+    /// the title strip above it, and every destination a child of it filling
+    /// it exactly. The session name is the one thing left outside — it belongs
+    /// to the strip, above the card.
+    func testTheContentIsOneInsetCardHoldingEveryDestination() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 900), display: true)
+        window.layoutIfNeeded()
+
+        let card = controller.contentCard
+        let column = try XCTUnwrap(card.superview)
+        XCTAssertEqual(card.frame.minX, ContentCardView.inset, accuracy: 0.5)
+        XCTAssertEqual(column.bounds.maxX - card.frame.maxX, ContentCardView.inset, accuracy: 0.5)
+        // The column is unflipped, so the low y is the bottom edge.
+        XCTAssertEqual(card.frame.minY, ContentCardView.inset, accuracy: 0.5)
+        XCTAssertEqual(
+            column.bounds.maxY - card.frame.maxY,
+            WorkspaceTitleBarView.height,
+            accuracy: 0.5,
+            "the strip above it, not a margin"
+        )
+        XCTAssertEqual(card.layer?.cornerRadius, ContentCardView.cornerRadius)
+
+        let placeholder = try XCTUnwrap(
+            card.subviews.compactMap { $0 as? WorkspacePlaceholderView }.first,
+            "the To Do List placeholder is a child of the card"
+        )
+        let pages: [NSView] = [
+            controller.workspaceView, controller.homeView, controller.settingsView, placeholder,
+        ]
+        for page in pages {
+            XCTAssertTrue(page.superview === card, "\(type(of: page)) hangs off the card")
+            XCTAssertEqual(page.frame, card.bounds, "and fills it, at no offset of its own")
+        }
+        XCTAssertTrue(controller.settingsPanel.superview === card, "and the docked panel floats in it")
+        XCTAssertTrue(
+            controller.sessionTitleField.superview === column,
+            "while the session name stays in the strip, outside the card"
+        )
+    }
+
     /// The bar names the session on screen, and names nothing anywhere else —
     /// no app name, no fallback. The review toggle goes with it: gone, not
     /// greyed out, since a disabled control invites a click that cannot work.
@@ -1456,10 +1501,16 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.showWindow(nil)
 
         let sessionLabel = controller.sessionTitleField
-        let contentContainer = try XCTUnwrap(controller.workspaceView.superview)
+        // The column, not the card: the card is inset inside it and the name
+        // rides the column itself, in the strip above the card.
+        let contentContainer = try XCTUnwrap(controller.contentCard.superview)
         XCTAssertTrue(
             sessionLabel.isDescendant(of: contentContainer),
             "the session label is part of the content column, so it is carried by its animation"
+        )
+        XCTAssertFalse(
+            sessionLabel.isDescendant(of: controller.contentCard),
+            "and it is above the card, not inside it — the strip is the window's chrome"
         )
 
         // Riding the column has one sharp edge: collapse the sidebar and the
@@ -3069,7 +3120,9 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         let filled = split.splitView.convert(split.splitView.bounds, to: content)
         XCTAssertEqual(filled, content.bounds, "the split fills the window with the column gone")
-        let column = try XCTUnwrap(controller.workspaceView.superview)
+        // The column itself, which is the ground: the card inside it keeps its
+        // 12pt of air off that edge, and the ground is what fills it.
+        let column = try XCTUnwrap(controller.contentCard.superview)
         XCTAssertEqual(
             column.convert(column.bounds, to: content).minX,
             0,

@@ -445,18 +445,20 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertTrue(panel.rows[0].isSelected, "on the page, the section is lit")
         XCTAssertTrue(controller.shellSidebar.settingsRow.isSelected, "and so is the row that opened it")
 
+        // Measured in the content card, which is the room it floats in now.
         let room = controller.settingsPanelRoomForTesting
+        XCTAssertEqual(room, controller.contentCard.bounds, "the card is the room")
         let docked = controller.settingsPanelTarget
+        XCTAssertEqual(docked.minX, ContentCardView.inset, accuracy: 0.5, "12pt inside the card's left edge")
         XCTAssertEqual(
-            docked.minX,
-            controller.sessionTitleField.frame.minX,
+            docked.maxY,
+            room.maxY - ContentCardView.inset,
             accuracy: 0.5,
-            "the card under the title's left edge"
+            "and 12pt below its top"
         )
-        XCTAssertEqual(docked.maxY, room.maxY - WorkspaceTitleBarView.height - 10, accuracy: 0.5, "just below the strip")
 
-        // Typing narrows the rows; docked, the panel keeps its head under
-        // the strip and shortens downwards.
+        // Typing narrows the rows; docked, the panel keeps its head at the
+        // card's top and shortens downwards.
         panel.setQueryForTesting("acc")
         XCTAssertEqual(panel.visibleTitlesForTesting, ["Accounts", "Accessibility"])
         XCTAssertEqual(controller.settingsPanelTarget.maxY, docked.maxY, accuracy: 0.5)

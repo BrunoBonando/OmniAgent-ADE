@@ -175,6 +175,11 @@ enum ShellPalette {
     static let cardFillHover = NSColor(white: 1, alpha: 0.085)
     static let cardStroke = NSColor(white: 1, alpha: 0.09)
     static let cardStrokeHover = NSColor(white: 1, alpha: 0.2)
+    /// `ContentCardView`'s fill — a shade under `cardFill`, because this one
+    /// is a whole page's ground rather than a card sitting on a page, and the
+    /// same 4% over that much of the window reads as a second grey slab
+    /// instead of a lift off the ground.
+    static let contentCardFill = NSColor(white: 1, alpha: 0.035)
     static let backRowFill = NSColor(white: 1, alpha: 0.03)
     static let fieldFill = NSColor(white: 1, alpha: 0.05)
     static let dashedStroke = NSColor(white: 1, alpha: 0.16)
@@ -1126,6 +1131,42 @@ final class ShellGlassTintView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
+// MARK: - Content card
+
+/// The content column's contents, as one inset floating card: the Desk, Home,
+/// To Do List, Settings and the docked Settings panel are all children of it,
+/// and `PaneGroundView`'s gradient shows around it as the window's ground
+/// (flow-layout spec §2 — the way Wispr Flow floats its content).
+///
+/// It masks its bounds, and that is what makes the inset read as a card rather
+/// than as padding: anything a page draws past the rounded edge — a pane's
+/// glow, a scroll view's overflow — stops there instead of running out onto
+/// the ground. What is left outside it belongs to the title strip above it:
+/// the window buttons, the bar's own controls and the session name.
+final class ContentCardView: NSView {
+    /// How far the card sits inside the content column on three sides. Its
+    /// top is `WorkspaceTitleBarView.height` instead: the strip above it is
+    /// the window's chrome, not a margin.
+    static let inset: CGFloat = 12
+    static let cornerRadius: CGFloat = 14
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        guard let layer else { return }
+        layer.cornerRadius = Self.cornerRadius
+        layer.cornerCurve = .continuous
+        layer.masksToBounds = true
+        layer.backgroundColor = ShellPalette.contentCardFill.cgColor
+        layer.borderWidth = 1
+        layer.borderColor = ShellPalette.cardStroke.cgColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
 // MARK: - Placeholder
 
 /// What the content half shows for a destination that has no screen yet: To
@@ -1137,9 +1178,9 @@ final class WorkspacePlaceholderView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         // Paints nothing. Home and To Do List are the *same* surface the Desk
-        // is — `PaneGroundView` behind this view, running from the window's top
-        // edge — and an opaque fill here made switching destination look like
-        // switching apps.
+        // is — `ContentCardView` behind this view, whose fill is every page's
+        // ground since 2026-09-01 — and an opaque fill here made switching
+        // destination look like switching apps.
         let stack = NSStackView(views: [titleField, subtitleField])
         stack.orientation = .vertical
         stack.alignment = .centerX

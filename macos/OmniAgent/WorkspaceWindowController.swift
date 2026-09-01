@@ -137,6 +137,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the grey sheet behind the title-bar strip *and* the pane grid, so the
     /// two are one continuous surface (the title bar itself paints nothing).
     private let contentContainer = PaneGroundView()
+    /// The inset card inside that ground, and the parent of every destination:
+    /// the Desk, the placeholder, Home, Settings and the docked Settings
+    /// panel all fill it exactly (flow-layout spec §2). Internal, not private:
+    /// the tests measure the card itself, and there is only one of it.
+    let contentCard = ContentCardView()
     private let placeholder = WorkspacePlaceholderView()
     /// Home's real screen — the placeholder now only covers To Do List.
     /// Internal, not private: the tests assert its routing.
@@ -152,7 +157,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     let settingsPanel = SettingsSidebarView()
     enum SettingsPanelPlace { case hidden, docked }
     private(set) var settingsPanelPlace: SettingsPanelPlace = .hidden
-    /// Where the panel is headed, in the content area's coordinates — an
+    /// Where the panel is headed, in the content card's coordinates — an
     /// animated `frame` reads mid-flight, so the tests read this.
     private(set) var settingsPanelTarget: NSRect = .zero
     /// The window's drawn title bar — window buttons, the sidebar toggle, the
@@ -1163,13 +1168,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func installSplitView(on window: NSWindow) {
         workspace.translatesAutoresizingMaskIntoConstraints = false
         placeholder.translatesAutoresizingMaskIntoConstraints = false
-        contentContainer.addSubview(workspace)
-        contentContainer.addSubview(placeholder)
-        contentContainer.addSubview(homeView)
-        contentContainer.addSubview(settingsView)
+        // The card first, then the destinations inside it: the ground shows
+        // around it on three sides, and the title strip is the fourth.
+        contentContainer.addSubview(contentCard)
+        NSLayoutConstraint.activate([
+            contentCard.topAnchor.constraint(
+                equalTo: contentContainer.topAnchor,
+                constant: WorkspaceTitleBarView.height
+            ),
+            contentCard.leadingAnchor.constraint(
+                equalTo: contentContainer.leadingAnchor,
+                constant: ContentCardView.inset
+            ),
+            contentCard.trailingAnchor.constraint(
+                equalTo: contentContainer.trailingAnchor,
+                constant: -ContentCardView.inset
+            ),
+            contentCard.bottomAnchor.constraint(
+                equalTo: contentContainer.bottomAnchor,
+                constant: -ContentCardView.inset
+            ),
+        ])
+        contentCard.addSubview(workspace)
+        contentCard.addSubview(placeholder)
+        contentCard.addSubview(homeView)
+        contentCard.addSubview(settingsView)
         // The floating panel rides above every destination.
         settingsPanel.isHidden = true
-        contentContainer.addSubview(settingsPanel)
+        contentCard.addSubview(settingsPanel)
         settingsPanel.onSelect = { [weak self] section in self?.showSettings(section: section) }
         settingsView.onSignIn = { [weak self] in self?.signInToAccount() }
         settingsView.onLogOut = { [weak self] in self?.logOutOfAccount() }
@@ -1181,29 +1207,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self, settingsPanelPlace != .hidden else { return }
             placeSettingsPanel(settingsPanelPlace, animated: true)
         }
-        contentContainer.postsFrameChangedNotifications = true
+        // The panel is placed inside the card by frame, and it is the card's
+        // bounds `placeSettingsPanel` measures in — so the card is what it has
+        // to follow, not the column it is inset in.
+        contentCard.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(
             forName: NSView.frameDidChangeNotification,
-            object: contentContainer,
+            object: contentCard,
             queue: .main
         ) { [weak self] _ in
             guard let self, settingsPanelPlace != .hidden else { return }
             placeSettingsPanel(settingsPanelPlace, animated: false)
         }
-        // The pages (Home, Settings) reach the window's top edge and inset
-        // their own scrolling under the title strip, so their content
-        // dissolves under the toolbar; the Desk and the placeholder stop
-        // below it.
+        // Every destination fills the card exactly. Pages used to reach the
+        // window's top edge and inset their own scrolling under the title
+        // strip; the card's edge is the boundary now, so nothing runs under
+        // the strip and there is one offset — none — for all four.
         for view in [workspace, placeholder, homeView, settingsView] as [NSView] {
-            let isPage = view === homeView || view === settingsView
             NSLayoutConstraint.activate([
-                view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
-                view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-                view.topAnchor.constraint(
-                    equalTo: contentContainer.topAnchor,
-                    constant: isPage ? 0 : WorkspaceTitleBarView.height
-                ),
-                view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+                view.leadingAnchor.constraint(equalTo: contentCard.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: contentCard.trailingAnchor),
+                view.topAnchor.constraint(equalTo: contentCard.topAnchor),
+                view.bottomAnchor.constraint(equalTo: contentCard.bottomAnchor),
             ])
         }
 
@@ -6290,10 +6315,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         applyDestination(.settings)
     }
 
-    /// Slides the panel to `place`. Docked: under the "Settings" title's
-    /// left edge, just below the strip. Hidden: fades where it is, and
-    /// measures nothing — the first call comes from `installSplitView`,
-    /// before there is a window to measure in.
+    /// Slides the panel to `place`. Docked: 12pt inside the content card's
+    /// top-left corner. Hidden: fades where it is, and measures nothing — the
+    /// first call comes from `installSplitView`, before there is a window to
+    /// measure in.
     private func placeSettingsPanel(_ place: SettingsPanelPlace, animated: Bool) {
         let wasHidden = settingsPanelPlace == .hidden
         settingsPanelPlace = place
@@ -6318,14 +6343,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return
         }
 
-        contentContainer.layoutSubtreeIfNeeded()
-        let room = contentContainer.bounds
+        contentCard.layoutSubtreeIfNeeded()
+        let room = contentCard.bounds
         let size = NSSize(width: SettingsSidebarView.frameWidth, height: panel.contentHeight)
 
-        // The card's left edge under the title's.
+        // 12pt inside the content card's top-left corner (spec §2). It used to
+        // measure from the column and hang under the title strip; the card is
+        // the page's boundary now, so it measures from the card's own edges.
         let frame = NSRect(
-            x: sessionTitleField.frame.minX,
-            y: room.maxY - WorkspaceTitleBarView.height - 10 - size.height,
+            x: ContentCardView.inset,
+            y: room.maxY - ContentCardView.inset - size.height,
             width: size.width,
             height: size.height
         )
@@ -6351,9 +6378,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    /// The content area's bounds — for the tests, since the container itself
-    /// is private.
-    var settingsPanelRoomForTesting: NSRect { contentContainer.bounds }
+    /// The room the panel is placed in — the content card's bounds, which is
+    /// the space `settingsPanelTarget` is measured in.
+    var settingsPanelRoomForTesting: NSRect { contentCard.bounds }
 
     // MARK: - Inspector (Task 6b-2)
 

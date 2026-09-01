@@ -101,6 +101,86 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(ShellScrollView(documentView: NSView()).topFadeForTesting, 0)
     }
 
+    /// The content card is a rounded, masked sheet with the app's own card
+    /// stroke — the inset floating surface every page sits on (flow-layout
+    /// spec §2). The mask is the point: it is what stops a page drawing past
+    /// the rounded edge onto the ground around it.
+    func testTheContentCardIsARoundedMaskedSheet() throws {
+        XCTAssertEqual(ContentCardView.inset, 12)
+        XCTAssertEqual(ContentCardView.cornerRadius, 14)
+        let card = ContentCardView()
+        let layer = try XCTUnwrap(card.layer)
+        XCTAssertEqual(layer.cornerRadius, ContentCardView.cornerRadius)
+        XCTAssertEqual(layer.cornerCurve, .continuous)
+        XCTAssertTrue(layer.masksToBounds)
+        XCTAssertEqual(layer.backgroundColor, ShellPalette.contentCardFill.cgColor)
+        XCTAssertEqual(layer.borderWidth, 1)
+        XCTAssertEqual(layer.borderColor, ShellPalette.cardStroke.cgColor)
+        // A lift off the ground, not a second slab: lighter than the cards
+        // that sit *on* a page.
+        XCTAssertLessThan(ShellPalette.contentCardFill.alphaComponent, ShellPalette.cardFill.alphaComponent)
+    }
+
+    /// And it paints: on the ground it is inset in, the card's fill reads as a
+    /// lift rather than as nothing at all. Rendered rather than reasoned
+    /// about — a layer-backed fill that silently never paints looks exactly
+    /// like a correct one from the outside.
+    func testTheContentCardLiftsOffTheGroundItSitsIn() throws {
+        let ground = PaneGroundView()
+        // In a window: a detached view never runs the display pass that hangs
+        // its subviews' layers off its own, so the card would not render.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = ground
+        defer { window.close() }
+        let card = ContentCardView()
+        ground.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: ground.leadingAnchor, constant: ContentCardView.inset),
+            card.trailingAnchor.constraint(equalTo: ground.trailingAnchor, constant: -ContentCardView.inset),
+            card.topAnchor.constraint(equalTo: ground.topAnchor, constant: ContentCardView.inset),
+            card.bottomAnchor.constraint(equalTo: ground.bottomAnchor, constant: -ContentCardView.inset),
+        ])
+        window.displayIfNeeded()
+        ground.layoutSubtreeIfNeeded()
+
+        let image = try XCTUnwrap(render(ground))
+        // The same row on both, so the ground's own top-lit gradient cancels
+        // out and the card's fill is the only difference between them.
+        let row = image.pixelsHigh / 2
+        let inside = try XCTUnwrap(image.colorAt(x: image.pixelsWide / 2, y: row)?.usingColorSpace(.sRGB))
+        let outside = try XCTUnwrap(image.colorAt(x: 3, y: row)?.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(
+            inside.brightnessComponent,
+            outside.brightnessComponent,
+            "the card lifts off the ground it is inset in"
+        )
+    }
+
+    /// Renders the view's whole layer tree — `cacheDisplay` draws `draw(_:)`
+    /// output only. The pane workspace render tests' pattern.
+    private func render(_ view: NSView) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(view.bounds.width),
+            pixelsHigh: Int(view.bounds.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .calibratedRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        view.layer?.render(in: context.cgContext)
+        return rep
+    }
+
     /// Paths read the way the design writes them — `~` for home, an em dash
     /// for nothing (the hover card leans on this).
     func testShellPathAbbreviatesTheHomeDirectory() {
