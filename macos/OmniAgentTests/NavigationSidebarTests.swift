@@ -242,10 +242,13 @@ final class NavigationSidebarTests: XCTestCase {
     /// Home shows its real screen, To Do List still lands on the "Under
     /// development" placeholder, and the pane workspace hides and comes back
     /// with the Desk.
-    /// Settings is its own screen: the gear/⌘, land on it, it opens on the
-    /// section it was last on, and every section still says "Under
-    /// development" — the design's eight plus Remote (2026-09-01 remote
-    /// environment sharing spec), in its order.
+    /// Settings is its own screen: the gear/⌘, land on it, and it opens on
+    /// the section it was last on — the design's eight plus Remote
+    /// (2026-09-01 remote environment sharing spec), in its order. Three of
+    /// them have a real screen now (General's update block, Accounts, and
+    /// Remote's sharing switch, machine identity and blocked list); the rest
+    /// still say "Under development", which is what this checks on General
+    /// before the update block hides that line.
     func testSettingsIsItsOwnScreenWithItsOwnColumn() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -295,9 +298,10 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(settings.section, .experimental, "⌘, on the page changes nothing")
     }
 
-    /// Accounts and General are the two sections with a screen — Accounts
-    /// names who is signed in, General carries the self-update block. The
-    /// rest still keep the "Under development" line.
+    /// Accounts, General and Remote are the sections with a screen —
+    /// Accounts names who is signed in, General carries the self-update
+    /// block, Remote the sharing switch, this machine's identity and the
+    /// blocked list. The rest still keep the "Under development" line.
     func testTheAccountsSectionNamesTheAccountAndOffersOneButton() throws {
         let controller = makeController()
         defer { controller.close() }
