@@ -307,14 +307,23 @@ fn list_directory_payload_shapes_carry_names_and_kinds_and_nothing_else() {
                     is_dir: false,
                 },
             ],
+            truncated: false,
         })
         .unwrap(),
         serde_json::json!({"entries": [
             {"name": "Documents", "is_dir": true},
             {"name": "notes.md", "is_dir": false}
-        ]})
+        ], "truncated": false})
     );
 }
+
+// The cap's arithmetic — that `LIST_DIRECTORY_MAX_ENTRIES` worst-case entries
+// fit inside `MAX_PAYLOAD_LEN` — is asserted at the constant's definition in
+// `protocol.rs` as a `const _: () = assert!(…)`, so raising the cap too far
+// fails the *build* rather than a connection. Nothing to re-check at runtime
+// here; the behaviour it protects is covered end to end by `list_directory.rs`'s
+// `a_directory_of_worst_case_names_still_fits_in_one_frame`, which measures the
+// real encoded payload instead of the estimate.
 
 #[test]
 fn phase_2_payload_shapes_match_the_swift_client() {

@@ -237,7 +237,7 @@ Rows, built off live lists so later additions appear by themselves, each with sy
 ## 12. Security invariants (each pinned by a test)
 
 1. The allowlist and the protected-key set live in the **daemon**, not the relay or the app.
-2. A remote client can never get or set `remote_sharing`, `relay_device_token`, `remote_control_blocked`, or any `auth_*` key.
+2. A remote client can never get or set `remote_sharing`, `relay_device_token`, `remote_control_blocked`, or any `auth_*` key **through the protocol**. This is an RPC-layer guarantee only, and deliberately so: the lease holder can open a terminal, so it can read anything the signed-in user can read, including the daemon's own database. What contains those secrets is not the key list but *who may hold the lease* — a device token bound to one account, the daemon's independent account check (§9), one viewer at a time, a takeover panel the host cannot dismiss, and Terminate/Block. The key list stops the protocol from handing them over for free; it does not, and cannot, sandbox a shell.
 3. `ListViewers`, `DisconnectViewer` and `PublishHostState` are local-only.
 4. At most one remote connection holds the lease; the second is refused.
 5. No remote connection is accepted unless a local app connection exists.

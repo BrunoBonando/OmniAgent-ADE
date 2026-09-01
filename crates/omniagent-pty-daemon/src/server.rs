@@ -7,7 +7,8 @@ use crate::protocol::{
     ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
     RootsRenameProjectPayload, RootsSetPausedPayload, RootsStartIngestPayload,
     SessionCreatedPayload, SessionExitedPayload, SessionIdPayload, SessionListPayload,
-    SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue, PROTOCOL_VERSION,
+    SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue, LIST_DIRECTORY_MAX_ENTRIES,
+    PROTOCOL_VERSION,
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
@@ -207,16 +208,27 @@ const AUTH_KEY_PREFIX: &str = "auth_";
 /// Settings rows a remote client may neither read nor write (phase 3 spec §3,
 /// §12 invariant 2).
 ///
-/// This is the whole security argument in five keys: a remote client must not
-/// be able to grant itself access ([`REMOTE_SHARING_KEY`],
-/// [`crate::DEVICE_TOKEN_KEY`]), unblock itself ([`BLOCKED_VIEWERS_KEY`]), or
-/// read the host's credentials (`auth_*`). The `auth_` case is a **prefix** on
-/// purpose — a row added to that family next month is protected the day it is
-/// added, without anyone remembering this function exists.
+/// A remote client must not be able to grant itself access
+/// ([`REMOTE_SHARING_KEY`], [`crate::DEVICE_TOKEN_KEY`]), unblock itself
+/// ([`BLOCKED_VIEWERS_KEY`]), or read the host's credentials (`auth_*`). The
+/// `auth_` case is a **prefix** on purpose — a row added to that family next
+/// month is protected the day it is added, without anyone remembering this
+/// function exists.
 ///
 /// Both the get **and** the set arm of [`authorize_remote`] consult it: a
 /// read-only leak of a device token is as bad as a write, and a token that
 /// only leaks is a machine anyone can go on reaching.
+///
+/// **This is an RPC-layer guarantee only, and deliberately so.** The lease
+/// holder may `CreateSession`, so it has a shell, so it can read anything the
+/// signed-in user can read — `brain.db` and these very rows included. Do not
+/// read this list as a sandbox and do not try to make it one by narrowing the
+/// allowlist: remote shell access *is* the feature (spec §12 invariant 2, as
+/// amended). What contains these secrets is who may hold the lease — a device
+/// token bound to one account, the daemon's independent account check, one
+/// viewer at a time, and the host's Terminate/Block. This function's job is
+/// narrower and still worth doing: the protocol does not hand them over for
+/// free.
 pub fn protected_setting_key(key: &str) -> bool {
     matches!(
         key,
@@ -240,8 +252,10 @@ pub fn protected_setting_key(key: &str) -> bool {
 /// the viewer).
 ///
 /// The line that is *not* redrawn is [`protected_setting_key`], consulted on
-/// both the get and the set arm: whatever else a lease holder may do, it may
-/// not grant itself access, unblock itself, or read the host's credentials.
+/// both the get and the set arm, so the protocol never hands over the device
+/// token or the blocklist for free. Read its doc before treating that as
+/// containment: a lease holder has a shell, and this function is not a sandbox
+/// for one.
 pub fn authorize_remote(frame: &Frame) -> Result<(), String> {
     use MessageKind::*;
     match frame.header.message_kind {
@@ -619,10 +633,9 @@ where
     loop {
         let frame = tokio::select! {
             // A kicked connection stops mid-frame. Dropping a partly-read
-            // frame would desynchronise the stream, which is exactly why
-            // `next_frame` keeps one read future across its own wakes — but
-            // here the stream is being torn down, so there is nothing left to
-            // desynchronise.
+            // frame would normally desynchronise the stream — `read_exact` is
+            // not cancel-safe — but here the stream is being torn down, so
+            // there is nothing left to desynchronise.
             _ = cancel.cancelled() => break,
             frame = read_frame(&mut reader) => match frame {
                 Ok(frame) => frame,
@@ -864,9 +877,9 @@ where
                 });
                 match result {
                     Ok(()) => {
-                        // Every current waiter — the relay and each remote
-                        // client parked in `next_frame` — must see this,
-                        // plus one permit for a waiter between waits.
+                        // Every current waiter — the relay task watching
+                        // for sharing and device-token changes — must see
+                        // this, plus one permit for a waiter between waits.
                         settings_changed.notify_waiters();
                         settings_changed.notify_one();
                         send_response(&writer, request).await
@@ -1084,15 +1097,15 @@ where
             MessageKind::ListDirectory => {
                 let payload = decode_payload!(ListDirectoryPayload);
                 match list_directory(&payload) {
-                    Ok(entries) => {
-                        send_json(
-                            &writer,
-                            MessageKind::Response,
-                            request,
-                            &DirectoryListingPayload { entries },
-                        )
-                        .await
+                    Ok(listing) => {
+                        send_json(&writer, MessageKind::Response, request, &listing).await
                     }
+                    // Every way a listing can fail — a missing path, a regular
+                    // file, permissions — is answered with an `Error` frame.
+                    // None of them may drop the connection: the entry cap is
+                    // what keeps the success path inside `MAX_PAYLOAD_LEN`, and
+                    // an oversized `send_json` is the one failure here that
+                    // *would* take the socket with it.
                     Err(error) => send_error(&writer, request, error).await,
                 }
             }
@@ -1220,7 +1233,7 @@ fn sync_attached(connections: &ConnectionRegistry, connection: u64, attached: Ha
 /// `is_dir` follows a symlink, because `Path::is_dir` does and a picker that
 /// cannot descend into a symlinked folder is broken. That is the *only*
 /// following done — there is no recursion for a loop to run away in.
-fn list_directory(request: &ListDirectoryPayload) -> Result<Vec<DirectoryEntryPayload>> {
+fn list_directory(request: &ListDirectoryPayload) -> Result<DirectoryListingPayload> {
     let path = Path::new(&request.path);
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(path).with_context(|| format!("read {}", request.path))? {
@@ -1244,7 +1257,14 @@ fn list_directory(request: &ListDirectoryPayload) -> Result<Vec<DirectoryEntryPa
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.name.cmp(&b.name))
     });
-    Ok(entries)
+    // The cap is applied **after** the sort, never during the walk, and that
+    // ordering is the whole point: directories sort first, so a directory too
+    // big to send loses files rather than folders — which is what a folder
+    // picker needs to keep working. Capping during `read_dir` would drop
+    // whichever names the filesystem happened to yield last, folders included.
+    let truncated = entries.len() > LIST_DIRECTORY_MAX_ENTRIES;
+    entries.truncate(LIST_DIRECTORY_MAX_ENTRIES);
+    Ok(DirectoryListingPayload { entries, truncated })
 }
 
 // Phase 2 read the client's next frame through a `next_frame` helper that

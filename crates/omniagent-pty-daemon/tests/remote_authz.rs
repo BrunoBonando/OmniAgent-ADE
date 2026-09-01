@@ -7,8 +7,9 @@
 //!
 //! 1. [`authorize_remote`] is an **explicit allowlist**, never a denylist. A
 //!    message kind added to the dispatch next month is unreachable remotely
-//!    until someone deliberately lists it —
-//!    `every_message_kind_is_deliberately_classified` fails otherwise.
+//!    until someone deliberately lists it, and
+//!    `every_message_kind_is_deliberately_classified` will not *compile* until
+//!    someone writes down which it is.
 //! 2. The protected settings rows are unreachable on **both** get and set: a
 //!    remote client may not grant itself access, unblock itself, or read the
 //!    host's credentials.
@@ -169,61 +170,88 @@ fn protected_keys_are_the_ones_that_would_grant_more_access() {
     }
 }
 
-/// The standing rule, pinned: **adding a kind to the dispatch must not make it
-/// remotely reachable.** This test fails when someone adds a `MessageKind` and
-/// forgets to decide about it — the new kind is denied by the catch-all arm,
-/// which is right, and it is absent from `ALLOWED` below, which is where the
-/// decision gets written down.
+/// The standing rule, pinned: **nothing becomes remote-reachable merely by
+/// being added to the dispatch.**
 ///
-/// The sweep walks the byte space rather than a hand-maintained list of
-/// variants, because a hand-maintained list is exactly the thing that goes
-/// quietly stale: `TryFrom<u8>` is the complete set of assigned discriminants,
-/// since a kind that is not there cannot arrive on the wire at all.
+/// The guarantee is the `match` below being **exhaustive with no wildcard
+/// arm**. That is what makes the rule enforceable rather than aspirational: a
+/// new `MessageKind` does not compile until someone writes down, here, whether
+/// a remote client may send it — and writing `true` next to it is a visible,
+/// reviewable act in a file about the trust boundary. A wildcard arm would
+/// quietly classify every future kind as denied and pass whatever
+/// `authorize_remote` happened to do, which is the same test failing to say
+/// anything at all.
+///
+/// The sweep over the byte space is the other half: `TryFrom<u8>` is the
+/// complete set of assigned discriminants, since a kind that is not there
+/// cannot arrive on the wire, so every wire-reachable variant is checked
+/// against the decision recorded for it.
 #[test]
 fn every_message_kind_is_deliberately_classified() {
-    const ALLOWED: [MessageKind; 24] = [
-        MessageKind::Hello,
-        MessageKind::ListSessions,
-        MessageKind::Attach,
-        MessageKind::Detach,
-        MessageKind::Input,
-        MessageKind::Resize,
-        MessageKind::Interrupt,
-        MessageKind::CreateSession,
-        MessageKind::Kill,
-        MessageKind::ListDirectory,
-        MessageKind::RootsStartIngest,
-        MessageKind::RootsIngestionStatus,
-        MessageKind::RootsList,
-        MessageKind::RootsBiggestProject,
-        MessageKind::RootsAddProject,
-        MessageKind::RootsRenameProject,
-        MessageKind::RootsPausedProjects,
-        MessageKind::RootsSetPaused,
-        MessageKind::RootsStaleness,
-        MessageKind::RootsReingestProject,
-        MessageKind::RootsRebuild,
-        MessageKind::BrainListProjects,
-        MessageKind::BrainGetContext,
-        MessageKind::BrainSearch,
-    ];
     for byte in 0..=u8::MAX {
         let Ok(kind) = MessageKind::try_from(byte) else {
             continue;
         };
-        let expected = match kind {
-            // The two conditional kinds. With no `key` in the payload there is
-            // nothing to check against the protected set, so they are refused
-            // here and decided properly in
+        let may_a_remote_client_send_it = match kind {
+            // Allowed: the lease holder drives the whole environment (§3).
+            MessageKind::Hello
+            | MessageKind::ListSessions
+            | MessageKind::Attach
+            | MessageKind::Detach
+            | MessageKind::Input
+            | MessageKind::Resize
+            | MessageKind::Interrupt
+            | MessageKind::CreateSession
+            | MessageKind::Kill
+            | MessageKind::ListDirectory
+            | MessageKind::RootsStartIngest
+            | MessageKind::RootsIngestionStatus
+            | MessageKind::RootsList
+            | MessageKind::RootsBiggestProject
+            | MessageKind::RootsAddProject
+            | MessageKind::RootsRenameProject
+            | MessageKind::RootsPausedProjects
+            | MessageKind::RootsSetPaused
+            | MessageKind::RootsStaleness
+            | MessageKind::RootsReingestProject
+            | MessageKind::RootsRebuild
+            | MessageKind::BrainListProjects
+            | MessageKind::BrainGetContext
+            | MessageKind::BrainSearch => true,
+
+            // Conditional on the key, so the answer depends on the payload.
+            // With no `key` in `{}` there is nothing to check against the
+            // protected set and it is refused; the real decision is pinned by
             // `protected_rows_are_refused_on_both_get_and_set`.
             MessageKind::GetSetting | MessageKind::SetSetting => false,
-            other => ALLOWED.contains(&other),
+
+            // Local-only (§12 invariant 3): the host's view of who is watching
+            // it, and the host's power to throw them off.
+            // `PublishHostState` joins these two when it lands.
+            MessageKind::ListViewers | MessageKind::DisconnectViewer => false,
+
+            // Server → client. A client may never send one at all, remote or
+            // local; the dispatch answers "clients cannot send server message
+            // kinds" and the authorizer refuses them first.
+            MessageKind::HelloAck
+            | MessageKind::SessionList
+            | MessageKind::SessionCreated
+            | MessageKind::Snapshot
+            | MessageKind::Output
+            | MessageKind::SessionStatus
+            | MessageKind::Attention
+            | MessageKind::SessionExited
+            | MessageKind::Response
+            | MessageKind::ResyncRequired
+            | MessageKind::Error
+            | MessageKind::SessionResized
+            | MessageKind::RemoteViewers => false,
         };
         assert_eq!(
             authorize_remote(&frame(kind, b"{}")).is_ok(),
-            expected,
-            "{kind:?} (0x{byte:02x}) is classified differently than this test says; \
-             if that is deliberate, say so here"
+            may_a_remote_client_send_it,
+            "{kind:?} (0x{byte:02x}) is classified differently by `authorize_remote` \
+             than by this test; whichever one is wrong, they must agree deliberately"
         );
     }
 }

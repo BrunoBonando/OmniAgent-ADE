@@ -8,7 +8,9 @@
 //! where that stays true: every one of them asserts on what is *absent* from
 //! the reply as much as on what is in it.
 
-use omniagent_pty_daemon::protocol::{read_frame, write_frame, Frame, MessageKind};
+use omniagent_pty_daemon::protocol::{
+    read_frame, write_frame, Frame, MessageKind, LIST_DIRECTORY_MAX_ENTRIES, MAX_PAYLOAD_LEN,
+};
 use omniagent_pty_daemon::{serve_client, ClientTrust, DaemonServer};
 use std::path::Path;
 use std::time::Duration;
@@ -196,4 +198,82 @@ async fn an_unreadable_path_is_an_error_not_a_panic() {
     // ... and the connection survives all of it.
     let reply = client.list(serde_json::json!({"path": root.path()})).await;
     assert_eq!(reply.header.message_kind, MessageKind::Response);
+}
+
+/// A directory bigger than the cap comes back capped and **says so**.
+///
+/// Without the cap this is not a cosmetic overflow: around 20k entries pass
+/// `MAX_PAYLOAD_LEN`, at which point `send_json` fails, the dispatch breaks out
+/// of its loop, and the connection is dropped with no `Error` frame — the
+/// remote just dies. `node_modules` and `/usr/bin` reach these sizes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversized_directory_is_capped_and_says_so() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("listed");
+    std::fs::create_dir(&dir).unwrap();
+    // Directories named to sort *after* every file, so their survival is the
+    // sort-then-truncate order doing its job rather than luck.
+    for name in ["zzz-one", "zzz-two", "zzz-three"] {
+        std::fs::create_dir(dir.join(name)).unwrap();
+    }
+    for n in 0..LIST_DIRECTORY_MAX_ENTRIES + 100 {
+        std::fs::write(dir.join(format!("file-{n:05}.txt")), b"").unwrap();
+    }
+    let mut client = Client::start(root.path()).await;
+
+    let reply = client.list(serde_json::json!({"path": &dir})).await;
+    assert_eq!(
+        reply.header.message_kind,
+        MessageKind::Response,
+        "an oversized directory must be answered, never dropped"
+    );
+    let reply = payload(&reply);
+    let entries = reply["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), LIST_DIRECTORY_MAX_ENTRIES);
+    assert_eq!(reply["truncated"], true);
+
+    // The cap is applied after the sort, so a folder picker keeps its folders:
+    // an overflowing directory loses files, never directories.
+    let dirs: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry["is_dir"] == true)
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(dirs, ["zzz-one", "zzz-three", "zzz-two"]);
+
+    // ... and the connection is still usable afterwards.
+    let after = client.list(serde_json::json!({"path": root.path()})).await;
+    assert_eq!(after.header.message_kind, MessageKind::Response);
+    assert_eq!(payload(&after)["truncated"], false);
+}
+
+/// The worst case the cap is sized for, reached rather than reasoned about: a
+/// directory of maximum-length names made of the bytes JSON escapes to six
+/// bytes apiece. A lease holder has a shell, so it can create exactly this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_directory_of_worst_case_names_still_fits_in_one_frame() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("listed");
+    std::fs::create_dir(&dir).unwrap();
+    // 255 bytes is macOS's per-name limit; U+0001 is a control byte, legal in
+    // a filename and six bytes once JSON-encoded. The last four vary so the
+    // names are distinct.
+    for n in 0..LIST_DIRECTORY_MAX_ENTRIES + 10 {
+        let mut name = "\u{1}".repeat(251);
+        name.push_str(&format!("{n:04}"));
+        assert_eq!(name.len(), 255);
+        if std::fs::write(dir.join(&name), b"").is_err() {
+            return; // a filesystem refusing control bytes has nothing to prove
+        }
+    }
+    let mut client = Client::start(root.path()).await;
+
+    let reply = client.list(serde_json::json!({"path": &dir})).await;
+    assert_eq!(reply.header.message_kind, MessageKind::Response);
+    assert!(
+        reply.payload.len() < MAX_PAYLOAD_LEN,
+        "the capped worst case must fit in one frame: {} bytes",
+        reply.payload.len()
+    );
+    assert_eq!(payload(&reply)["truncated"], true);
 }

@@ -231,10 +231,38 @@ pub struct DirectoryEntryPayload {
 /// The `ListDirectory` reply, carried by the ordinary [`MessageKind::Response`]
 /// like every other Roots RPC's answer — there is deliberately no new response
 /// kind for it. Sorted directories-first, then case-insensitively by name.
+///
+/// `truncated` says the directory held more than [`LIST_DIRECTORY_MAX_ENTRIES`]
+/// and the tail was dropped. A caller must render it: silently showing part of
+/// a directory as if it were the whole one is how a folder picker lies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryListingPayload {
     pub entries: Vec<DirectoryEntryPayload>,
+    pub truncated: bool,
 }
+
+/// The most entries one `ListDirectory` reply carries.
+///
+/// This is a frame-size limit, not a taste one. A reply larger than
+/// [`MAX_PAYLOAD_LEN`] cannot be written at all, and the failure is ugly: the
+/// dispatch's `send_json` errors, the connection is dropped, and the remote
+/// gets no `Error` frame — it just dies. `node_modules` and `/usr/bin` reach
+/// these sizes, so this is a real directory, not an adversarial one.
+///
+/// The number comes from the worst case, which a lease holder can create on
+/// purpose (it has a shell): macOS caps a filename at 255 bytes, and a name of
+/// 255 control bytes JSON-escapes to `\u00XX` six bytes apiece — 1530 bytes,
+/// plus about 30 for `{"name":…,"is_dir":false},`. At 1561 bytes an entry,
+/// 512 entries is roughly 799 KB, comfortably inside the 1 MiB cap with the
+/// envelope. Ordinary names run about 50 bytes, so the real ceiling this
+/// imposes is the count, not the bytes.
+pub const LIST_DIRECTORY_MAX_ENTRIES: usize = 512;
+
+/// The arithmetic above, enforced by the compiler rather than trusted: raising
+/// [`LIST_DIRECTORY_MAX_ENTRIES`] past what a frame can hold fails the build
+/// instead of failing a connection. A worst-case entry is a 255-byte name of
+/// control bytes at six bytes apiece, plus about 30 for the surrounding JSON.
+const _: () = assert!(LIST_DIRECTORY_MAX_ENTRIES * (255 * 6 + 30) < MAX_PAYLOAD_LEN);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
