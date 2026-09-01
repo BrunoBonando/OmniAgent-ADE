@@ -892,7 +892,7 @@ where
     // `Local` connection cannot reach this block at all, and a `Remote` one
     // has nowhere else to get an `AssertedIdentity` from.
     if let ClientTrust::Remote(asserted) = &trust {
-        if let Err(machine) = connections.take_lease(
+        match connections.take_lease(
             connection.id,
             LeaseHolder {
                 viewer_id: identity.viewer_id.clone(),
@@ -900,8 +900,23 @@ where
                 asserted: (**asserted).clone(),
             },
         ) {
-            send_error(&writer, request, anyhow!("in use by {machine}")).await?;
-            return Ok(());
+            Ok(None) => {}
+            // The same viewer coming back after a blip (spec §11). It now
+            // holds the machine; the socket it left behind is cancelled here
+            // rather than left to time out, because that socket is still
+            // attached to the sessions this connection is about to drive.
+            Ok(Some(stale)) => {
+                tracing::info!(
+                    "{machine_name} reclaimed the lease from the connection it left behind"
+                );
+                if connections.cancel_connection(stale) {
+                    connections.notify_presence();
+                }
+            }
+            Err(machine) => {
+                send_error(&writer, request, anyhow!("in use by {machine}")).await?;
+                return Ok(());
+            }
         }
     }
     let viewer_id = identity.viewer_id.clone();

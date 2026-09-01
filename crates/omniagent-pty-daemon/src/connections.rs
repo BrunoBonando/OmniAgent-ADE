@@ -91,6 +91,29 @@ pub struct AssertedIdentity {
     pub client: Option<String>,
 }
 
+impl AssertedIdentity {
+    /// Whether the relay says these two connections belong to the same
+    /// person — the gate on [`LeaseHolder::is_the_same_viewer_as`].
+    ///
+    /// `user_sub` when the relay sent one, else the normalized
+    /// `account_email`; a pair that agrees on neither is not the same person,
+    /// so this fails closed. `ip`, `country` and `client` are deliberately
+    /// **not** compared: they are precisely the fields a reconnect changes —
+    /// a viewer that came back on another network is the case this exists for.
+    fn is_the_same_account_as(&self, other: &Self) -> bool {
+        match (&self.user_sub, &other.user_sub) {
+            (Some(mine), Some(theirs)) => !mine.is_empty() && mine == theirs,
+            (None, None) => match (&self.account_email, &other.account_email) {
+                (Some(mine), Some(theirs)) => {
+                    !mine.trim().is_empty() && mine.trim().eq_ignore_ascii_case(theirs.trim())
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
 /// Who holds the lease (spec §3) — deliberately *not* a [`ViewerIdentity`].
 ///
 /// A remote client older than phase 2 sends no `viewer_id` at all, and it can
@@ -116,6 +139,42 @@ pub struct LeaseHolder {
     /// connection, which by construction has one, so this is not an `Option`:
     /// there is no way to record a holder whose identity nobody asserted.
     pub asserted: AssertedIdentity,
+}
+
+impl LeaseHolder {
+    /// Whether `candidate` is **this same viewer coming back** — the one case
+    /// in which the machine changes hands without the host doing anything
+    /// (spec §11, "Viewer link drops mid-session").
+    ///
+    /// A viewer whose link blips re-dials onto a fresh relay data socket while
+    /// the relay is still holding the old one. Without this it is told "in use
+    /// by <itself>" and has to wait its own corpse out.
+    ///
+    /// **The gate is the relay-asserted account**, which is the half no client
+    /// can forge; the self-reported `viewer_id` then says *which machine*
+    /// within that account. Consulting a self-reported field at all is safe
+    /// only because of what has already happened by the time this runs:
+    /// `server::viewer_owns_this_account` refuses every connection whose
+    /// asserted account is not the one this daemon serves, so both sides of
+    /// this comparison are the same person, and the worst a forged id can do
+    /// is let the owner's second Mac take over from the owner's first. It
+    /// cannot cross an account boundary, which is the boundary that matters.
+    ///
+    /// It is *not* keyed on `machine_name`: names are not unique and nothing
+    /// stops two machines sharing one. Both ids must be present and equal, so
+    /// an anonymous viewer (a pre-phase-2 app, no id at all) never reclaims
+    /// and is refused like any other second machine.
+    ///
+    /// The durable fix is for the relay to assert a per-viewer identifier of
+    /// its own; §9's `viewer` dictionary has none today, and inventing one
+    /// daemon-side would be inventing it out of client-supplied data.
+    fn is_the_same_viewer_as(&self, candidate: &Self) -> bool {
+        self.asserted.is_the_same_account_as(&candidate.asserted)
+            && match (&self.viewer_id, &candidate.viewer_id) {
+                (Some(mine), Some(theirs)) => !mine.is_empty() && mine == theirs,
+                _ => false,
+            }
+    }
 }
 
 /// One live client connection.
@@ -246,23 +305,65 @@ impl ConnectionRegistry {
         *self.local_gone()
     }
 
-    /// Claims the machine for this connection: `Ok(())` if it now holds the
-    /// lease, `Err(machine_name)` naming the connection that already does.
+    /// Claims the machine for this connection.
+    ///
+    /// - `Ok(None)` — the lease was free and is now this connection's.
+    /// - `Ok(Some(stale))` — the **same viewer** already held it and this
+    ///   connection has taken it over; `stale` is the connection id the caller
+    ///   must now cancel, because it is a socket that will otherwise sit there
+    ///   attached to sessions the returning viewer is driving. See
+    ///   [`LeaseHolder::is_the_same_viewer_as`] for why "same viewer" is what
+    ///   the relay asserted and not what anyone claimed.
+    /// - `Err(machine_name)` — a different machine is driving, named so the
+    ///   refusal is a sentence a human can act on.
     ///
     /// Exclusivity is the check and the write happening under one guard — two
-    /// remote `Hello`s racing cannot both come back `Ok`. The caller passes
-    /// the holder rather than the registry looking it up, so this touches one
-    /// lock and so that the lease can be taken *before* a connection is put on
-    /// the roster (see `serve_client`).
-    pub fn take_lease(&self, id: u64, holder: LeaseHolder) -> Result<(), String> {
+    /// remote `Hello`s racing cannot both come back with the machine. The
+    /// caller passes the holder rather than the registry looking it up, so
+    /// this touches one lock and so that the lease can be taken *before* a
+    /// connection is put on the roster (see `serve_client`).
+    pub fn take_lease(&self, id: u64, holder: LeaseHolder) -> Result<Option<u64>, String> {
         let mut lease = self.lease();
         match lease.as_ref() {
+            Some((stale, held)) if held.is_the_same_viewer_as(&holder) => {
+                let stale = *stale;
+                *lease = Some((id, holder));
+                Ok(Some(stale))
+            }
             Some((_, held)) => Err(held.machine_name.clone()),
             None => {
                 *lease = Some((id, holder));
-                Ok(())
+                Ok(None)
             }
         }
+    }
+
+    /// Drops one connection by id, cancelling it — the reclaim's other half.
+    /// Returns whether the roster changed.
+    ///
+    /// **Remote only**, for the same structural reason [`Self::cancel_viewer`]
+    /// is: nothing in this family may reach the host's own app, and the
+    /// local-absence clock that [`Self::remove`] keeps is not this function's
+    /// to maintain. A remote entry never touches it.
+    ///
+    /// The lease is deliberately left alone. The only caller has just taken it
+    /// for *itself*, and `release_lease` matches on the holder id, so calling
+    /// it here would be a no-op with a misleading name.
+    pub fn cancel_connection(&self, id: u64) -> bool {
+        let mut entries = self.entries();
+        if !entries
+            .get(&id)
+            .is_some_and(|entry| entry.trust.is_remote())
+        {
+            return false;
+        }
+        entries
+            .remove(&id)
+            .map(|entry| {
+                entry.cancel.cancel();
+                entry.is_listed_viewer()
+            })
+            .unwrap_or(false)
     }
 
     /// Frees the lease **if this connection is the one holding it**.
@@ -700,7 +801,7 @@ mod tests {
 
         assert_eq!(
             registry.take_lease(air, holder(Some("v-air"), "Air")),
-            Ok(())
+            Ok(None)
         );
         assert_eq!(
             registry.take_lease(mini, holder(Some("v-mini"), "Mini")),
@@ -717,7 +818,98 @@ mod tests {
         assert!(registry.lease_holder().is_none());
         assert_eq!(
             registry.take_lease(mini, holder(Some("v-mini"), "Mini")),
-            Ok(())
+            Ok(None)
+        );
+    }
+
+    /// The reclaim (spec §11), at the registry: the viewer that already holds
+    /// the machine takes it over and is handed the stale connection id to
+    /// cancel; a different machine is still refused.
+    #[test]
+    fn the_same_viewer_reclaims_the_lease_and_a_different_machine_does_not() {
+        let registry = ConnectionRegistry::default();
+        let air = registry.register(remote(), CancellationToken::new());
+        let air_again = registry.register(remote(), CancellationToken::new());
+        let mini = registry.register(remote(), CancellationToken::new());
+
+        assert_eq!(
+            registry.take_lease(air, holder(Some("v-air"), "Air")),
+            Ok(None)
+        );
+        assert_eq!(
+            registry.take_lease(mini, holder(Some("v-mini"), "Mini")),
+            Err("Air".to_string())
+        );
+        // The same viewer, on a second socket, with the machine renamed since
+        // — the name is not the key, the asserted account plus the id is.
+        assert_eq!(
+            registry.take_lease(air_again, holder(Some("v-air"), "Air (2)")),
+            Ok(Some(air)),
+            "the returning viewer did not reclaim, or was not told what to cancel"
+        );
+        assert_eq!(
+            registry.lease_holder().and_then(|held| held.viewer_id),
+            Some("v-air".to_string())
+        );
+    }
+
+    /// The gate on the reclaim. Same claimed `viewer_id`, a different
+    /// relay-asserted account: refused. `server::viewer_owns_this_account`
+    /// already refuses such a connection long before the lease, and this
+    /// holds the registry to the same rule on its own — the point of two
+    /// independent checks is that neither leans on the other.
+    #[test]
+    fn a_different_asserted_account_never_reclaims_even_with_the_same_viewer_id() {
+        let registry = ConnectionRegistry::default();
+        let mine = registry.register(remote(), CancellationToken::new());
+        let theirs = registry.register(remote(), CancellationToken::new());
+        registry
+            .take_lease(mine, holder(Some("v-air"), "Air"))
+            .unwrap();
+
+        let stranger = LeaseHolder {
+            asserted: asserted_for("someone@else.com"),
+            ..holder(Some("v-air"), "Air")
+        };
+        assert_eq!(
+            registry.take_lease(theirs, stranger),
+            Err("Air".to_string())
+        );
+    }
+
+    /// An anonymous holder — a pre-phase-2 app with no `viewer_id` — is never
+    /// reclaimed from: there is nothing on either side that says the two
+    /// connections are one machine, so "no id" must not compare equal to
+    /// "no id".
+    #[test]
+    fn an_anonymous_holder_is_never_reclaimed_from() {
+        let registry = ConnectionRegistry::default();
+        let first = registry.register(remote(), CancellationToken::new());
+        let second = registry.register(remote(), CancellationToken::new());
+        registry
+            .take_lease(first, holder(None, "Unknown Mac"))
+            .unwrap();
+        assert_eq!(
+            registry.take_lease(second, holder(None, "Unknown Mac")),
+            Err("Unknown Mac".to_string())
+        );
+    }
+
+    /// `cancel_connection` reaches remote connections only, for
+    /// `cancel_viewer`'s reason: nothing in this family may drop the host's
+    /// own app, and the local-absence clock is `remove`'s to keep.
+    #[test]
+    fn cancel_connection_cannot_reach_the_hosts_own_app() {
+        let registry = ConnectionRegistry::default();
+        let host_cancel = CancellationToken::new();
+        let host = registry.register(ClientTrust::Local, host_cancel.clone());
+
+        assert!(!registry.cancel_connection(host));
+        assert!(!host_cancel.is_cancelled());
+        assert!(registry.has_local(), "the host's own app was dropped");
+        assert!(
+            !registry.cancel_connection(9_999),
+            "cancelling an id that is not here is a no-op, not a panic"
         );
     }
 

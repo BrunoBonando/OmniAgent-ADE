@@ -215,3 +215,124 @@ async fn local_connections_never_take_the_lease() {
         Some("MacBook Pro".to_string())
     );
 }
+
+// ---------------------------------------------------------------------------
+// Reconnect: the same viewer reclaims its own lease (spec §11)
+// ---------------------------------------------------------------------------
+
+/// A viewer whose link blips comes back on a **new** relay data socket while
+/// the old one is still up — the relay holds two for one machine until the
+/// dead one is reaped. Without this, the returning viewer is told "in use by
+/// <itself>" and has to wait out its own corpse; spec §11 says a reconnect
+/// works.
+///
+/// So a `Hello` from the viewer that already holds the lease takes it over,
+/// and the socket it left behind is cancelled rather than left to linger with
+/// a claim on the machine.
+#[tokio::test]
+async fn the_same_viewer_reclaims_the_lease_from_the_socket_it_left_behind() {
+    let harness = support::daemon_with_local_client().await;
+    let mut first = harness.connect_remote("MacBook Pro");
+    assert!(matches!(first.hello().await, HelloResult::Ack(_)));
+
+    // The same machine, re-dialled. Nothing has told the daemon the first
+    // socket is dead, and it is still open right here.
+    let mut again = harness.connect_remote("MacBook Pro");
+    assert!(matches!(again.hello().await, HelloResult::Ack(_)));
+
+    assert_eq!(
+        harness
+            .ctx
+            .connections
+            .lease_holder()
+            .and_then(|holder| holder.viewer_id),
+        Some("v-macbook-pro".to_string()),
+        "the returning viewer did not end up holding the machine"
+    );
+    first.wait_until_closed().await;
+    // One machine, one roster row — the stale connection is gone, not merely
+    // outranked.
+    assert_eq!(harness.ctx.connections.viewers().len(), 1);
+}
+
+/// **The half that must not move.** A different machine — same account, same
+/// everything the relay asserts, because both Macs belong to one person — is
+/// still refused while the lease is held. The reclaim is for a viewer coming
+/// back, not a door into somebody else's session.
+#[tokio::test]
+async fn a_different_machine_on_the_same_account_is_still_refused() {
+    let harness = support::daemon_with_local_client().await;
+    let mut holder = harness.connect_remote("MacBook Pro");
+    assert!(matches!(holder.hello().await, HelloResult::Ack(_)));
+
+    let mut other = harness.connect_remote("Mac mini");
+    match other.hello().await {
+        HelloResult::Error(message) => {
+            assert!(message.contains("in use by MacBook Pro"), "{message}")
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
+    assert_eq!(
+        harness
+            .ctx
+            .connections
+            .lease_holder()
+            .map(|holder| holder.machine_name),
+        Some("MacBook Pro".to_string()),
+        "the refused machine took the lease anyway"
+    );
+}
+
+/// The account gate on the reclaim, which is the part a caller cannot forge.
+/// Same claimed viewer id as the holder, a different asserted account: refused
+/// — and refused by the account check, before the lease is even consulted, so
+/// the message says nothing about who is driving.
+#[tokio::test]
+async fn a_viewer_from_another_account_cannot_reclaim() {
+    let harness = support::daemon_for_account(support::HOST_ACCOUNT_EMAIL).await;
+    let mut holder = harness.connect_remote("MacBook Pro");
+    assert!(matches!(holder.hello().await, HelloResult::Ack(_)));
+
+    // Same machine name, so the same self-reported viewer id — and a stranger.
+    let mut stranger = harness.connect_remote_asserting("MacBook Pro", "someone@else.com");
+    match stranger.hello().await {
+        HelloResult::Error(message) => assert!(
+            !message.contains("in use by"),
+            "a stranger was told who is driving: {message}"
+        ),
+        other => panic!("expected refusal, got {other:?}"),
+    }
+    assert_eq!(
+        harness
+            .ctx
+            .connections
+            .lease_holder()
+            .map(|holder| holder.machine_name),
+        Some("MacBook Pro".to_string()),
+        "a stranger took the lease from the machine holding it"
+    );
+}
+
+/// An anonymous viewer — an app older than phase 2, which sends no
+/// `viewer_id` — never reclaims. There is no id on either side to establish
+/// that the two connections are the same machine, so the second is refused
+/// exactly as any other second machine is.
+#[tokio::test]
+async fn an_anonymous_viewer_never_reclaims() {
+    let harness = support::daemon_with_local_client().await;
+    let mut first = harness.connect_remote("MacBook Pro");
+    assert!(matches!(
+        first.hello_without_naming_itself().await,
+        HelloResult::Ack(_)
+    ));
+
+    let mut again = harness.connect_remote("MacBook Pro");
+    assert!(matches!(
+        again.hello_without_naming_itself().await,
+        HelloResult::Error(_)
+    ));
+    assert!(
+        first.is_open().await,
+        "the anonymous holder was cancelled by a connection that never reclaimed"
+    );
+}

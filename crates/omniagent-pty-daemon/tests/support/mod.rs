@@ -359,6 +359,22 @@ impl Client {
         .map_or(true, |read| read.is_ok())
     }
 
+    /// Blocks until the daemon has closed this connection.
+    ///
+    /// **Terminal**, for [`Self::is_open`]'s reason: it reads. A dropped
+    /// connection reaches the far end a scheduling beat after the daemon lets
+    /// go of it, so the alternative to polling is a fixed sleep, flaky in
+    /// whichever direction it is wrong.
+    pub async fn wait_until_closed(&mut self) {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        while self.is_open().await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the connection was still open {PATIENCE:?} after it should have been dropped"
+            );
+        }
+    }
+
     /// [`Self::hello`] from a client that sends no `viewer_id` — an app older
     /// than phase 2, which the daemon can label but never kick by id.
     pub async fn hello_without_naming_itself(&mut self) -> HelloResult {
