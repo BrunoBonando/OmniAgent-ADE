@@ -26,7 +26,9 @@ final class CommandPaletteTests: XCTestCase {
                 .map(\.id),
             [
                 "session:new-branch",
-                "destination:home", "destination:todo", "destination:terminals", "destination:settings",
+                "destination:home", "destination:todo", "destination:insights",
+                "destination:terminals", "destination:settings",
+                "sidebar:help",
                 "titlebar:notifications", "titlebar:account",
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
@@ -423,7 +425,7 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(account.section, .places)
     }
 
-    func testTheSidebarsThreeDestinationsAreRowsWithTheirOwnIcons() {
+    func testTheSidebarsDestinationsAreRowsWithTheirOwnIcons() {
         let commands = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil
         )
@@ -431,16 +433,38 @@ final class CommandPaletteTests: XCTestCase {
             if case .showDestination = $0.action { return true } else { return false }
         }
 
-        XCTAssertEqual(destinations.map(\.title), ["Home", "To Do List", "Desk", "Settings"])
+        XCTAssertEqual(
+            destinations.map(\.title), ["Home", "To Do List", "Insights", "Desk", "Settings"]
+        )
         XCTAssertEqual(destinations.map(\.subtitle), [
+            "start a session",
             "under development",
-            "under development",
+            "usage and activity",
             "no session",
-            "under development",
+            "the app's settings",
         ])
         XCTAssertEqual(destinations.first?.action, .showDestination(.home))
         // Their own icons, not the Actions section's ⌘.
-        XCTAssertEqual(destinations.map(\.icon), ["house", "checklist", "rectangle.split.2x2", "gearshape"])
+        XCTAssertEqual(destinations.map(\.icon), [
+            "house", "checklist", "chart.bar.xaxis", "rectangle.split.2x2", "gearshape",
+        ])
+    }
+
+    /// The sidebar's foot in the spotlight: Settings is already a destination
+    /// row, Help is a menu with nowhere else its name is written (the
+    /// standing rule, and the flow layout spec's §8).
+    func testTheSidebarsHelpRowIsASpotlightRow() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil
+        )
+
+        let help = try XCTUnwrap(commands.first { $0.id == "sidebar:help" })
+        XCTAssertEqual(help.title, "Help")
+        XCTAssertEqual(help.symbol, "questionmark.circle")
+        XCTAssertEqual(help.subtitle, "Sidebar")
+        XCTAssertEqual(help.keywords, "help support docs privacy notices")
+        XCTAssertEqual(help.action, .showHelp)
+        XCTAssertEqual(help.section, .places)
     }
 
     func testATerminalsLiveTitleIsSearchableAndShownWhenTheNameHidesIt() {

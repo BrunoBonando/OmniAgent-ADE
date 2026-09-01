@@ -5,7 +5,7 @@ import XCTest
 
 /// The flat Copilot-style sidebar from the 2026-08-20 navigation redesign:
 /// the fixed nav rows, the Search seam, the Workspaces section, the pinned
-/// account row — and the content routing the rows drive on the controller.
+/// foot — and the content routing the rows drive on the controller.
 final class NavigationSidebarTests: XCTestCase {
     private func makeSidebar() -> NavigationSidebarView {
         let sidebar = NavigationSidebarView()
@@ -16,21 +16,22 @@ final class NavigationSidebarTests: XCTestCase {
 
     // MARK: - Fixed nav rows
 
-    /// The spec's order, top to bottom: Home, To Do List, Search.
+    /// The spec's order, top to bottom: Home, To Do List, Insights, Search
+    /// (the flow layout spec's §3 slid Insights in above the seam).
     func testNavRowsArePresentInTheSpecOrder() {
         let sidebar = makeSidebar()
-        XCTAssertEqual(sidebar.navRows.map(\.item), [.home, .todo, .search])
+        XCTAssertEqual(sidebar.navRows.map(\.item), [.home, .todo, .insights, .search])
         XCTAssertEqual(
             sidebar.navRows.map(\.item?.title),
-            ["Home", "To Do List", "Search"]
+            ["Home", "To Do List", "Insights", "Search"]
         )
         XCTAssertEqual(
             sidebar.navRows.map(\.item?.symbol),
-            ["house", "checklist", "magnifyingglass"]
+            ["house", "checklist", "chart.bar.xaxis", "magnifyingglass"]
         )
     }
 
-    func testHomeAndToDoListRouteAsDestinations() throws {
+    func testHomeToDoListAndInsightsRouteAsDestinations() throws {
         let sidebar = makeSidebar()
         var reported: [WorkspaceDestination] = []
         sidebar.onSelectDestination = { reported.append($0) }
@@ -43,6 +44,11 @@ final class NavigationSidebarTests: XCTestCase {
         try XCTUnwrap(sidebar.navRows.first { $0.item == .todo }?.onPress)()
         XCTAssertEqual(reported, [.home, .todo])
         XCTAssertEqual(sidebar.navRows.filter(\.isSelected).map(\.item), [.todo])
+
+        try XCTUnwrap(sidebar.navRows.first { $0.item == .insights }?.onPress)()
+        XCTAssertEqual(reported, [.home, .todo, .insights])
+        XCTAssertEqual(sidebar.destination, .insights)
+        XCTAssertEqual(sidebar.navRows.filter(\.isSelected).map(\.item), [.insights])
     }
 
     /// Search is an action, not a place: it raises the spotlight and the lit
@@ -87,112 +93,117 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertLessThanOrEqual(top(sidebar.workspacesTree), top(sidebar.workspacesHeader))
     }
 
-    // MARK: - Account row
+    // MARK: - The foot
 
-    /// Pinned to the floor, but inset from it: the chip is a card that has to
-    /// clear the window's corner curve, not a strip flush with the edges.
-    func testTheAccountRowIsPinnedAtTheBottom() {
+    /// The floor of the column, top to bottom: the cards, the machine gauges,
+    /// then Settings and Help — one 8pt gutter apart, on the cards' own side
+    /// insets, 10pt off the bottom edge (the flow layout spec's §3). The
+    /// account chip that used to hold that spot is gone; the avatar lives in
+    /// the title bar now.
+    func testTheFootRunsCardsGaugesThenTheTwoRows() throws {
         let sidebar = makeSidebar()
-        XCTAssertTrue(sidebar.accountRow.superview === sidebar)
-        XCTAssertEqual(sidebar.accountRow.frame.minY, 10, accuracy: 0.5, "inset off the bottom edge")
+        let bottomCards = try XCTUnwrap(sidebar.claudeLimits.superview)
+        let foot: [NSView] = [bottomCards, sidebar.statsRow, sidebar.footerRows]
+
+        XCTAssertTrue(sidebar.footerRows.superview === sidebar)
+        XCTAssertEqual(sidebar.footerRows.frame.minY, 10, accuracy: 0.5, "inset off the bottom edge")
+        for view in foot {
+            XCTAssertEqual(
+                view.frame.width, sidebar.bounds.width - 16, accuracy: 0.5,
+                "\(type(of: view)) is inset from both side edges"
+            )
+        }
+        for (above, below) in zip(foot, foot.dropFirst()) {
+            XCTAssertEqual(
+                below.frame.maxY + 8, above.frame.minY, accuracy: 0.5,
+                "\(type(of: below)) sits one gutter under \(type(of: above))"
+            )
+        }
         XCTAssertEqual(
-            sidebar.accountRow.frame.width, sidebar.bounds.width - 16, accuracy: 0.5,
-            "inset from both side edges"
+            sidebar.footerRows.arrangedSubviews.map { ($0 as? SidebarNavRowView)?.titleText },
+            ["Settings", "Help"]
         )
-        // Every row above it — but not the two full-height pieces that are not
-        // rows at all: the glass ground runs the whole column *under* the chip,
-        // and the trailing edge runs it *beside* the chip.
+
+        // Every other row is above the foot — but not the two full-height
+        // pieces that are not rows at all: the glass ground runs the whole
+        // column *under* them, and the trailing edge runs it *beside* them.
         let rows = sidebar.subviews.filter {
-            $0 !== sidebar.accountRow && $0 !== sidebar.glassHost && $0 !== sidebar.trailingEdge
+            $0 !== sidebar.footerRows && $0 !== sidebar.glassHost && $0 !== sidebar.trailingEdge
         }
         for sibling in rows {
             XCTAssertGreaterThanOrEqual(
                 sibling.frame.minY,
-                sidebar.accountRow.frame.maxY - 0.5,
-                "\(type(of: sibling)) overlaps the pinned account row"
+                sidebar.footerRows.frame.maxY - 0.5,
+                "\(type(of: sibling)) overlaps the pinned footer rows"
             )
         }
     }
 
-    /// A placeholder until real accounts exist: a generic avatar and
-    /// "Not signed in" — never the machine user's name.
-    func testTheAccountRowIsAPlaceholder() {
-        XCTAssertEqual(makeSidebar().accountRow.accountLabel, "Not signed in")
-    }
-
-    func testTheGearOpensSettings() throws {
+    func testTheSettingsRowReportsItsPress() throws {
         let sidebar = makeSidebar()
         var opened = 0
         sidebar.onOpenSettings = { opened += 1 }
-        try XCTUnwrap(sidebar.accountRow.gear.onPress)()
+        try XCTUnwrap(sidebar.settingsRow.onPress)()
         XCTAssertEqual(opened, 1)
     }
 
-    /// A real account: its name in the primary ink, and — until a picture
-    /// arrives — its own initials in the circle.
-    func testTheAccountRowShowsTheNameAndItsInitials() {
+    /// Help is its own report — the sidebar has no menu of its own to pop,
+    /// so the controller does it.
+    func testTheHelpRowReportsItsPress() throws {
         let sidebar = makeSidebar()
-        sidebar.accountRow.apply(name: "Bruno Bonando", picture: nil)
-        XCTAssertEqual(sidebar.accountRow.accountLabel, "Bruno Bonando")
-        XCTAssertEqual(sidebar.accountRow.avatarModeForTesting, .initials("BB"))
-    }
-
-    /// And back again: no name is the signed-out state, glyph and all — the
-    /// row must never keep the last account it was shown.
-    func testNoNameReturnsTheRowToThePlaceholderAndTheGenericGlyph() {
-        let sidebar = makeSidebar()
-        sidebar.accountRow.apply(name: "Bruno Bonando", picture: nil)
-        sidebar.accountRow.apply(name: nil, picture: nil)
-        XCTAssertEqual(sidebar.accountRow.accountLabel, "Not signed in")
-        XCTAssertEqual(sidebar.accountRow.avatarModeForTesting, .glyph)
-    }
-
-    func testAPictureTakesTheCircleOverTheInitials() {
-        let sidebar = makeSidebar()
-        let picture = NSImage(size: NSSize(width: 44, height: 44))
-        sidebar.accountRow.apply(name: "Bruno Bonando", picture: picture)
-        XCTAssertEqual(sidebar.accountRow.avatarModeForTesting, .picture)
-    }
-
-    /// Two buttons in one chip: the account half routes to the account, the
-    /// gear still offers the Settings panel.
-    func testTheAccountHalfAndTheGearReportSeparately() throws {
-        let sidebar = makeSidebar()
-        var account = 0
+        var helps = 0
         var settings = 0
-        sidebar.onOpenAccount = { account += 1 }
+        sidebar.onHelp = { helps += 1 }
         sidebar.onOpenSettings = { settings += 1 }
 
-        try XCTUnwrap(sidebar.accountRow.accountButton.onPress)()
-        XCTAssertEqual([account, settings], [1, 0])
-
-        try XCTUnwrap(sidebar.accountRow.gear.onPress)()
-        XCTAssertEqual([account, settings], [1, 1])
+        try XCTUnwrap(sidebar.helpRow.onPress)()
+        XCTAssertEqual([helps, settings], [1, 0])
     }
 
-    /// The hand cursor is drawn over exactly these two frames, so they have
-    /// to be real, disjoint and inside the chip — an empty rect would take
-    /// the pointer feedback with it and nothing else would notice.
-    func testTheAccountRowsTwoPressableHalvesAreRealAndDisjoint() {
-        let row = makeSidebar().accountRow
-        XCTAssertGreaterThan(row.accountButton.frame.width, 0)
-        XCTAssertGreaterThan(row.accountButton.frame.height, 0)
-        XCTAssertGreaterThan(row.gear.frame.width, 0)
-        XCTAssertFalse(row.accountButton.frame.intersects(row.gear.frame))
-        XCTAssertTrue(row.bounds.contains(row.accountButton.frame))
-        XCTAssertTrue(row.bounds.contains(row.gear.frame))
+    /// The Settings row is the one row outside the nav stack that lights, and
+    /// it lights for its own page only.
+    func testTheSettingsRowIsLitOnlyOnTheSettingsPage() {
+        let sidebar = makeSidebar()
+        for destination in WorkspaceDestination.allCases where destination != .settings {
+            sidebar.applyDestination(destination)
+            XCTAssertFalse(sidebar.settingsRow.isSelected, "lit on \(destination.rawValue)")
+        }
+        sidebar.applyDestination(.settings)
+        XCTAssertTrue(sidebar.settingsRow.isSelected)
+        XCTAssertTrue(sidebar.navRows.filter(\.isSelected).isEmpty, "Settings has no nav row")
+        XCTAssertFalse(sidebar.helpRow.isSelected, "Help never lights — it is a menu, not a place")
+    }
+
+    /// The badge: a red dot at the row's trailing edge, off unless something
+    /// asks for it.
+    func testTheBadgeIsARedDotAtTheRowsTrailingEdge() {
+        let sidebar = makeSidebar()
+        let row = sidebar.settingsRow
+        XCTAssertFalse(row.isBadged, "nothing is waiting by default")
+        XCTAssertFalse(sidebar.helpRow.isBadged)
+
+        row.isBadged = true
+        sidebar.layoutSubtreeIfNeeded()
+        let dot = row.badgeFrameForTesting
+        XCTAssertEqual(dot.width, SidebarNavRowView.badgeDiameter, accuracy: 0.5)
+        XCTAssertEqual(dot.height, SidebarNavRowView.badgeDiameter, accuracy: 0.5)
+        XCTAssertEqual(dot.maxX, row.bounds.maxX - 10, accuracy: 0.5, "10pt inside the trailing edge")
+        XCTAssertEqual(dot.midY, row.bounds.midY, accuracy: 0.5)
+
+        row.isBadged = false
+        XCTAssertFalse(row.isBadged)
     }
 
     // MARK: - System stats
 
-    /// The machine card sits directly above the account chip, on the same
+    /// The machine card sits directly above the footer rows, on the same
     /// side insets.
-    func testTheStatsCardSitsAboveTheAccountRow() {
+    func testTheStatsCardSitsAboveTheFooterRows() {
         let sidebar = makeSidebar()
         XCTAssertTrue(sidebar.statsRow.superview === sidebar)
         XCTAssertEqual(
             sidebar.statsRow.frame.minY,
-            sidebar.accountRow.frame.maxY + 8,
+            sidebar.footerRows.frame.maxY + 8,
             accuracy: 0.5
         )
         XCTAssertEqual(sidebar.statsRow.frame.width, sidebar.bounds.width - 16, accuracy: 0.5)
@@ -412,66 +423,113 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(deletes, 1)
     }
 
-    /// The gear offers the panel beside itself, tip on the gear, inside the
-    /// content area; a pick docks it under the "Settings" title; the gear
-    /// again offers it back; leaving the page hides it.
-    func testTheGearOffersTheSettingsPanelAndAPickDocksIt() throws {
+    /// The foot's Settings row opens the page, and the panel arrives docked
+    /// under the "Settings" title — the only place it has since the gear that
+    /// used to offer it beside itself went with the account row. Leaving the
+    /// page hides it and forgets the pick.
+    func testTheSettingsRowOpensThePageWithThePanelDocked() throws {
         let controller = makeController()
         defer { controller.close() }
         controller.showWindow(nil)
         controller.window?.layoutIfNeeded()
-        let sidebar = controller.shellSidebar
-        let gear = sidebar.accountRow.gear
         let panel = controller.settingsPanel
         XCTAssertEqual(controller.settingsPanelPlace, .hidden)
         XCTAssertTrue(panel.isHidden)
 
-        try XCTUnwrap(gear.onPress)()
-        XCTAssertEqual(controller.settingsPanelPlace, .offered)
-        XCTAssertEqual(controller.destination, .home, "offered, not opened")
-        XCTAssertFalse(panel.isHidden)
-        XCTAssertTrue(panel.rows.allSatisfy { !$0.isSelected }, "off the page, nothing is lit")
-        XCTAssertTrue(panel.isTipVisible)
-        let room = controller.settingsPanelRoomForTesting
-        let offered = controller.settingsPanelTarget
-        XCTAssertGreaterThanOrEqual(offered.minX, room.minX, "beside the sidebar, inside the content area")
-        XCTAssertGreaterThanOrEqual(offered.minY, room.minY, "inside the app")
-        let gearMidY = controller.settingsPanelRoomConvert(gear.bounds, from: gear).midY
-        XCTAssertEqual(offered.minY + panel.tipCenterYForTesting, gearMidY, accuracy: 1, "the drop is on the gear")
+        try XCTUnwrap(controller.shellSidebar.settingsRow.onPress)()
 
-        // Typing narrows the rows; the panel keeps its foot.
-        panel.setQueryForTesting("acc")
-        XCTAssertEqual(panel.visibleTitlesForTesting, ["Accounts", "Accessibility"])
-        XCTAssertEqual(controller.settingsPanelTarget.minY, offered.minY, accuracy: 0.5)
-        XCTAssertLessThan(controller.settingsPanelTarget.height, offered.height)
-
-        try XCTUnwrap(panel.rows[1].onPress)()
         XCTAssertEqual(controller.destination, .settings)
-        XCTAssertEqual(controller.settingsView.section, .accounts)
+        XCTAssertEqual(controller.settingsView.section, .general)
         XCTAssertEqual(controller.settingsPanelPlace, .docked)
-        XCTAssertTrue(panel.rows[1].isSelected)
-        XCTAssertEqual(panel.search.stringValue, "", "the query is spent")
-        XCTAssertEqual(panel.visibleTitlesForTesting.count, SettingsSection.allCases.count)
-        XCTAssertFalse(panel.isTipVisible)
+        XCTAssertFalse(panel.isHidden)
+        XCTAssertTrue(panel.rows[0].isSelected, "on the page, the section is lit")
+        XCTAssertTrue(controller.shellSidebar.settingsRow.isSelected, "and so is the row that opened it")
+
+        let room = controller.settingsPanelRoomForTesting
         let docked = controller.settingsPanelTarget
         XCTAssertEqual(
-            docked.minX + SettingsSidebarView.lane,
+            docked.minX,
             controller.sessionTitleField.frame.minX,
             accuracy: 0.5,
             "the card under the title's left edge"
         )
         XCTAssertEqual(docked.maxY, room.maxY - WorkspaceTitleBarView.height - 10, accuracy: 0.5, "just below the strip")
 
-        try XCTUnwrap(gear.onPress)()
-        XCTAssertEqual(controller.settingsPanelPlace, .offered)
-        XCTAssertEqual(controller.destination, .settings, "still on the page")
-        XCTAssertTrue(panel.rows[1].isSelected, "on the page, the section is lit")
-        try XCTUnwrap(gear.onPress)()
-        XCTAssertEqual(controller.settingsPanelPlace, .docked, "the gear again puts it back")
+        // Typing narrows the rows; docked, the panel keeps its head under
+        // the strip and shortens downwards.
+        panel.setQueryForTesting("acc")
+        XCTAssertEqual(panel.visibleTitlesForTesting, ["Accounts", "Accessibility"])
+        XCTAssertEqual(controller.settingsPanelTarget.maxY, docked.maxY, accuracy: 0.5)
+        XCTAssertLessThan(controller.settingsPanelTarget.height, docked.height)
+
+        // A pick moves the page, spends the query and leaves the panel where
+        // it is.
+        try XCTUnwrap(panel.rows[1].onPress)()
+        XCTAssertEqual(controller.settingsView.section, .accounts)
+        XCTAssertEqual(controller.settingsPanelPlace, .docked)
+        XCTAssertTrue(panel.rows[1].isSelected)
+        XCTAssertEqual(panel.search.stringValue, "", "the query is spent")
+        XCTAssertEqual(panel.visibleTitlesForTesting.count, SettingsSection.allCases.count)
+        XCTAssertEqual(controller.settingsPanelTarget.minX, docked.minX, accuracy: 0.5)
 
         controller.applyDestination(.home)
         XCTAssertEqual(controller.settingsPanelPlace, .hidden)
+        XCTAssertFalse(controller.shellSidebar.settingsRow.isSelected)
         XCTAssertEqual(controller.settingsView.section, .general, "forgotten off the page")
+
+        // And the row opens it again from wherever the page was left.
+        try XCTUnwrap(controller.shellSidebar.settingsRow.onPress)()
+        XCTAssertEqual(controller.destination, .settings)
+        XCTAssertEqual(controller.settingsPanelPlace, .docked)
+    }
+
+    /// The dot on the Settings row is the update, wherever the user is
+    /// looking — and only while there is one to take.
+    /// `@MainActor` for the same reason the updater is: `UpdateController`'s
+    /// hook is main-actor isolated, and this reaches for it directly.
+    @MainActor
+    func testTheSettingsRowsBadgeFollowsTheUpdateState() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        // The controller's own hook, so this asserts the wiring and not a
+        // second copy of the rule.
+        guard let apply = controller.updateController.onStateChange else {
+            return XCTFail("the controller wires the update state to its surfaces")
+        }
+        let row = controller.shellSidebar.settingsRow
+
+        apply(.checking)
+        XCTAssertFalse(row.isBadged, "a check in flight is not something waiting")
+        apply(.available(version: "1.8.0"))
+        XCTAssertTrue(row.isBadged)
+        apply(.updating(fraction: 0.4))
+        XCTAssertFalse(row.isBadged, "it is being taken already")
+        apply(.readyToRestart(version: "1.8.0"))
+        XCTAssertTrue(row.isBadged)
+        apply(.failed("nope"))
+        XCTAssertFalse(row.isBadged)
+        apply(.idle)
+        XCTAssertFalse(row.isBadged)
+    }
+
+    /// The palette's Help row and the sidebar's Help row are one act — and
+    /// under the test host `NSApp.helpMenu` is nil, which must be a no-op
+    /// rather than a crash.
+    func testTheHelpRowSurvivesAWindowWithNoHelpMenu() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        // The test host builds no menus, but another suite in the same run
+        // may have installed the app's into this shared NSApplication — and a
+        // real `popUp` would block the run. The guard is about their absence:
+        // take them away, and put them back.
+        let menu = NSApp.helpMenu
+        NSApp.helpMenu = nil
+        defer { NSApp.helpMenu = menu }
+
+        controller.run(.showHelp)
+        controller.shellSidebar.helpRow.onPress?()
     }
 
     func testHomeShowsItsScreenAndToDoThePlaceholder() throws {
@@ -490,6 +548,15 @@ final class NavigationSidebarTests: XCTestCase {
         let placeholder = try XCTUnwrap(placeholderView(in: controller))
         XCTAssertFalse(placeholder.isHiddenOrHasHiddenAncestor)
         XCTAssertEqual(placeholder.titleText, WorkspaceDestination.todo.title)
+        XCTAssertEqual(placeholder.subtitleText, "Under development")
+
+        // Insights has no page yet either, and the placeholder names the one
+        // it is standing in for rather than keeping To Do List's title.
+        controller.applyDestination(.insights)
+        XCTAssertTrue(controller.workspaceView.isHidden)
+        XCTAssertTrue(controller.homeView.isHidden)
+        XCTAssertFalse(placeholder.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(placeholder.titleText, "Insights")
         XCTAssertEqual(placeholder.subtitleText, "Under development")
 
         controller.applyDestination(.terminals)
@@ -670,7 +737,7 @@ final class NavigationSidebarTests: XCTestCase {
         // layer render's unit space is y-up while the bitmap's row 0 is its
         // top — so a green marker anchors the mapping, the pane-wash render
         // test's pattern. Top-left corner: the nav stack's top inset keeps
-        // that spot empty, where the view's y = 0 is the account row's.
+        // that spot empty, where the view's y = 0 is the footer rows'.
         let marker = NSView(
             frame: NSRect(x: 0, y: sidebar.bounds.height - 6, width: 10, height: 6)
         )
@@ -753,22 +820,24 @@ final class NavigationSidebarTests: XCTestCase {
             "Beta has no sessions — the dim placeholder stands in"
         )
         XCTAssertGreaterThan(spread(emptyRow), 0.08, "the No-sessions-yet row rendered nothing")
-        XCTAssertGreaterThan(spread(sidebar.accountRow), 0.1, "the account row rendered nothing")
+        for row in [sidebar.settingsRow, sidebar.helpRow] {
+            XCTAssertGreaterThan(spread(row), 0.1, "the \(row.titleText) row rendered nothing")
+        }
 
         // And the column is flat: one straight top-to-bottom order — nav
-        // rows, header, each workspace over its own leaves, the account row
+        // rows, header, each workspace over its own leaves, Settings and Help
         // on the floor.
         func top(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: sidebar).maxY }
         let expected: [NSView] =
             sidebar.navRows + [sidebar.workspacesHeader, workspaceRows[0]]
-            + sessionRows + [workspaceRows[1], emptyRow, sidebar.accountRow]
+            + sessionRows + [workspaceRows[1], emptyRow, sidebar.settingsRow, sidebar.helpRow]
         for (above, below) in zip(expected, expected.dropFirst()) {
             XCTAssertGreaterThan(
                 top(above), top(below),
                 "\(type(of: above)) should sit above \(type(of: below))"
             )
         }
-        XCTAssertEqual(sidebar.accountRow.frame.minY, 10, accuracy: 0.5)
+        XCTAssertEqual(sidebar.footerRows.frame.minY, 10, accuracy: 0.5)
     }
 
     // MARK: - Remote machines

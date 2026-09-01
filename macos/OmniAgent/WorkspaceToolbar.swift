@@ -297,7 +297,7 @@ final class WorkspaceTitleBarButton: ShellRowView {
 /// the swallowed `mouseDown` so the click is not taken by the window drag,
 /// and the pointing hand.
 final class TitleBarAccountButton: ShellRowView {
-    private let avatar = AccountAvatarView(diameter: 22)
+    private let avatar = AccountAvatarView(diameter: ShellMetrics.accountAvatar)
 
     init() {
         super.init(frame: .zero)

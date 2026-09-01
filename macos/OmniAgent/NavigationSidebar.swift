@@ -4,24 +4,32 @@ import IOKit
 // The flat Copilot-style sidebar — the 2026-08-20 navigation redesign
 // (docs/superpowers/specs/2026-08-20-copilot-nav-redesign-design.md). One
 // straight column in the existing `ShellPalette` language: fixed nav rows on
-// top (Home, To Do List, Search), then the Workspaces section holding the
-// workspaces tree (`WorkspacesTree.swift`), and the account row pinned at the
+// top (Home, To Do List, Insights, Search), then the Workspaces section
+// holding the workspaces tree (`WorkspacesTree.swift`), and the foot — the
+// cards, the machine gauges and the Settings/Help rows — pinned at the
 // bottom. It replaces the two-level sliding track `WorkspaceShell.swift` used
 // to build; that file keeps the shared tokens, glyphs and row classes.
+//
+// The account moved out of this column into the title bar on 2026-09-01 (the
+// flow layout spec's §1 and §3), and its gear with it: Settings is a row of
+// the foot now.
 
 // MARK: - Fixed nav rows
 
-/// The sidebar's three fixed rows. Home and To Do List are destinations;
-/// Search only acts — it raises the spotlight and selects nothing.
+/// The sidebar's four fixed rows. Home, To Do List and Insights are
+/// destinations; Search only acts — it raises the spotlight and selects
+/// nothing.
 enum SidebarNavItem: CaseIterable {
     case home
     case todo
+    case insights
     case search
 
     var title: String {
         switch self {
         case .home: return "Home"
         case .todo: return "To Do List"
+        case .insights: return "Insights"
         case .search: return "Search"
         }
     }
@@ -31,6 +39,7 @@ enum SidebarNavItem: CaseIterable {
         switch self {
         case .home: return "house"
         case .todo: return "checklist"
+        case .insights: return "chart.bar.xaxis"
         case .search: return "magnifyingglass"
         }
     }
@@ -40,6 +49,7 @@ enum SidebarNavItem: CaseIterable {
         switch self {
         case .home: return .home
         case .todo: return .todo
+        case .insights: return .insights
         case .search: return nil
         }
     }
@@ -55,6 +65,21 @@ final class SidebarNavRowView: ShellRowView {
     private let titleField: NSTextField
     private let selectedFill: NSColor
     private(set) var isSelected = false
+
+    /// The trailing dot: something is waiting behind this row. Hidden unless
+    /// asked for — the Settings row wears it while there is an update to take
+    /// (`WorkspaceWindowController.applyUpdateState`).
+    private let badge = NSView()
+    static let badgeDiameter: CGFloat = 7
+
+    /// Whether the row is wearing its dot.
+    var isBadged: Bool {
+        get { !badge.isHidden }
+        set { badge.isHidden = !newValue }
+    }
+
+    /// Where the dot sits in the row — for the tests, which cannot see it.
+    var badgeFrameForTesting: NSRect { badge.frame }
 
     convenience init(item: SidebarNavItem) {
         self.init(title: item.title, symbol: item.symbol, item: item)
@@ -87,7 +112,13 @@ final class SidebarNavRowView: ShellRowView {
         icon.contentTintColor = ShellPalette.inkNav
         icon.translatesAutoresizingMaskIntoConstraints = false
 
-        for view in [icon, titleField] { addSubview(view) }
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = Self.badgeDiameter / 2
+        badge.layer?.backgroundColor = ShellPalette.red.cgColor
+        badge.isHidden = true
+        badge.translatesAutoresizingMaskIntoConstraints = false
+
+        for view in [icon, titleField, badge] { addSubview(view) }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 30),
 
@@ -99,6 +130,11 @@ final class SidebarNavRowView: ShellRowView {
             titleField.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             titleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.widthAnchor.constraint(equalToConstant: Self.badgeDiameter),
+            badge.heightAnchor.constraint(equalToConstant: Self.badgeDiameter),
         ])
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         refreshBackground()
@@ -212,182 +248,6 @@ final class SidebarSectionHeaderView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     var title: String { titleField.stringValue }
-}
-
-// MARK: - Account row
-
-/// The pinned footer: the signed-in account — its circle (`AccountAvatarView`,
-/// shared with the title bar) beside its name — and the gear that opens the
-/// app's existing Settings surface. Pressing the account half opens
-/// Settings › Accounts; pressing the gear offers the Settings panel.
-final class SidebarAccountRowView: NSView {
-    var onOpenSettings: (() -> Void)?
-    /// The account half was pressed — Settings › Accounts, where the identity
-    /// this row shows is managed.
-    var onOpenAccount: (() -> Void)?
-
-    /// The chip's own height, and half of it its capsule radius. Fixed rather
-    /// than derived from the label's padding because the row is now a card:
-    /// the sidebar insets it from its own edges so it clears the window's
-    /// corner curve — on macOS 26 that curve is wide enough that an
-    /// edge-to-edge footer tucks its avatar under the bevel.
-    static let height: CGFloat = 44
-
-    private let nameField = ShellFont.label(
-        "Not signed in",
-        font: ShellFont.ui(13.5, .medium),
-        color: ShellPalette.inkTertiary
-    )
-
-    /// Exposed so a test can press the gear the way a user does.
-    private(set) var gear = ShellRowView()
-    /// The avatar-and-name half, pressable in its own right — exposed for
-    /// the same reason the gear is.
-    private(set) var accountButton = ShellRowView()
-
-    private let avatar = AccountAvatarView(diameter: ShellMetrics.accountAvatar)
-
-    /// What the row says about the account — a fact a test can read without
-    /// walking the view tree.
-    var accountLabel: String { nameField.stringValue }
-    var avatarModeForTesting: AccountAvatarView.AvatarMode { avatar.mode }
-
-    /// The frames the cursor rects were last built from, so `layout()` only
-    /// invalidates them when they actually moved.
-    private var cursorRectFrames: [NSRect] = []
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        translatesAutoresizingMaskIntoConstraints = false
-
-        // Liquid Glass where there is glass to ask for. Before macOS 26 there
-        // is none, and every stand-in dims rather than refracts, so the
-        // fallback is the plainest thing that still reads as a card.
-        let glass = WorkspaceGlass.sheet(cornerRadius: Self.height / 2)
-        if glass == nil {
-            layer?.cornerRadius = Self.height / 2
-            layer?.cornerCurve = .continuous
-            layer?.backgroundColor = NSColor(white: 1, alpha: 0.05).cgColor
-            layer?.borderWidth = 1
-            layer?.borderColor = ShellPalette.hairlineStrong.cgColor
-        }
-
-        accountButton.wantsLayer = true
-        accountButton.layer?.cornerRadius = Self.accountButtonHeight / 2
-        accountButton.layer?.cornerCurve = .continuous
-        accountButton.hoverFill = NSColor(white: 1, alpha: 0.09)
-        accountButton.onPress = { [weak self] in self?.onOpenAccount?() }
-        accountButton.setAccessibilityLabel("Not signed in")
-        accountButton.translatesAutoresizingMaskIntoConstraints = false
-        for view in [avatar, nameField] { accountButton.addSubview(view) }
-
-        gear.wantsLayer = true
-        gear.layer?.cornerRadius = 6
-        gear.hoverFill = NSColor(white: 1, alpha: 0.09)
-        gear.onPress = { [weak self] in self?.onOpenSettings?() }
-        gear.setAccessibilityLabel("Settings")
-        gear.translatesAutoresizingMaskIntoConstraints = false
-        // The system gear, not the hand-drawn one this used to carry: a ring
-        // with eight straight spokes is the brightness glyph, and at 20pt it
-        // read as one.
-        let gearGlyph = NSImageView()
-        gearGlyph.image = NSImage(
-            systemSymbolName: "gearshape",
-            accessibilityDescription: "Settings"
-        )?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
-        gearGlyph.contentTintColor = ShellPalette.chevron
-        gearGlyph.translatesAutoresizingMaskIntoConstraints = false
-        gear.addSubview(gearGlyph)
-
-        for view in [glass, accountButton, gear].compactMap({ $0 }) { addSubview(view) }
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: Self.height),
-
-            // Inset 4 from the chip's edge so the avatar still sits 11 in,
-            // exactly where it sat before the account half became pressable.
-            accountButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            accountButton.trailingAnchor.constraint(equalTo: gear.leadingAnchor, constant: -4),
-            accountButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            accountButton.heightAnchor.constraint(equalToConstant: Self.accountButtonHeight),
-
-            avatar.leadingAnchor.constraint(equalTo: accountButton.leadingAnchor, constant: 7),
-            avatar.centerYAnchor.constraint(equalTo: accountButton.centerYAnchor),
-
-            nameField.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 8),
-            nameField.trailingAnchor.constraint(equalTo: accountButton.trailingAnchor, constant: -8),
-            nameField.centerYAnchor.constraint(equalTo: accountButton.centerYAnchor),
-
-            gear.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            gear.centerYAnchor.constraint(equalTo: centerYAnchor),
-            gear.widthAnchor.constraint(equalToConstant: 24),
-            gear.heightAnchor.constraint(equalToConstant: 24),
-            gearGlyph.centerXAnchor.constraint(equalTo: gear.centerXAnchor),
-            gearGlyph.centerYAnchor.constraint(equalTo: gear.centerYAnchor),
-        ])
-        if let glass {
-            glass.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                glass.leadingAnchor.constraint(equalTo: leadingAnchor),
-                glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-                glass.topAnchor.constraint(equalTo: topAnchor),
-                glass.bottomAnchor.constraint(equalTo: bottomAnchor),
-            ])
-        }
-        nameField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        setAccessibilityElement(true)
-        setAccessibilityRole(.group)
-        setAccessibilityLabel("Not signed in")
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    /// The pressable half's height — a capsule inside the chip, so its hover
-    /// fill reads as part of the card rather than as a second one.
-    private static let accountButtonHeight: CGFloat = 32
-
-    /// Who the row is for. `name` nil (or blank) is the signed-out state:
-    /// "Not signed in" in the dim tertiary ink, over the generic glyph.
-    /// A name gets the sidebar's primary ink and, failing a picture, its own
-    /// initials — the picture wins whenever one has arrived.
-    func apply(name: String?, picture: NSImage?) {
-        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let label = (trimmed?.isEmpty ?? true) ? nil : trimmed
-        if let label {
-            nameField.stringValue = label
-            nameField.textColor = ShellPalette.ink
-            // Middle, not tail: the tail of a long name is the surname, and
-            // "Bruno Bona…" throws away the half that identifies the account.
-            nameField.lineBreakMode = .byTruncatingMiddle
-        } else {
-            nameField.stringValue = "Not signed in"
-            nameField.textColor = ShellPalette.inkTertiary
-            nameField.lineBreakMode = .byTruncatingTail
-        }
-        setAccessibilityLabel(nameField.stringValue)
-        accountButton.setAccessibilityLabel(nameField.stringValue)
-        avatar.apply(name: label, picture: picture)
-    }
-
-    /// Both halves are buttons, and a button says so under the pointer.
-    /// The sidebar is a plain view in a window — no scroll view between it
-    /// and the frame — so AppKit rebuilds these whenever the window's cursor
-    /// rects are invalidated, which `layout()` below asks for as soon as
-    /// either frame moves.
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(accountButton.frame, cursor: .pointingHand)
-        addCursorRect(gear.frame, cursor: .pointingHand)
-    }
-
-    override func layout() {
-        super.layout()
-        let frames = [accountButton.frame, gear.frame]
-        guard frames != cursorRectFrames else { return }
-        cursorRectFrames = frames
-        window?.invalidateCursorRects(for: self)
-    }
 }
 
 // MARK: - System stats
@@ -762,7 +622,7 @@ final class SidebarStatGaugeView: NSView {
     var countingLabel: SidebarCountingLabel { counter }
 }
 
-/// The machine gauges pinned just above the account row: CPU, memory and GPU
+/// The machine gauges pinned just above the foot's rows: CPU, memory and GPU
 /// side by side in the hover card's three-numbers arrangement — equal-width
 /// columns split by hairlines — resampled every two seconds while the sidebar
 /// is on screen.
@@ -780,7 +640,7 @@ final class SidebarSystemStatsView: NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
-        // The account row's exact glass treatment, one radius shy of its
+        // The limits card's exact glass treatment, one radius shy of a
         // capsule — this card is taller than a chip.
         let glass = WorkspaceGlass.sheet(cornerRadius: 14)
         if glass == nil {
@@ -877,9 +737,10 @@ final class SidebarSystemStatsView: NSView {
 
 
 /// The sidebar itself: one flat column, top to bottom — nav rows, the
-/// Workspaces section with the workspaces tree, the account row.
+/// Workspaces section with the workspaces tree, and the foot: the cards, the
+/// machine gauges and the Settings/Help rows.
 final class NavigationSidebarView: NSView {
-    /// Home or To Do List was pressed (Search never routes here).
+    /// Home, To Do List or Insights was pressed (Search never routes here).
     var onSelectDestination: ((WorkspaceDestination) -> Void)?
     /// The Search row: raise the spotlight. Deliberately not a selection —
     /// the lit row stays wherever it was.
@@ -889,10 +750,10 @@ final class NavigationSidebarView: NSView {
     /// The workspaces tree's hovers, forwarded to the controller — which owns
     /// the hover card, because the card is a window and the sidebar is a view.
     var onHoverTarget: ((SessionHoverCardController.Target?) -> Void)?
+    /// The foot's Settings row: the in-window Settings page.
     var onOpenSettings: (() -> Void)?
-    /// The account chip's own half, as opposed to its gear: Settings ›
-    /// Accounts, where the identity the chip shows is managed.
-    var onOpenAccount: (() -> Void)?
+    /// The foot's Help row: the app's Help menu, popped at the row.
+    var onHelp: (() -> Void)?
     /// The plus menu's "Start session in" — a workspace id; the controller
     /// resolves it to a directory and starts the session there.
     var onStartSession: ((String) -> Void)?
@@ -927,7 +788,12 @@ final class NavigationSidebarView: NSView {
     let workspacesTree = WorkspacesTreeView()
     let claudeLimits = SidebarClaudeLimitsView()
     let statsRow = SidebarSystemStatsView()
-    let accountRow = SidebarAccountRowView()
+    /// The two rows on the floor of the column, in the nav rows' own
+    /// language: Settings — lit while the page is on, and badged while there
+    /// is an update to take — and Help.
+    let settingsRow = SidebarNavRowView(title: "Settings", symbol: "gearshape")
+    let helpRow = SidebarNavRowView(title: "Help", symbol: "questionmark.circle")
+    let footerRows = NSStackView()
     private(set) var destination: WorkspaceDestination = .home
 
     /// The column's ground on macOS 26: one full-bleed sheet of Liquid Glass
@@ -980,8 +846,8 @@ final class NavigationSidebarView: NSView {
 
         let scroll = ShellScrollView(documentView: workspacesTree)
 
-        accountRow.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
-        accountRow.onOpenAccount = { [weak self] in self?.onOpenAccount?() }
+        settingsRow.onPress = { [weak self] in self?.onOpenSettings?() }
+        helpRow.onPress = { [weak self] in self?.onHelp?() }
         workspacesHeader.groupButton.onPress = { [weak self] in
             guard let self else { return }
             pop(makeGroupByMenu(), from: workspacesHeader.groupButton)
@@ -1030,7 +896,19 @@ final class NavigationSidebarView: NSView {
             card.widthAnchor.constraint(equalTo: bottomCards.widthAnchor).isActive = true
         }
 
-        for view in [navStack, workspacesHeader, scroll, bottomCards, statsRow, accountRow] {
+        // The floor: the same two rows the nav stack is made of, on the
+        // cards' 8pt side insets rather than the nav stack's, so Settings and
+        // Help line up with the gauges above them.
+        for row in [settingsRow, helpRow] { footerRows.addArrangedSubview(row) }
+        footerRows.orientation = .vertical
+        footerRows.alignment = .leading
+        footerRows.spacing = 2
+        footerRows.translatesAutoresizingMaskIntoConstraints = false
+        for row in [settingsRow, helpRow] {
+            row.widthAnchor.constraint(equalTo: footerRows.widthAnchor).isActive = true
+        }
+
+        for view in [navStack, workspacesHeader, scroll, bottomCards, statsRow, footerRows] {
             addSubview(view)
         }
 
@@ -1070,11 +948,11 @@ final class NavigationSidebarView: NSView {
 
             statsRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             statsRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            statsRow.bottomAnchor.constraint(equalTo: accountRow.topAnchor, constant: -8),
+            statsRow.bottomAnchor.constraint(equalTo: footerRows.topAnchor, constant: -8),
 
-            accountRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            accountRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            accountRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            footerRows.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            footerRows.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            footerRows.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
         ])
 
         applyDestination(.home)
@@ -1104,10 +982,12 @@ final class NavigationSidebarView: NSView {
 
     /// Lights the row for `destination`, or none: Desk (`.terminals`) has no
     /// sidebar row any more — its content is entered through the sessions
-    /// tree, the menu and the palette.
+    /// tree, the menu and the palette. Settings has no *nav* row, but it has
+    /// the foot's, and that one lights with the page like any other.
     func applyDestination(_ destination: WorkspaceDestination) {
         self.destination = destination
         for row in navRows { row.apply(selected: row.item?.destination == destination) }
+        settingsRow.apply(selected: destination == .settings)
     }
 
     /// Everything the Workspaces section renders: EVERY workspace, its

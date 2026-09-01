@@ -1019,7 +1019,7 @@ final class PaneAppViewTests: XCTestCase {
         guard #available(macOS 26.0, *) else {
             // No glass to ask for pre-26 — same rule `WorkspaceGlass.sheet`
             // documents for every other caller — so the fallback is the
-            // plain flat card `SidebarAccountRowView` also falls back to,
+            // plain flat card `SidebarSystemStatsView` also falls back to,
             // painted directly on the container's own layer.
             XCTAssertTrue(container.subviews.isEmpty, "no panel layered on top pre-26")
             XCTAssertNotNil(container.layer?.backgroundColor, "the flat-card fallback paints its own layer")

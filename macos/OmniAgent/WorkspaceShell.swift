@@ -22,32 +22,41 @@ import AppKit
 
 // MARK: - Destinations
 
-/// The content area's destinations. Home and To Do List are the redesign's
-/// placeholder screens; `terminals` is the Desk — the pane workspace — which
+/// The content area's destinations. To Do List is still the redesign's
+/// placeholder screen; `terminals` is the Desk — the pane workspace — which
 /// no longer has a sidebar row and is reached through the sessions tree, the
 /// menu and the palette.
 enum WorkspaceDestination: String, CaseIterable {
     case home
     case todo
+    /// Usage and activity (the flow layout spec's §6), a nav row of its own
+    /// between To Do List and Search.
+    case insights
     case terminals
-    /// The in-window Settings page (2026-08-27) — reached by the gear, ⌘,
-    /// and the palette, not by a sidebar row.
+    /// The in-window Settings page (2026-08-27) — reached by the sidebar's
+    /// foot, ⌘, and the palette.
     case settings
 
     var title: String {
         switch self {
         case .home: return "Home"
         case .todo: return "To Do List"
+        case .insights: return "Insights"
         case .terminals: return "Desk"
         case .settings: return "Settings"
         }
     }
 
-    /// The palette row's second line.
+    /// The palette row's second line. "under development" is reserved for the
+    /// places that really are one — a destination with a screen says what is
+    /// on it instead.
     var subtitle: String {
         switch self {
-        case .home, .todo, .settings: return "under development"
+        case .home: return "start a session"
+        case .todo: return "under development"
+        case .insights: return "usage and activity"
         case .terminals: return "no session"
+        case .settings: return "the app's settings"
         }
     }
 
@@ -57,6 +66,7 @@ enum WorkspaceDestination: String, CaseIterable {
         switch self {
         case .home: return "house"
         case .todo: return "checklist"
+        case .insights: return "chart.bar.xaxis"
         case .terminals: return "rectangle.split.2x2"
         case .settings: return "gearshape"
         }
@@ -1118,8 +1128,8 @@ final class ShellGlassTintView: NSView {
 
 // MARK: - Placeholder
 
-/// What the content half shows for a destination that has no screen yet.
-/// Home and To Do List are deliberately empty in this step of the redesign.
+/// What the content half shows for a destination that has no screen yet: To
+/// Do List, and Insights until its page lands.
 final class WorkspacePlaceholderView: NSView {
     private let titleField = ShellFont.label(font: ShellFont.ui(16, .semibold), color: ShellPalette.ink)
     private let subtitleField = ShellFont.label(font: ShellFont.ui(12.5), color: ShellPalette.inkMuted)

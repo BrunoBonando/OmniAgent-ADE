@@ -55,13 +55,29 @@ final class WorkspaceShellTests: XCTestCase {
         }
     }
 
-    /// The 2026-08-20 redesign's three destinations, and no more: Home, To Do
-    /// List and the Desk. Dashboard, Board and the `.files` dead end are gone,
-    /// and the palette's rows are built straight off `allCases`.
+    /// The destinations, and no more: Home, To Do List, Insights (the flow
+    /// layout spec's §6, slid in between), the Desk and Settings. Dashboard,
+    /// Board and the `.files` dead end are gone, and the palette's rows are
+    /// built straight off `allCases`.
     func testTheDestinationsAreTheRedesigns() {
         XCTAssertEqual(
             WorkspaceDestination.allCases.map(\.rawValue),
-            ["home", "todo", "terminals", "settings"]
+            ["home", "todo", "insights", "terminals", "settings"]
+        )
+    }
+
+    /// What the spotlight prints under each: "under development" is reserved
+    /// for the one place that still is one.
+    func testEachDestinationSaysWhatIsOnIt() {
+        XCTAssertEqual(
+            WorkspaceDestination.allCases.map(\.subtitle),
+            [
+                "start a session",
+                "under development",
+                "usage and activity",
+                "no session",
+                "the app's settings",
+            ]
         )
     }
 

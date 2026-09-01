@@ -141,22 +141,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Home's real screen — the placeholder now only covers To Do List.
     /// Internal, not private: the tests assert its routing.
     let homeView = HomeSurfaceView()
-    /// The in-window Settings page — the gear, ⌘, and the palette land here.
+    /// The in-window Settings page — the sidebar's foot, ⌘, and the palette
+    /// land here.
     let settingsView = SettingsSurfaceView()
-    /// Settings' floating panel of sections, one object in two roles: the
-    /// gear *offers* it beside itself, tip on the gear, as the menu; a pick
-    /// slides it up to *dock* under the "Settings" title as the page's
-    /// sidebar; the gear again brings it back down. Floats over the content
-    /// area, placed by frame — see `placeSettingsPanel`.
+    /// Settings' panel of sections: docked under the "Settings" title as the
+    /// page's sidebar, and gone everywhere else. Floats over the content
+    /// area, placed by frame — see `placeSettingsPanel`. (It had a third
+    /// role until 2026-09-01: the sidebar's gear *offered* it beside itself
+    /// as a menu. The gear went with the account row, and the offer with it.)
     let settingsPanel = SettingsSidebarView()
-    enum SettingsPanelPlace { case hidden, docked, offered }
+    enum SettingsPanelPlace { case hidden, docked }
     private(set) var settingsPanelPlace: SettingsPanelPlace = .hidden
     /// Where the panel is headed, in the content area's coordinates — an
     /// animated `frame` reads mid-flight, so the tests read this.
     private(set) var settingsPanelTarget: NSRect = .zero
-    /// While offered: a click anywhere but the panel or the gear, or Esc,
-    /// puts it back.
-    private var settingsPanelMonitor: Any?
     /// The window's drawn title bar — window buttons, the sidebar toggle, the
     /// review toggle. Replaced the `NSToolbar`, and paints nothing: it is a
     /// transparent overlay across the top of the split, so each column's own
@@ -863,9 +861,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Search fires the spotlight and is deliberately not a selection —
         // the same panel ⌃Space and ⌘K raise.
         shellSidebar.onSearch = { [weak self] in self?.showCommandPalette(nil) }
-        // The gear offers the Settings panel (or puts it back): the pick is
-        // what opens the page.
-        shellSidebar.onOpenSettings = { [weak self] in self?.toggleSettingsPanel() }
+        // The foot's Settings row opens the page on whatever section it was
+        // last left on, the way ⌘, and the menu item do.
+        shellSidebar.onOpenSettings = { [weak self] in
+            guard let self else { return }
+            showSettings(section: settingsView.section)
+        }
+        // And its Help row drops the app's own Help menu on itself.
+        shellSidebar.onHelp = { [weak self] in self?.showHelpMenu() }
         // Self-update: the widget is the only thing the updater talks through,
         // and the controller is the only thing that knows the state.
         shellSidebar.updateWidget.onDownload = { [weak self] in
@@ -902,7 +905,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsView.onCheckForUpdates = { [weak self] in self?.updateController.checkForUpdates() }
         settingsView.onDownloadUpdate = { [weak self] in self?.updateController.downloadUpdate() }
         settingsView.onRestartUpdate = { [weak self] in self?.updateController.restartToUpdate() }
-        shellSidebar.onOpenAccount = { [weak self] in self?.showSettings(section: .accounts) }
         // The header's plus menu: a session in any listed workspace, or a
         // brand new workspace from a folder (the one flow where a chooser is
         // the whole point).
@@ -1364,8 +1366,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if destination == .home { refreshHomeChips() }
         settingsView.isHidden = destination != .settings
         // The panel docks with the page and goes with it — and off the page
-        // nothing is "here": the pick is forgotten, so ⌘, and the gear's
-        // offer both start clean.
+        // nothing is "here": the pick is forgotten, so ⌘, and the sidebar's
+        // Settings row both start clean.
         if destination == .settings {
             settingsPanel.apply(selected: settingsView.section)
             // Whatever the section, the page is about to be looked at: the
@@ -1376,10 +1378,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             settingsPanel.apply(selected: nil)
         }
         placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
-        placeholder.isHidden = destination != .todo
-        if destination == .todo { placeholder.show(destination) }
-        // Home and To Do List name no session, so the bar goes blank and its
-        // review toggle goes away entirely.
+        // To Do List has no screen — and neither has Insights until its page
+        // lands — so both stand on the placeholder, which names whichever it
+        // is showing for.
+        let isPlaceholder = destination == .todo || destination == .insights
+        placeholder.isHidden = !isPlaceholder
+        if isPlaceholder { placeholder.show(destination) }
+        // Home, To Do List and Insights name no session, so the bar goes
+        // blank and its review toggle goes away entirely.
         refreshTitle()
         // The review panel reviews the session on screen, and Home/To Do
         // List show no session — collapsed there, and back to the session's
@@ -3511,6 +3517,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             showNotifications(nil)
         case .showAccountMenu:
             showAccountMenu(nil)
+        case .showHelp:
+            showHelpMenu()
         case .checkForUpdates:
             updateController.checkForUpdates()
         case .downloadUpdate:
@@ -5425,17 +5433,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// place for the two to disagree.
     private var accountRowEmail: String?
 
-    /// Hands both places the account shows — the sidebar's chip and the
-    /// title bar's avatar — their identity, and fetches the picture behind
-    /// `pictureURL` when there is one and it is not cached.
+    /// Hands the title bar's avatar — the one place the account shows since
+    /// the sidebar's chip was removed (the flow layout spec's §3) — its
+    /// identity, and fetches the picture behind `pictureURL` when there is
+    /// one and it is not cached.
     /// An empty URL, an unparseable one, or bytes that are not an image all
-    /// leave the chip on its initials-or-glyph avatar — a complete state
+    /// leave the avatar on its initials-or-glyph circle — a complete state
     /// rather than a placeholder, so nothing here needs to fail loudly.
     private func applyAccountRow(name: String?, pictureURL: String) {
         let url = pictureURL.trimmingCharacters(in: .whitespacesAndNewlines)
         accountRowName = name
         accountRowPictureURL = url
-        shellSidebar.accountRow.apply(name: name, picture: avatarCache[url])
         titleBar.accountButton.apply(name: name, picture: avatarCache[url])
         guard avatarCache[url] == nil, !url.isEmpty, !avatarFetchesInFlight.contains(url),
               let parsed = URL(string: url)
@@ -5448,10 +5456,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 self.avatarFetchesInFlight.remove(url)
                 guard let image else { return }
                 self.avatarCache[url] = image
-                // The chip may have moved on while the bytes were in flight
+                // The avatar may have moved on while the bytes were in flight
                 // — a log-out, or a different account signed in behind it.
                 guard self.accountRowPictureURL == url else { return }
-                self.shellSidebar.accountRow.apply(name: self.accountRowName, picture: image)
                 self.titleBar.accountButton.apply(name: self.accountRowName, picture: image)
             }
         }.resume()
@@ -5974,6 +5981,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.updateWidget.apply(state)
         homeView.applyUpdateState(state)
         settingsView.applyUpdateState(state)
+        // The foot's Settings row wears the dot while there is an update to
+        // *take* — Settings › General is where taking it also lives. A check
+        // in flight or a failure is not something waiting for the user.
+        switch state {
+        case .available, .readyToRestart:
+            shellSidebar.settingsRow.isBadged = true
+        case .idle, .checking, .updating, .failed:
+            shellSidebar.settingsRow.isBadged = false
+        }
     }
 
     /// The Check for Updates… command -- the OmniAgent menu, the Settings
@@ -6257,6 +6273,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     @objc func showThirdPartyNotices(_ sender: Any?) { run(.openLegal(.thirdPartyNotices)) }
 
+    /// The Help menu itself, dropped on the sidebar's Help row — the row and
+    /// the spotlight's "Help" are the same act. `NSApp.helpMenu` is built by
+    /// `AppDelegate`, so under the test host there is none and this is a
+    /// no-op rather than a crash.
+    func showHelpMenu() {
+        guard let menu = NSApp.helpMenu else { return }
+        let row = shellSidebar.helpRow
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: row.bounds.maxY), in: row)
+    }
+
     /// Settings, opened on a particular section.
     func showSettings(section: SettingsSection) {
         settingsView.select(section)
@@ -6264,40 +6290,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         applyDestination(.settings)
     }
 
-    /// The gear: offers the panel beside itself, or — offered already —
-    /// puts it back where it came from (docked on Settings, gone elsewhere).
-    func toggleSettingsPanel() {
-        if settingsPanelPlace == .offered {
-            collapseSettingsPanel()
-        } else {
-            // Lit only on the page, where a section really is on screen.
-            settingsPanel.apply(selected: destination == .settings ? settingsView.section : nil)
-            settingsPanel.clearSearch()
-            placeSettingsPanel(.offered, animated: true)
-            settingsPanel.focusSearch()
-        }
-    }
-
-    private func collapseSettingsPanel() {
-        settingsPanel.clearSearch()
-        placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
-    }
-
     /// Slides the panel to `place`. Docked: under the "Settings" title's
-    /// left edge, just below the strip. Offered: beside the gear, the drop
-    /// on it, the body rising from the gear's foot — clamped to the content
-    /// area, so it never leaves the app. Hidden: fades where it is, and
+    /// left edge, just below the strip. Hidden: fades where it is, and
     /// measures nothing — the first call comes from `installSplitView`,
     /// before there is a window to measure in.
     private func placeSettingsPanel(_ place: SettingsPanelPlace, animated: Bool) {
         let wasHidden = settingsPanelPlace == .hidden
         settingsPanelPlace = place
-        if place == .offered { startSettingsPanelMonitor() } else { stopSettingsPanelMonitor() }
         let panel = settingsPanel
         let duration = 0.32
 
         if place == .hidden {
-            panel.isTipVisible = false
             settingsPanelTarget = panel.frame
             guard animated, !ShellMotion.reduced, !panel.isHidden else {
                 panel.isHidden = true
@@ -6318,39 +6321,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         contentContainer.layoutSubtreeIfNeeded()
         let room = contentContainer.bounds
         let size = NSSize(width: SettingsSidebarView.frameWidth, height: panel.contentHeight)
-        let corner = SettingsSidebarView.cornerRadius
-        let span = SettingsSidebarView.tipSpan
-        let lane = SettingsSidebarView.lane
 
-        let frame: NSRect
-        if place == .docked {
-            // The card's left edge under the title's; the lane hangs left of it.
-            frame = NSRect(
-                x: sessionTitleField.frame.minX - lane,
-                y: room.maxY - WorkspaceTitleBarView.height - 10 - size.height,
-                width: size.width,
-                height: size.height
-            )
-            panel.isTipVisible = false
-        } else {
-            // The drop's tip 6pt off the sidebar's edge, on the gear's centre.
-            let gear = shellSidebar.accountRow.gear
-            let gearMidY = contentContainer.convert(gear.bounds, from: gear).midY
-            var offered = NSRect(
-                x: 6,
-                y: gearMidY - corner - span / 2,
-                width: size.width,
-                height: size.height
-            )
-            // 6, not 8: the gear's centre sits 32pt up, and the panel's foot
-            // lands at 6.8 — a bigger margin lifts it and, through the corner
-            // clamp, drags the drop off the gear.
-            offered.origin.y = max(offered.origin.y, room.minY + 6)
-            offered.origin.y = min(offered.origin.y, room.maxY - WorkspaceTitleBarView.height - 8 - size.height)
-            frame = offered
-            panel.pointTip(at: gearMidY - offered.minY)
-            panel.isTipVisible = true
-        }
+        // The card's left edge under the title's.
+        let frame = NSRect(
+            x: sessionTitleField.frame.minX,
+            y: room.maxY - WorkspaceTitleBarView.height - 10 - size.height,
+            width: size.width,
+            height: size.height
+        )
         settingsPanelTarget = frame
 
         if wasHidden {
@@ -6373,39 +6351,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    private func startSettingsPanelMonitor() {
-        guard settingsPanelMonitor == nil else { return }
-        settingsPanelMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .keyDown]
-        ) { [weak self] event in
-            guard let self, settingsPanelPlace == .offered else { return event }
-            if event.type == .keyDown {
-                guard event.keyCode == 53 else { return event }  // Esc
-                collapseSettingsPanel()
-                return nil
-            }
-            if event.window === window {
-                let gear = shellSidebar.accountRow.gear
-                let onPanel = settingsPanel.bounds.contains(settingsPanel.convert(event.locationInWindow, from: nil))
-                let onGear = gear.bounds.contains(gear.convert(event.locationInWindow, from: nil))
-                if onPanel || onGear { return event }
-            }
-            collapseSettingsPanel()
-            return event
-        }
-    }
-
-    /// The content area's bounds and coordinate space — for the tests,
-    /// since the container itself is private.
+    /// The content area's bounds — for the tests, since the container itself
+    /// is private.
     var settingsPanelRoomForTesting: NSRect { contentContainer.bounds }
-    func settingsPanelRoomConvert(_ rect: NSRect, from view: NSView) -> NSRect {
-        contentContainer.convert(rect, from: view)
-    }
-
-    private func stopSettingsPanelMonitor() {
-        if let settingsPanelMonitor { NSEvent.removeMonitor(settingsPanelMonitor) }
-        settingsPanelMonitor = nil
-    }
 
     // MARK: - Inspector (Task 6b-2)
 
