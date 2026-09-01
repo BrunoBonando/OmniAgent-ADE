@@ -3062,7 +3062,11 @@ final class WorkspaceWindowControllerTests: XCTestCase {
     /// new state only once the (fake, synchronous) store confirms the write.
     @MainActor
     func testTheShareToggleWritesThroughRemoteSharingAndReflectsTheConfirmedState() throws {
-        let client = FakeSettingsClient()
+        // Signed in: sharing can only be switched *on* with an account to
+        // share with (`RemoteSharingModel.setSharing`), which the switch's
+        // own `isEnabled` also says — see
+        // `NavigationSidebarTests.testTheSharingSwitchIsDisabledWithCopyWhileSignedOut`.
+        let client = FakeSettingsClient(rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"])
         let controller = WorkspaceWindowController(
             connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-test.sock")),
             panes: [],
@@ -3091,7 +3095,9 @@ final class WorkspaceWindowControllerTests: XCTestCase {
     /// an `NSAlert`.
     @MainActor
     func testAFailedSharingWriteAsksInACardAndLeavesTheSwitchAlone() throws {
-        let client = FakeSettingsClient()
+        // With the account row, so this exercises a failed *write* rather
+        // than the sign-in gate refusing before one is attempted.
+        let client = FakeSettingsClient(rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"])
         client.failingWrites = [SettingsKey.remoteSharing]
         let controller = WorkspaceWindowController(
             connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-fail-test.sock")),
@@ -3119,7 +3125,9 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = WorkspaceWindowController(
             connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-palette-test.sock")),
             panes: [],
-            remoteSharing: RemoteSharingModel(store: SettingsStore(client: FakeSettingsClient())),
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: FakeSettingsClient(
+                rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"]
+            ))),
             authDefaults: try throwawayDefaults()
         )
         defer { controller.close() }
