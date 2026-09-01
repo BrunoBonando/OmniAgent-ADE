@@ -2,7 +2,7 @@ use omniagent_pty_daemon::protocol::{
     decode_raw_payload, encode_raw_payload, AttentionPayload, BrainGetContextPayload,
     BrainSearchPayload, DirectoryEntryPayload, DirectoryListingPayload, DisconnectViewerPayload,
     ErrorPayload, Frame, FrameError, Header, HelloPayload, ListDirectoryPayload, MessageKind,
-    RemoteViewersPayload, ResizePayload, ResponsePayload, ResyncRequiredPayload,
+    RefusalCode, RemoteViewersPayload, ResizePayload, ResponsePayload, ResyncRequiredPayload,
     RootsAddProjectPayload, RootsReingestProjectPayload, RootsRenameProjectPayload,
     RootsSetPausedPayload, RootsStartIngestPayload, SessionExitedPayload, SessionSizePayload,
     SessionStatus, SessionStatusPayload, SettingKey, SettingValue, ViewerSummaryPayload,
@@ -526,9 +526,53 @@ fn deferred_domain_messages_have_frozen_json_payload_shapes() {
     );
     assert_eq!(
         serde_json::to_value(ErrorPayload {
-            message: "no backend".into()
+            message: "no backend".into(),
+            code: None,
         })
         .unwrap(),
-        serde_json::json!({"message":"no backend"})
+        serde_json::json!({"message":"no backend"}),
+        "an ErrorPayload with no code must not put a `code` key on the wire at all"
     );
+}
+
+/// The wire strings [`RefusalCode`] sends — the half of the contract a Swift
+/// enum next to `SessionConnection.isTerminalRefusal` has to keep matching by
+/// hand, since nothing generates one side from the other (Task 14 item 2).
+#[test]
+fn refusal_code_wire_values_are_frozen() {
+    assert_eq!(
+        serde_json::to_value(RefusalCode::VersionSkew).unwrap(),
+        serde_json::json!("version_skew")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::LeaseHeld).unwrap(),
+        serde_json::json!("lease_held")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::MachineUnavailable).unwrap(),
+        serde_json::json!("machine_unavailable")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::HostSignedOut).unwrap(),
+        serde_json::json!("host_signed_out")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::WrongAccount).unwrap(),
+        serde_json::json!("wrong_account")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::Blocked).unwrap(),
+        serde_json::json!("blocked")
+    );
+}
+
+/// An `Error` an older peer sent, before this field existed, has no `code`
+/// key at all — and must still decode, with `code` landing as `None` rather
+/// than the payload being rejected outright.
+#[test]
+fn error_payload_with_no_code_key_still_decodes() {
+    let payload: ErrorPayload =
+        serde_json::from_value(serde_json::json!({"message": "in use by Mac mini"})).unwrap();
+    assert_eq!(payload.message, "in use by Mac mini");
+    assert_eq!(payload.code, None);
 }

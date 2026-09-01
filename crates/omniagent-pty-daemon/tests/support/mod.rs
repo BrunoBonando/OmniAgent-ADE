@@ -26,7 +26,7 @@ use std::time::Duration;
 use brain_core::Store;
 use omniagent_pty_daemon::protocol::{
     read_frame, read_handshake_frame, write_frame, ErrorPayload, Frame, HelloAckPayload,
-    MessageKind,
+    MessageKind, RefusalCode,
 };
 use omniagent_pty_daemon::{
     serve_client, sharing_should_be_live, AssertedIdentity, ClientContext, ClientTrust,
@@ -386,6 +386,7 @@ fn connect(ctx: &ClientContext, trust: ClientTrust, machine: &str, version: Opti
         version,
         machine: machine.to_owned(),
         claimed: None,
+        last_error_code: None,
     }
 }
 
@@ -400,6 +401,11 @@ pub struct Client {
     /// Extra identity keys smuggled into the client's own `Hello` payload —
     /// see [`Client::claiming_in_hello`].
     claimed: Option<String>,
+    /// The `code` on the most recent `Hello` refusal this client read, if
+    /// any — separate from [`HelloResult::Error`]'s `String` so that the many
+    /// existing callers matching on the message are untouched by Task 14 item
+    /// 2, and a caller that wants the code reads it from here instead.
+    last_error_code: Option<RefusalCode>,
 }
 
 /// What the daemon answered a `Hello` with. There are only two answers, and
@@ -414,6 +420,15 @@ impl Client {
     /// Sends `Hello` and reads the one frame that answers it.
     pub async fn hello(&mut self) -> HelloResult {
         self.say_hello(Some(viewer_id_for(&self.machine))).await
+    }
+
+    /// The [`RefusalCode`] on the most recent `Hello` refusal, if the most
+    /// recent `Hello` was refused at all (Task 14 item 2). `None` after an
+    /// `Ack`, and `None` for a refusal that carried no code — a caller that
+    /// needs to tell those two apart reads [`HelloResult::Error`]'s message
+    /// instead, since only the code collapses them on purpose.
+    pub fn last_error_code(&self) -> Option<RefusalCode> {
+        self.last_error_code
     }
 
     /// Whether the daemon still has this connection open.
@@ -571,13 +586,14 @@ impl Client {
             .expect("the daemon closed without answering");
         match reply.header.message_kind {
             MessageKind::HelloAck => {
+                self.last_error_code = None;
                 HelloResult::Ack(serde_json::from_slice(&reply.payload).unwrap())
             }
-            MessageKind::Error => HelloResult::Error(
-                serde_json::from_slice::<ErrorPayload>(&reply.payload)
-                    .unwrap()
-                    .message,
-            ),
+            MessageKind::Error => {
+                let error = serde_json::from_slice::<ErrorPayload>(&reply.payload).unwrap();
+                self.last_error_code = error.code;
+                HelloResult::Error(error.message)
+            }
             other => panic!("{other:?} is not an answer to Hello"),
         }
     }

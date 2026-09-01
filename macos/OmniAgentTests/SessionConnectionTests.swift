@@ -1014,23 +1014,41 @@ final class SessionConnectionTests: XCTestCase {
     /// (`docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`
     /// §3). They do not want the same response, and the difference is the
     /// point of `isTerminalRefusal`: only skew needs a human before anything
-    /// can change. This is the classifier on its own; the two cases below run
-    /// it through a real socket.
+    /// can change.
+    ///
+    /// This asserts on the **code** `server.rs` sends for each
+    /// (`RefusalCode`, Task 14 item 2), not on any sentence — the whole point
+    /// of the code is that a copy edit to the sentence cannot move this
+    /// result. This is the classifier on its own; the two cases below run it
+    /// through a real socket.
     func testOnlyTheVersionRefusalIsTerminal() {
-        XCTAssertTrue(
-            SessionConnection.isTerminalRefusal("update OmniAgent on Mac mini")
-        )
+        XCTAssertTrue(SessionConnection.isTerminalRefusal("version_skew"))
         for transient in [
-            "in use by MacBook Pro",
-            "viewer v-air is disconnected until Remote Control is turned off and on again",
-            "viewer v-air was disconnected while connecting",
-            "The daemon refused the connection.",
+            "lease_held",
+            "machine_unavailable",
+            "host_signed_out",
+            "wrong_account",
+            "blocked",
         ] {
             XCTAssertFalse(
                 SessionConnection.isTerminalRefusal(transient),
                 "\(transient) clears itself and must not park the connection"
             )
         }
+    }
+
+    /// The other half of the same classifier: a code this build has never
+    /// heard of — added by a daemon ahead of this app for some refusal
+    /// neither side has written yet — and no code at all — every refusal a
+    /// daemon built before this contract existed sends, version skew
+    /// included — must both be handled the safe way: **non-terminal**. The
+    /// alternative direction, parking a connection this build merely failed
+    /// to recognise, strands it exactly the way phase 1 did.
+    func testAnUnrecognisedOrAbsentRefusalCodeIsNotTerminal() {
+        XCTAssertFalse(SessionConnection.isTerminalRefusal(nil))
+        XCTAssertFalse(
+            SessionConnection.isTerminalRefusal("some_future_refusal_this_build_does_not_know")
+        )
     }
 
     /// "in use by ‹machine›" is transient — the other Mac disconnects, or the
@@ -1043,10 +1061,10 @@ final class SessionConnectionTests: XCTestCase {
         let redialled = expectation(description: "a second dial reached the daemon")
 
         server.run { firstClient in
-            try Self.refuse(on: firstClient, with: "in use by MacBook Pro")
+            try Self.refuse(on: firstClient, with: "in use by MacBook Pro", code: "lease_held")
             // The second dial is the assertion: it has to arrive at all.
             let secondClient = try server.accept()
-            try Self.refuse(on: secondClient, with: "in use by MacBook Pro")
+            try Self.refuse(on: secondClient, with: "in use by MacBook Pro", code: "lease_held")
             redialled.fulfill()
         }
 
@@ -1067,10 +1085,10 @@ final class SessionConnectionTests: XCTestCase {
         server.stop()
     }
 
-    /// Its opposite: "update OmniAgent on ‹machine›" cannot come true until
-    /// somebody updates the other Mac, so it arrives once, as a sentence, and
-    /// ends the dial. Phase 1 redialled instead — four times a second, with a
-    /// dead keyboard and the explanation nowhere.
+    /// Its opposite: version skew cannot come true until somebody updates the
+    /// other Mac, so it arrives once, as a refusal carrying `"version_skew"`,
+    /// and ends the dial. Phase 1 redialled instead — four times a second,
+    /// with a dead keyboard and the explanation nowhere.
     func testAnErrorAnsweringHelloEndsTheDialInsteadOfLooping() throws {
         let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
         let server = try UnixTestServer(path: socketPath)
@@ -1079,7 +1097,7 @@ final class SessionConnectionTests: XCTestCase {
         redialled.isInverted = true
 
         server.run { client in
-            try Self.refuse(on: client, with: "update OmniAgent on Mac mini")
+            try Self.refuse(on: client, with: "update OmniAgent on Mac mini", code: "version_skew")
         }
 
         let connection = SessionConnection(
@@ -1108,15 +1126,21 @@ final class SessionConnectionTests: XCTestCase {
         server.stop()
     }
 
-    /// Reads this client's `Hello`, answers it with `Error(message)` — the
-    /// daemon's shape for every handshake refusal — and hangs up.
-    private static func refuse(on client: Int32, with message: String) throws {
+    /// Reads this client's `Hello`, answers it with `Error(message, code)` —
+    /// the daemon's shape for every handshake refusal — and hangs up. `code`
+    /// defaults to `nil`, the shape of a daemon built before Task 14 item 2 —
+    /// a caller that cares which code a real refusal carries passes one.
+    private static func refuse(on client: Int32, with message: String, code: String? = nil) throws {
         let hello = try readFrame(from: client)
+        var payload: [String: Any] = ["message": message]
+        if let code {
+            payload["code"] = code
+        }
         try writeFrame(
             SessionFrame(
                 kind: .error,
                 requestOrSequence: hello.requestOrSequence,
-                payload: try JSONSerialization.data(withJSONObject: ["message": message])
+                payload: try JSONSerialization.data(withJSONObject: payload)
             ),
             to: client
         )

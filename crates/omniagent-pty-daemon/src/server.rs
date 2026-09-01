@@ -5,12 +5,12 @@ use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, read_handshake_frame, write_frame,
     AttachPayload, BrainGetContextPayload, BrainSearchPayload, DirectoryEntryPayload,
     DirectoryListingPayload, DisconnectViewerPayload, ErrorPayload, Frame, HelloAckPayload,
-    HelloPayload, ListDirectoryPayload, MessageKind, RemoteViewersPayload, ResizePayload,
-    ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
-    RootsRenameProjectPayload, RootsSetPausedPayload, RootsStartIngestPayload,
-    SessionCreatedPayload, SessionExitedPayload, SessionIdPayload, SessionListPayload,
-    SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue, LIST_DIRECTORY_MAX_ENTRIES,
-    PROTOCOL_VERSION,
+    HelloPayload, ListDirectoryPayload, MessageKind, RefusalCode, RemoteViewersPayload,
+    ResizePayload, ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload,
+    RootsReingestProjectPayload, RootsRenameProjectPayload, RootsSetPausedPayload,
+    RootsStartIngestPayload, SessionCreatedPayload, SessionExitedPayload, SessionIdPayload,
+    SessionListPayload, SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue,
+    LIST_DIRECTORY_MAX_ENTRIES, PROTOCOL_VERSION,
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
@@ -846,6 +846,7 @@ where
             &writer,
             request,
             hello.header.protocol_version,
+            RefusalCode::VersionSkew,
             anyhow!("update OmniAgent on {machine_name}"),
         )
         .await?;
@@ -891,12 +892,19 @@ where
             );
             // Two sentences, because a Mac nobody is signed in to is not a Mac
             // signed in to somebody else, and only one of those is worth
-            // sending its owner to the account switcher over.
-            let refusal = match verdict {
-                AccountMatch::HostSignedOut => "no one is signed in to OmniAgent on this Mac",
-                _ => "this Mac is signed in to a different OmniAgent account",
+            // sending its owner to the account switcher over — and two codes
+            // to match, so a client can act on which without parsing either.
+            let (code, refusal) = match verdict {
+                AccountMatch::HostSignedOut => (
+                    RefusalCode::HostSignedOut,
+                    "no one is signed in to OmniAgent on this Mac",
+                ),
+                _ => (
+                    RefusalCode::WrongAccount,
+                    "this Mac is signed in to a different OmniAgent account",
+                ),
             };
-            send_error(&writer, request, anyhow!("{refusal}")).await?;
+            send_refusal(&writer, request, code, anyhow!("{refusal}")).await?;
             return Ok(());
         }
     }
@@ -917,7 +925,13 @@ where
     // lease on its way out (`remote_lease.rs`).
     if trust.is_remote() {
         if let Some(host) = unavailable_as(&settings, &connections) {
-            send_error(&writer, request, anyhow!("{host} is not available")).await?;
+            send_refusal(
+                &writer,
+                request,
+                RefusalCode::MachineUnavailable,
+                anyhow!("{host} is not available"),
+            )
+            .await?;
             return Ok(());
         }
     }
@@ -927,9 +941,10 @@ where
     if trust.is_remote() {
         if let Some(viewer_id) = identity.viewer_id.as_deref() {
             if blocked_viewers(&settings).contains(viewer_id) {
-                send_error(
+                send_refusal(
                     &writer,
                     request,
+                    RefusalCode::Blocked,
                     anyhow!(
                         "viewer {viewer_id} is disconnected until Remote Control \
                          is turned off and on again"
@@ -996,7 +1011,13 @@ where
                 }
             }
             Err(machine) => {
-                send_error(&writer, request, anyhow!("in use by {machine}")).await?;
+                send_refusal(
+                    &writer,
+                    request,
+                    RefusalCode::LeaseHeld,
+                    anyhow!("in use by {machine}"),
+                )
+                .await?;
                 return Ok(());
             }
         }
@@ -1021,9 +1042,10 @@ where
     if trust.is_remote() {
         if let Some(viewer_id) = viewer_id.as_deref() {
             if blocked_viewers(&settings).contains(viewer_id) {
-                send_error(
+                send_refusal(
                     &writer,
                     request,
+                    RefusalCode::Blocked,
                     anyhow!("viewer {viewer_id} was disconnected while connecting"),
                 )
                 .await?;
@@ -1887,12 +1909,37 @@ async fn send_error(
         request,
         &ErrorPayload {
             message: error.to_string(),
+            code: None,
         },
     )
     .await
 }
 
-/// [`send_error`], written in the version the *peer* speaks.
+/// [`send_error`], but for a `Hello` arm refusal that carries a
+/// [`RefusalCode`] alongside its sentence (Task 14 item 2). Every other
+/// `Error` this daemon sends goes through [`send_error`] and carries no code
+/// — see [`ErrorPayload::code`] for why refusing a connection is the one case
+/// that gets one.
+async fn send_refusal(
+    writer: &SharedWriter,
+    request: u64,
+    code: RefusalCode,
+    error: impl std::fmt::Display,
+) -> Result<()> {
+    send_json(
+        writer,
+        MessageKind::Error,
+        request,
+        &ErrorPayload {
+            message: error.to_string(),
+            code: Some(code),
+        },
+    )
+    .await
+}
+
+/// [`send_refusal`], written in the version the *peer* speaks — used only for
+/// version skew, the one refusal a peer's own decoder might not understand.
 ///
 /// The only frame this daemon ever writes outside its own protocol version,
 /// and only ever as the last one on that connection. A refusal aimed at a Mac
@@ -1902,6 +1949,7 @@ async fn send_handshake_error(
     writer: &SharedWriter,
     request: u64,
     protocol_version: u8,
+    code: RefusalCode,
     error: impl std::fmt::Display,
 ) -> Result<()> {
     let mut frame = Frame::new(
@@ -1909,6 +1957,7 @@ async fn send_handshake_error(
         request,
         serde_json::to_vec(&ErrorPayload {
             message: error.to_string(),
+            code: Some(code),
         })?,
     );
     frame.header.protocol_version = protocol_version;

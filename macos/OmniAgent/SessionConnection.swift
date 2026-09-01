@@ -907,14 +907,15 @@ final class SessionConnection {
         }
     }
 
-    /// Whether a `Hello` refusal is one that dialling again cannot fix.
+    /// Whether a `Hello` refusal's **code** — never its sentence — is one
+    /// that dialling again cannot fix (Task 14 item 2).
     ///
-    /// Only version skew is. "update OmniAgent on ‹machine›" is a refusal with
-    /// a human in its way: nothing changes until someone updates the other Mac,
+    /// Only `RefusalCode.versionSkew` is. Version skew is a refusal with a
+    /// human in its way: nothing changes until someone updates the other Mac,
     /// so retrying is a loop with a dead keyboard — phase 1's exact failure,
-    /// which is what the sentence exists to replace.
+    /// which is what the refusal exists to replace.
     ///
-    /// Every other refusal clears itself. "in use by ‹machine›" is transient by
+    /// Every other code clears itself. A lease held elsewhere is transient by
     /// nature, and it is the refusal a viewer sees when it *re-dials after a
     /// blip*, because the relay holds two sockets for one machine until the
     /// dead one is reaped — parking there would turn a refusal that resolves in
@@ -922,17 +923,28 @@ final class SessionConnection {
     /// shape: the host turning sharing off and on lifts it, with nothing for
     /// this end to do but keep asking on the backoff it already has.
     ///
-    /// Matching on the message is a string contract with `server.rs`'s
-    /// `Hello` arm, kept in one place on each side. The protocol has no
-    /// refusal *code* to branch on; if a third terminal refusal ever appears,
-    /// that is the moment to add one rather than to lengthen this.
-    static func isTerminalRefusal(_ message: String) -> Bool {
-        message.hasPrefix(versionRefusalPrefix)
+    /// **Absent or unrecognised is not a sixth meaning — it defaults to
+    /// non-terminal, on purpose.** No code at all is what a daemon built
+    /// before this contract existed sends, for every refusal including
+    /// version skew; a code this build has never heard of is what a daemon
+    /// ahead of this app sends, for some future refusal neither side has
+    /// written yet. Both keep dialling rather than park. That is the
+    /// deliberate direction to fail in: wrongly continuing to retry costs one
+    /// more backoff cycle, and self-corrects the moment either side is
+    /// current. Wrongly parking strands the connection exactly the way phase
+    /// 1 did, with no cause visible anywhere on this end — the one failure
+    /// this whole feature exists to end. Only a value this build positively
+    /// recognises as `versionSkew` may end the dial.
+    ///
+    /// This used to be a prefix match on the sentence itself, one string
+    /// literal on each side of the wire that happened to agree — a routine
+    /// copy edit to `server.rs`'s "update OmniAgent on …" could silently turn
+    /// a terminal refusal into an infinite retry loop, and nothing caught it.
+    /// The code is the fix: `message` stays free to reword because nothing
+    /// here reads it any more.
+    static func isTerminalRefusal(_ code: String?) -> Bool {
+        code.flatMap(RefusalCode.init(rawValue:)) == .versionSkew
     }
-
-    /// The opening of the daemon's version-skew refusal
-    /// (`crates/omniagent-pty-daemon/src/server.rs`, `Hello` arm).
-    private static let versionRefusalPrefix = "update OmniAgent"
 
     /// The daemon answered `Hello` with an `Error` instead of a `HelloAck` —
     /// it looked at who is connecting and said no.
@@ -942,11 +954,10 @@ final class SessionConnection {
     /// clears `shouldReconnect`, which has to happen *before* the close,
     /// because `closeConnection` ends by scheduling a reconnect.
     private func refusedAtHello(_ frame: SessionFrame) {
-        let message =
-            (try? decoder.decode(ErrorPayload.self, from: frame.payload).message)
-            ?? "The daemon refused the connection."
+        let payload = try? decoder.decode(ErrorPayload.self, from: frame.payload)
+        let message = payload?.message ?? "The daemon refused the connection."
         helloRequest = nil
-        if Self.isTerminalRefusal(message) {
+        if Self.isTerminalRefusal(payload?.code) {
             shouldReconnect = false
             nextReconnectDelay = reconnectDelay
         }
@@ -1385,6 +1396,33 @@ private struct ResizePayload: Codable {
 
 private struct ErrorPayload: Codable {
     let message: String
+    /// The wire value of `omniagent_pty_daemon::protocol::RefusalCode`
+    /// (Task 14 item 2), kept as a raw `String?` rather than decoded straight
+    /// into `RefusalCode` — decoding a `String`-backed enum synthesised by
+    /// `Codable` *throws* on a raw value it does not recognise, and that
+    /// would fail this whole payload's decode, losing `message` along with
+    /// it, the moment a daemon ahead of this app sends a code this build has
+    /// never heard of. `RefusalCode(rawValue:)` is where "unknown" gets
+    /// decided instead, at the one place that reads it —
+    /// `isTerminalRefusal`. Absent entirely on an `Error` a daemon built
+    /// before this field existed sends, or on any `Error` outside the
+    /// `Hello` arm — both decode to `nil` the same ordinary way any missing
+    /// `Optional` key does.
+    let code: String?
+}
+
+/// Mirrors `omniagent_pty_daemon::protocol::RefusalCode`
+/// (`crates/omniagent-pty-daemon/src/protocol.rs`) — the wire values on both
+/// sides must agree, kept in step by hand since nothing generates one side
+/// from the other. Read only by `isTerminalRefusal`; every other user of a
+/// refusal reads `ErrorPayload.message` instead, which stays free to reword.
+private enum RefusalCode: String {
+    case versionSkew = "version_skew"
+    case leaseHeld = "lease_held"
+    case machineUnavailable = "machine_unavailable"
+    case hostSignedOut = "host_signed_out"
+    case wrongAccount = "wrong_account"
+    case blocked = "blocked"
 }
 
 /// `SessionResized`'s payload — the daemon's `SessionSizePayload`

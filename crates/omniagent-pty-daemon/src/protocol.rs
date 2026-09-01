@@ -160,6 +160,78 @@ pub struct ResponsePayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorPayload {
     pub message: String,
+    /// A stable, machine-readable reason for a `Hello` refusal (Task 14 item
+    /// 2; spec §3, §9, §12 invariant 10), carried alongside — never instead
+    /// of — `message`.
+    ///
+    /// **Why this exists**: `message` is display text, free to reword, and
+    /// `server.rs`'s `Hello` arm composes five different sentences for it
+    /// (six call sites — the blocklist is checked twice, once before a viewer
+    /// is registered and once after, for the race window between the two).
+    /// Before this field, `SessionConnection.isTerminalRefusal` decided
+    /// whether to keep retrying by prefix-matching that prose — a copy edit
+    /// to any sentence could silently misclassify a refusal, and nothing
+    /// would catch it, because the two sides shared no contract but an
+    /// English string one of them composes and the other guesses at. `code`
+    /// is that contract instead: [`RefusalCode`], not a sentence.
+    ///
+    /// Present on every refusal `server.rs`'s `Hello` arm sends; absent on
+    /// every other `Error` this daemon ever sends (a `ListDirectory` failure,
+    /// a malformed request, and so on — refusing a *connection* is not the
+    /// same thing as failing one *request* on an admitted connection, and
+    /// only the former carries a code), and absent on any `Error` a daemon
+    /// built before this field existed sends. A decoder must treat "no code"
+    /// and "a code this build does not recognise" identically — see
+    /// [`RefusalCode`]'s doc comment for why, and
+    /// `SessionConnection.isTerminalRefusal`
+    /// (`macos/OmniAgent/SessionConnection.swift`) for where that rule lives
+    /// on the other end of this wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<RefusalCode>,
+}
+
+/// The machine-readable reason behind one `Hello` refusal (Task 14 item 2).
+/// See [`ErrorPayload::code`] for why this exists at all.
+///
+/// **Only [`RefusalCode::VersionSkew`] is terminal** — the one refusal a
+/// retry cannot fix, because nothing changes until a human updates the Mac
+/// named in the sentence next to it. Every other variant clears itself:
+/// the machine currently driving disconnects, the blocklist is lifted, the
+/// host signs in, or the account you dialled with catches up to the one the
+/// Mac is actually serving. `SessionConnection.isTerminalRefusal` is the one
+/// place that reads this type, and it must keep exactly that classification.
+///
+/// Wire values are `snake_case` (`#[serde(rename_all = "snake_case")]`) and
+/// mirrored — as a set of raw string literals, not a shared source of truth;
+/// there is no codegen between this crate and the Swift app — by a private
+/// `RefusalCode` enum next to `SessionConnection.isTerminalRefusal`. **A new
+/// variant here needs its Swift counterpart added in the same change**, but
+/// the reverse mistake (Swift running ahead, or simply older) is
+/// deliberately harmless: an app that receives a code string it does not
+/// recognise, or receives no `code` field at all, treats it as non-terminal
+/// and keeps retrying rather than guessing wrong and parking a connection
+/// that could have healed itself. See `crates/omniagent-pty-daemon/tests/remote_refusal_codes.rs`
+/// for the daemon-side pin that each refusal in the `Hello` arm carries the
+/// code this comment promises, independent of its sentence's wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalCode {
+    /// The peer speaks a different [`PROTOCOL_VERSION`]. Terminal: dialling
+    /// again cannot change what version the other Mac's daemon speaks.
+    VersionSkew,
+    /// Another machine currently holds the lease (spec §3 "The lease").
+    LeaseHeld,
+    /// This machine is not reachable right now — sharing is off, or no local
+    /// app is attached (spec §2 condition 3, §3 "One remote session per
+    /// machine, in either direction").
+    MachineUnavailable,
+    /// Nobody is signed in to OmniAgent on this Mac.
+    HostSignedOut,
+    /// This Mac is signed in to an OmniAgent account other than the one
+    /// asserted for the caller.
+    WrongAccount,
+    /// This viewer id is on `remote_control_blocked`.
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
