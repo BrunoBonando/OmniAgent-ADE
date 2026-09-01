@@ -1,11 +1,12 @@
 use omniagent_pty_daemon::protocol::{
     decode_raw_payload, encode_raw_payload, AttentionPayload, BrainGetContextPayload,
-    BrainSearchPayload, DisconnectViewerPayload, ErrorPayload, Frame, FrameError, Header,
-    HelloPayload, MessageKind, RemoteViewersPayload, ResizePayload, ResponsePayload,
-    ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
-    RootsRenameProjectPayload, RootsSetPausedPayload, RootsStartIngestPayload,
-    SessionExitedPayload, SessionSizePayload, SessionStatus, SessionStatusPayload, SettingKey,
-    SettingValue, ViewerSummaryPayload, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
+    BrainSearchPayload, DirectoryEntryPayload, DirectoryListingPayload, DisconnectViewerPayload,
+    ErrorPayload, Frame, FrameError, Header, HelloPayload, ListDirectoryPayload, MessageKind,
+    RemoteViewersPayload, ResizePayload, ResponsePayload, ResyncRequiredPayload,
+    RootsAddProjectPayload, RootsReingestProjectPayload, RootsRenameProjectPayload,
+    RootsSetPausedPayload, RootsStartIngestPayload, SessionExitedPayload, SessionSizePayload,
+    SessionStatus, SessionStatusPayload, SettingKey, SettingValue, ViewerSummaryPayload,
+    MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
 
 #[test]
@@ -252,6 +253,66 @@ fn phase_2_message_kind_discriminants_are_appended_never_renumbering_v1() {
     assert_eq!(
         MessageKind::try_from(0x8d).unwrap(),
         MessageKind::RemoteViewers
+    );
+}
+
+/// Phase 3's `ListDirectory`, appended after `DisconnectViewer` — with 0x1c
+/// left as a hole for `PublishHostState`, which lands with the host-state
+/// feed. Discriminants are appended and never renumbered: a hole costs
+/// nothing next to two Macs disagreeing about what a byte means.
+#[test]
+fn list_directory_is_appended_at_0x1d_leaving_0x1c_for_publish_host_state() {
+    assert_eq!(MessageKind::ListDirectory as u8, 0x1d);
+    assert_eq!(
+        MessageKind::try_from(0x1d).unwrap(),
+        MessageKind::ListDirectory
+    );
+    assert!(
+        MessageKind::try_from(0x1c).is_err(),
+        "0x1c is reserved, not yet assigned"
+    );
+}
+
+/// The `ListDirectory` request and its reply, which travels on the ordinary
+/// `Response`. The entry shape is the security boundary of §4 as much as it
+/// is a wire format: a name and an is-directory flag, and nothing that could
+/// amount to reading a file.
+#[test]
+fn list_directory_payload_shapes_carry_names_and_kinds_and_nothing_else() {
+    assert_eq!(
+        serde_json::to_value(ListDirectoryPayload {
+            path: "/Users/bonando".into(),
+            show_hidden: false,
+        })
+        .unwrap(),
+        serde_json::json!({"path": "/Users/bonando", "show_hidden": false})
+    );
+    // A client that predates the flag omits it, and gets the picker's list.
+    assert!(
+        !serde_json::from_value::<ListDirectoryPayload>(
+            serde_json::json!({"path": "/Users/bonando"})
+        )
+        .unwrap()
+        .show_hidden
+    );
+    assert_eq!(
+        serde_json::to_value(DirectoryListingPayload {
+            entries: vec![
+                DirectoryEntryPayload {
+                    name: "Documents".into(),
+                    is_dir: true,
+                },
+                DirectoryEntryPayload {
+                    name: "notes.md".into(),
+                    is_dir: false,
+                },
+            ],
+        })
+        .unwrap(),
+        serde_json::json!({"entries": [
+            {"name": "Documents", "is_dir": true},
+            {"name": "notes.md", "is_dir": false}
+        ]})
     );
 }
 

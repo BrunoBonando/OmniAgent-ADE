@@ -1,9 +1,10 @@
 use crate::connections::{ConnectionRegistry, PresenceFeed, ViewerIdentity};
 use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, write_frame, AttachPayload,
-    BrainGetContextPayload, BrainSearchPayload, DisconnectViewerPayload, ErrorPayload, Frame,
-    HelloAckPayload, HelloPayload, MessageKind, RemoteViewersPayload, ResizePayload,
-    ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
+    BrainGetContextPayload, BrainSearchPayload, DirectoryEntryPayload, DirectoryListingPayload,
+    DisconnectViewerPayload, ErrorPayload, Frame, HelloAckPayload, HelloPayload,
+    ListDirectoryPayload, MessageKind, RemoteViewersPayload, ResizePayload, ResponsePayload,
+    ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
     RootsRenameProjectPayload, RootsSetPausedPayload, RootsStartIngestPayload,
     SessionCreatedPayload, SessionExitedPayload, SessionIdPayload, SessionListPayload,
     SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue, PROTOCOL_VERSION,
@@ -1087,6 +1088,21 @@ where
                     Err(error) => send_error(&writer, request, error).await,
                 }
             }
+            MessageKind::ListDirectory => {
+                let payload = decode_payload!(ListDirectoryPayload);
+                match list_directory(&payload) {
+                    Ok(entries) => {
+                        send_json(
+                            &writer,
+                            MessageKind::Response,
+                            request,
+                            &DirectoryListingPayload { entries },
+                        )
+                        .await
+                    }
+                    Err(error) => send_error(&writer, request, error).await,
+                }
+            }
             // Both viewer-presence kinds are local-only, and neither is in
             // `authorize_remote`'s allow arms — a remote client is answered
             // with `Error` before ever reaching this dispatch (spec §7
@@ -1192,6 +1208,50 @@ fn sync_attached(connections: &ConnectionRegistry, connection: u64, attached: Ha
     if connections.set_attached(connection, attached) {
         connections.notify_presence();
     }
+}
+
+/// One directory's entries, for `ListDirectory` (phase 3 spec §4).
+///
+/// **What it deliberately does not do** is the point of the function: no
+/// recursion, and per entry only a name and an is-directory flag. No size, no
+/// mode, no timestamp, and above all no contents — this exists so a remote can
+/// pick a folder on the host, and it is the closest this protocol comes to a
+/// remote file read. Anything richer here would quietly retire §12 invariant 8
+/// ("the activity log is not remotely readable"), which rests on there being
+/// no file-read RPC at all.
+///
+/// Hidden entries are skipped unless the request asks: a folder picker showing
+/// `.ssh` and `.aws` by default is both noise and the part of the host a
+/// viewer has least business browsing.
+///
+/// `is_dir` follows a symlink, because `Path::is_dir` does and a picker that
+/// cannot descend into a symlinked folder is broken. That is the *only*
+/// following done — there is no recursion for a loop to run away in.
+fn list_directory(request: &ListDirectoryPayload) -> Result<Vec<DirectoryEntryPayload>> {
+    let path = Path::new(&request.path);
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path).with_context(|| format!("read {}", request.path))? {
+        let entry = entry.with_context(|| format!("read an entry of {}", request.path))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !request.show_hidden && name.starts_with('.') {
+            continue;
+        }
+        entries.push(DirectoryEntryPayload {
+            is_dir: entry.path().is_dir(),
+            name,
+        });
+    }
+    // Directories first, then case-insensitively by name — the order the
+    // folder browser renders without re-sorting. The exact-name tiebreak keeps
+    // `README` and `readme` in a stable order rather than whatever `read_dir`
+    // happened to yield.
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(entries)
 }
 
 /// The session ids the projection shares right now — empty when the store

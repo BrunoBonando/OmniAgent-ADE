@@ -206,6 +206,36 @@ pub struct DisconnectViewerPayload {
     pub viewer_id: String,
 }
 
+/// `ListDirectory` request payload — one absolute path on the host (phase 3
+/// spec §4). `show_hidden` defaults to false, so a client that does not know
+/// about the flag gets a folder picker's list rather than the host's dotfiles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListDirectoryPayload {
+    pub path: String,
+    #[serde(default)]
+    pub show_hidden: bool,
+}
+
+/// One entry of a [`DirectoryListingPayload`]: a name and whether it is a
+/// directory. **That is the whole shape, and it is a boundary, not an
+/// oversight** — no size, no mode, no timestamp, and above all no contents.
+/// `ListDirectory` exists so a remote can pick a folder; there is no file-read
+/// RPC in this system, which is what lets phase 3 spec §12 invariant 8 say the
+/// activity log is not remotely readable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryEntryPayload {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// The `ListDirectory` reply, carried by the ordinary [`MessageKind::Response`]
+/// like every other Roots RPC's answer — there is deliberately no new response
+/// kind for it. Sorted directories-first, then case-insensitively by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryListingPayload {
+    pub entries: Vec<DirectoryEntryPayload>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MessageKind {
@@ -274,6 +304,17 @@ pub enum MessageKind {
     /// Kicks one remote viewer and blocks it until Remote Control is turned
     /// on again (phase 2 §5). Local-only, like `ListViewers`.
     DisconnectViewer = 0x1b,
+    // 0x1c is reserved for phase 3's `PublishHostState` (spec §4), which
+    // lands with the host-state feed. Left as a hole rather than reused:
+    // discriminants are appended and never renumbered, and a hole costs
+    // nothing next to two Macs disagreeing about what a byte means.
+    /// One directory's entries on the host — `[{name, is_dir}]` via the
+    /// ordinary `Response` (phase 3 spec §4). Remote-reachable: it is what
+    /// makes "Add local folder…" browse the *host's* disk instead of the
+    /// viewer's. It returns names and kinds only — no contents, no sizes,
+    /// no modes — and it is deliberately the closest this protocol comes to
+    /// a remote file read.
+    ListDirectory = 0x1d,
     HelloAck = 0x81,
     SessionList = 0x82,
     SessionCreated = 0x83,
@@ -329,6 +370,7 @@ impl TryFrom<u8> for MessageKind {
             0x19 => Self::BrainSearch,
             0x1a => Self::ListViewers,
             0x1b => Self::DisconnectViewer,
+            0x1d => Self::ListDirectory,
             0x81 => Self::HelloAck,
             0x82 => Self::SessionList,
             0x83 => Self::SessionCreated,
