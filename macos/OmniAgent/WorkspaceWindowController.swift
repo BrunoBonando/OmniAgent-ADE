@@ -5530,7 +5530,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @discardableResult
     func presentNotifications() -> HomeDropdownView {
         let now = Date().timeIntervalSince1970 * 1000
-        let entries = notifier.entries
+        // ponytail: HomeDropdownView does not scroll; 20 newest until it does.
+        let entries = Array(notifier.entries.prefix(20))
         var sections: [HomeDropdown.Section] = []
         if entries.isEmpty {
             sections.append(

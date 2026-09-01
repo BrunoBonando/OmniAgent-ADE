@@ -115,10 +115,17 @@ final class HomeDropdownView: NSView, NSTextFieldDelegate {
         rowViews.filter { !$0.isHidden }.map(\.title)
     }
 
+    /// The same for the section headings, which carry text of their own — an
+    /// account popover's heading *is* the account's name, so whether it is on
+    /// screen is a fact worth asserting.
+    var visibleHeadersForTesting: [String] {
+        headerViews.filter { !$0.view.isHidden }.map(\.title)
+    }
+
     private let search = NSTextField()
     private let list = NSStackView()
     private var rowViews: [HomeDropdownRowView] = []
-    private var headerViews: [(view: NSView, rows: [HomeDropdownRowView])] = []
+    private var headerViews: [(view: NSView, title: String, rows: [HomeDropdownRowView])] = []
     private let dismiss: () -> Void
 
     init(searchPlaceholder: String, dismiss: @escaping () -> Void) {
@@ -218,7 +225,9 @@ final class HomeDropdownView: NSView, NSTextFieldDelegate {
                 let view = makeRow(row)
                 sectionRows.append(view)
             }
-            if let header { headerViews.append((header, sectionRows)) }
+            if let header, let title = section.header {
+                headerViews.append((header, title, sectionRows))
+            }
         }
         applyFilter()
     }
@@ -244,10 +253,13 @@ final class HomeDropdownView: NSView, NSTextFieldDelegate {
         for view in rowViews where !extraRowViews.contains(where: { $0 === view }) {
             view.isHidden = !query.isEmpty && !view.title.localizedCaseInsensitiveContains(query)
         }
-        // A header with every row filtered out goes too — a heading over
-        // nothing reads as a bug.
-        for (header, rows) in headerViews {
-            header.isHidden = rows.allSatisfy(\.isHidden)
+        // A header whose rows the query all filtered out goes with them — a
+        // heading over nothing reads as a bug. A section that *never had* rows
+        // is not that case: its heading is the content (the account popover's
+        // heading is the account's name), so `allSatisfy` on an empty array
+        // must not be allowed to vacuously hide it.
+        for (header, _, rows) in headerViews {
+            header.isHidden = !rows.isEmpty && rows.allSatisfy(\.isHidden)
         }
         // The query-dependent rows are rebuilt from scratch each keystroke;
         // they are few and their content is what changed.

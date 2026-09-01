@@ -2277,6 +2277,27 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.titleBar.notificationsButton.isUnread)
     }
 
+    /// The feed keeps 40 entries; the popover does not scroll, so it shows the
+    /// 20 newest and no more.
+    func testTheBellsPopoverShowsOnlyTheTwentyNewestEntries() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.notifier.restore((0..<25).map { notificationEntry(id: "n\($0)") })
+
+        let dropdown = controller.presentNotifications()
+
+        XCTAssertEqual(
+            dropdown.visibleTitlesForTesting.count,
+            22,
+            "twenty entries over the two list actions"
+        )
+        XCTAssertEqual(
+            Array(dropdown.visibleTitlesForTesting.suffix(2)),
+            ["Mark all as read", "Clear all"]
+        )
+    }
+
     /// Signed out: one row that can actually be taken, and no email line over
     /// an account that does not exist.
     func testTheAccountPopoverOffersSignInWhileSignedOut() {
@@ -2294,6 +2315,11 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let dropdown = controller.presentAccountMenu()
 
         XCTAssertEqual(dropdown.visibleTitlesForTesting, ["Manage account", "Settings", "Sign in"])
+        XCTAssertEqual(
+            dropdown.visibleHeadersForTesting,
+            ["Not signed in"],
+            "the popover still says whose it is, even with no email row under the heading"
+        )
     }
 
     /// And signed in: the account's email, and the half of the pair that is
