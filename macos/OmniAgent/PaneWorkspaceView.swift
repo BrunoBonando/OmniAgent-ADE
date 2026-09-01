@@ -437,10 +437,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         self.makeSurface = makeSurface
         super.init(frame: .zero)
         // No ground of its own, in either mode: the sheet the panes sit on is
-        // `PaneGroundView`, the content column behind this view, so it runs
-        // unbroken from the window's top edge through the title-bar strip and
-        // out around the panes. Anything opaque here would cut that off at the
-        // grid's edge — and on the canvas it would hide the ground entirely.
+        // `ContentCardView`, the inset card this view fills, whose fill reads
+        // as a lift over `PaneGroundView`'s gradient around it. Anything opaque
+        // here would cut that off at the grid's edge — and on the canvas it
+        // would hide the card entirely.
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.group)

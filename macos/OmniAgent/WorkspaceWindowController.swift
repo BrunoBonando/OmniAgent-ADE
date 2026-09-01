@@ -130,12 +130,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// window's, and they must all read one value.
     let updateController = UpdateController()
     /// The content half of the split: the pane workspace and the placeholder
-    /// both live here permanently, and the destination only toggles which is
-    /// hidden. Unmounting `PaneWorkspaceView` would tear down live SwiftTerm
-    /// views and their PTY attachment along with it.
+    /// both live here permanently — in `contentCard` — and the destination
+    /// only toggles which is hidden. Unmounting `PaneWorkspaceView` would tear
+    /// down live SwiftTerm views and their PTY attachment along with it.
     /// The column's ground as well as its container: a `PaneGroundView` paints
-    /// the grey sheet behind the title-bar strip *and* the pane grid, so the
-    /// two are one continuous surface (the title bar itself paints nothing).
+    /// the grey sheet from the window's top edge down, and since the content
+    /// card (2026-09-01) that sheet is what shows *around* the content — the
+    /// title-bar strip above the card, and the card's 12pt margin on the other
+    /// three sides (the title bar itself paints nothing). The Desk and the
+    /// pages sit on `contentCard`, which floats on this.
     private let contentContainer = PaneGroundView()
     /// The inset card inside that ground, and the parent of every destination:
     /// the Desk, the placeholder, Home, Settings and the docked Settings

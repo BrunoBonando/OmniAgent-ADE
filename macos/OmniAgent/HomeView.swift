@@ -15,7 +15,7 @@ import CoreImage
 // into the composer on press — everything else on the screen is still inert.
 //
 // Deliberately all AppKit, on the same `ShellPalette`/`ShellFont` tokens the
-// sidebar wears, and transparent throughout — `PaneGroundView` behind it is
+// sidebar wears, and transparent throughout — `ContentCardView` behind it is
 // the ground, exactly as it is for the placeholder, so switching destinations
 // never looks like switching apps.
 
