@@ -77,18 +77,6 @@ final class RemoteSharingModel {
     /// below fails closed — same as an unreachable daemon — while it is.
     private var store: SettingsStore?
     private var restoreDispatched = false
-    /// Bounds `restore()`'s retry against the ordinary launch race: `.shared`
-    /// is configured before `workspace.start()` calls `connect()`, so the
-    /// very first restore attempt predictably loses that race every time.
-    /// Retried a handful of times on a short fixed delay rather than wired
-    /// into `WorkspaceWindowController`'s `.connected` callback, so this
-    /// model's only dependency stays the abstract `SettingsClient` seam
-    /// (`init(store:)`'s tests exercise the same code every real launch
-    /// runs). Capped, not unbounded: a daemon that is never coming back is
-    /// already showing errors everywhere else in the app, and this row
-    /// polling forever would just be a quiet leak of that same fact.
-    private var restoreRetriesRemaining = 5
-    private static let restoreRetryDelay: TimeInterval = 1
 
     /// The test / explicit-construction path: a store is already known, so
     /// this restores immediately (synchronously, against the fakes every
@@ -103,14 +91,23 @@ final class RemoteSharingModel {
     /// exists.
     private init() {}
 
-    /// Called once, by `AppDelegate`, right after it builds the app's
-    /// connection. Restores immediately, and re-arms its own retry even if
-    /// this is a second call (defensive — production calls this exactly
-    /// once, but nothing here assumes that).
+    /// Called once, by `AppDelegate`, only once the app's real connection is
+    /// actually up (`WorkspaceWindowController.runWhenConnected` — see
+    /// `AppDelegate.swift`). Restores immediately, and re-arms in case this
+    /// is a second call (defensive — production calls this exactly once,
+    /// but nothing here assumes that).
+    ///
+    /// This used to run unconditionally at launch, before
+    /// `workspace.start()` even called `connect()` — a race `restore()`
+    /// covered with its own bounded 5×1s retry timer, which still stranded
+    /// `.shared` at its defaults forever whenever the daemon took longer
+    /// than 5s to spawn (nothing ever called `configure` a second time).
+    /// `runWhenConnected` replaces that guess with the actual readiness
+    /// signal: this is never called until the socket is up, so the very
+    /// first `restore()` here no longer needs a retry to win the race.
     func configure(store: SettingsStore) {
         self.store = store
         restoreDispatched = false
-        restoreRetriesRemaining = 5
         restore()
     }
 
@@ -164,9 +161,15 @@ final class RemoteSharingModel {
     /// Reads both rows, `remoteSharing` first then `remoteControlBlocked` —
     /// nested, `restoreRemoteControlIfNeeded`'s exact shape
     /// (`WorkspaceWindowController.swift`), so either failing re-arms the
-    /// whole pair rather than leaving one half silently stale. Retried on
-    /// `Self.restoreRetryDelay` up to `restoreRetriesRemaining` times before
-    /// giving up for this `configure(store:)`/`init(store:)` call.
+    /// whole pair rather than leaving one half silently stale.
+    ///
+    /// No retry timer here (deleted 2026-09-01 — see `configure(store:)`'s
+    /// doc comment): `configure(store:)` is only ever called once the
+    /// connection is actually up, so the race a timer used to paper over no
+    /// longer exists at the call site. A read that still fails resets
+    /// `restoreDispatched` — `restoreRemoteControlIfNeeded`'s own re-arm,
+    /// not a scheduled retry — so a future `configure(store:)`/`init(store:)`
+    /// call can try again; nothing here retries on its own.
     private func restore() {
         guard let store, !restoreDispatched else { return }
         restoreDispatched = true
@@ -183,21 +186,12 @@ final class RemoteSharingModel {
                         blockedViewerIDs = RemoteControlProjection.decodeEnabled(raw).sorted()
                         onChange?()
                     case .failure:
-                        retryRestoreIfPossible()
+                        restoreDispatched = false
                     }
                 }
             case .failure:
-                retryRestoreIfPossible()
+                restoreDispatched = false
             }
-        }
-    }
-
-    private func retryRestoreIfPossible() {
-        restoreDispatched = false
-        guard restoreRetriesRemaining > 0 else { return }
-        restoreRetriesRemaining -= 1
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.restoreRetryDelay) { [weak self] in
-            self?.restore()
         }
     }
 

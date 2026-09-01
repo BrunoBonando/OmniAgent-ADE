@@ -26,11 +26,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let daemonPersistence = DaemonPersistenceController(paths: paths)
         daemonPersistence.start()
         let connection = SessionConnection(socketURL: paths.socketURL)
-        // `RemoteSharingModel.shared` reads and writes through this same
-        // connection — never a second one of its own — so its rows reach
-        // the real daemon the moment `workspace.start()` below connects it.
-        // See `RemoteSharingModel.shared`'s own doc comment.
-        RemoteSharingModel.shared.configure(store: SettingsStore(client: connection))
         // The viewer side of remote session control: one connection per
         // online machine on the account, polled while signed in. Constructed
         // idle; the window starts it once the launch gate says signed in.
@@ -51,6 +46,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             workspace?.revealPane(sessionID)
         }
         self.workspace = workspace
+        // `RemoteSharingModel.shared` reads and writes through this same
+        // connection — never a second one of its own — so its rows reach
+        // the real daemon. Configured only once `workspace` is actually
+        // connected (`runWhenConnected`), not at launch alongside it: a
+        // daemon slow to spawn used to strand the model at its defaults for
+        // the whole process, because the old call here raced
+        // `workspace.start()`'s `connect()` below with only a bounded
+        // 5×1s retry to cover the gap. `runWhenConnected` is the readiness
+        // signal that race was standing in for. See `RemoteSharingModel
+        // .shared`'s own doc comment.
+        workspace.runWhenConnected {
+            RemoteSharingModel.shared.configure(store: SettingsStore(client: connection))
+        }
         // The menu bar item follows the account: created when the gate
         // resolves signed in, gone on log-out.
         workspace.onSignedInStateChanged = { [weak self, weak workspace] signedIn in

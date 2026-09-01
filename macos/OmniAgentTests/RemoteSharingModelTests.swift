@@ -143,4 +143,24 @@ final class RemoteSharingModelTests: XCTestCase {
         XCTAssertEqual(client.rows["remote_control_blocked"], #"["mac-a"]"#, "nothing reached the store")
         XCTAssertEqual(failures.count, 1)
     }
+
+    // MARK: - No retry timer (carried over from Task 2, 2026-09-01)
+
+    /// `restore()` used to retry a failed read on its own, five times, one
+    /// second apart — a bounded guess at when the connection would be up.
+    /// `configure(store:)` is now only ever called once the connection
+    /// actually is (`WorkspaceWindowController.runWhenConnected`), so that
+    /// timer is gone; a failed read instead just re-arms
+    /// `restoreDispatched` for whichever `configure(store:)` call comes
+    /// next, and nothing here schedules that call on its own.
+    func testAFailedRestoreReArmsForTheNextConfigureCallButRetriesNothingOnItsOwn() throws {
+        let failingClient = FakeSettingsClient()
+        failingClient.failing = [SettingsKey.remoteSharing]
+        let model = RemoteSharingModel(store: SettingsStore(client: failingClient))
+        XCTAssertFalse(model.isSharing, "the failed read leaves the fail-closed default")
+
+        let recoveredClient = FakeSettingsClient(rows: ["remote_sharing": #"{"enabled":true}"#])
+        model.configure(store: SettingsStore(client: recoveredClient))
+        XCTAssertTrue(model.isSharing, "a later configure(store:) retries, since restoreDispatched was re-armed")
+    }
 }
