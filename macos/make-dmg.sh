@@ -51,7 +51,13 @@ fi
 # .VolumeIcon.icns from converted images (verified: survives neither
 # srcfolder nor live-volume copy). Revisit if Apple restores the behavior.
 
-osascript <<EOF
+# The window layout is decoration, and it is driven by scripting Finder --
+# which needs a logged-in GUI session and answers with AppleEvent timeout
+# -1712 when it does not have one (a locked screen, a background job, CI).
+# `set -e` used to turn that cosmetic failure into no DMG at all, which is
+# backwards: an unstyled disk image installs and updates exactly as well as a
+# styled one. Warn and carry on.
+if ! osascript <<EOF
 tell application "Finder"
   tell disk "$volname"
     open
@@ -73,10 +79,17 @@ tell application "Finder"
   end tell
 end tell
 EOF
+then
+  echo "warning: could not style the DMG window (Finder is not scriptable from here)." >&2
+  echo "         The disk image is fine -- it just opens with the default layout." >&2
+  styled="unstyled"
+else
+  styled="styled"
+fi
 
 sync
 hdiutil detach "$device" >/dev/null
 mkdir -p "$(dirname "$out")"
 rm -f "$out"
 hdiutil convert "$rw_dmg" -format UDZO -o "$out" >/dev/null
-echo "Styled DMG: $out"
+echo "DMG ($styled): $out"
