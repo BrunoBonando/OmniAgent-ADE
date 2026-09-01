@@ -1008,6 +1008,62 @@ final class SessionConnectionTests: XCTestCase {
         server.stop()
     }
 
+    /// The daemon can answer `Hello` with an `Error` instead of an ack — the
+    /// machine is in use by another Mac, this viewer is blocked, or the two
+    /// ends are on different protocol versions
+    /// (`docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`
+    /// §3). All three are answers to *who is connecting*, so redialling asks
+    /// the same question and gets the same answer; phase 1 redialled anyway,
+    /// four times a second, with a dead keyboard and the explanation nowhere.
+    /// The refusal has to arrive once, as a sentence, and end the dial.
+    func testAnErrorAnsweringHelloEndsTheDialInsteadOfLooping() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let refused = expectation(description: "the refusal reaches the caller")
+        let redialled = expectation(description: "a second dial")
+        redialled.isInverted = true
+
+        server.run { client in
+            let hello = try readFrame(from: client)
+            try writeFrame(
+                SessionFrame(
+                    kind: .error,
+                    requestOrSequence: hello.requestOrSequence,
+                    payload: try JSONSerialization.data(
+                        withJSONObject: ["message": "update OmniAgent on Mac mini"]
+                    )
+                ),
+                to: client
+            )
+            Darwin.close(client)
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var reported: String?
+        connection.onError = { error in
+            guard reported == nil else { return }
+            reported = error.localizedDescription
+            refused.fulfill()
+        }
+        var dials = 0
+        connection.onStateChange = { state in
+            guard state == .connecting else { return }
+            dials += 1
+            if dials > 1 { redialled.fulfill() }
+        }
+        connection.connect()
+
+        // The inverted expectation is what the timeout is spent on: at a 0.02s
+        // seed delay, a looping client would have dialled dozens of times.
+        wait(for: [refused, redialled], timeout: 2)
+        XCTAssertEqual(reported, "update OmniAgent on Mac mini")
+        connection.disconnect()
+        server.stop()
+    }
+
     private static func ackHello(on client: Int32) throws {
         let hello = try readFrame(from: client)
         try writeFrame(

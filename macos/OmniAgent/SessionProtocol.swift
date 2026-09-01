@@ -98,7 +98,12 @@ enum SessionProtocolError: Error, Equatable {
 }
 
 struct SessionFrame: Equatable {
-    static let protocolVersion: UInt8 = 1
+    /// The wire version, matching `PROTOCOL_VERSION` in the daemon's
+    /// `protocol.rs` — **2** since environment sharing. The two ship in one
+    /// bundle, so the app and its own daemon never disagree; what the bump is
+    /// for is the *other* Mac, which the daemon refuses at `Hello` with
+    /// "update OmniAgent on ‹machine›" rather than by dropping the stream.
+    static let protocolVersion: UInt8 = 2
     static let headerLength = 16
     static let maximumPayloadLength = 1_048_576
 

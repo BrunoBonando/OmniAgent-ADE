@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use omniagent_pty_daemon::protocol::{
-    read_frame, write_frame, ErrorPayload, Frame, HelloAckPayload, MessageKind,
+    read_handshake_frame, write_frame, ErrorPayload, Frame, HelloAckPayload, MessageKind,
 };
 use omniagent_pty_daemon::{serve_client, ClientContext, ClientTrust, DaemonServer};
 use tokio::io::DuplexStream;
@@ -55,7 +55,7 @@ pub async fn daemon_with_local_client() -> Daemon {
     let (stop, stopped) = oneshot::channel();
     tokio::spawn(server.run_until(stopped));
 
-    let mut local = connect(&ctx, ClientTrust::Local, "Mac Studio");
+    let mut local = connect(&ctx, ClientTrust::Local, "Mac Studio", None);
     match local.hello().await {
         HelloResult::Ack(_) => {}
         other => panic!("the host's own connection was refused: {other:?}"),
@@ -69,9 +69,16 @@ pub async fn daemon_with_local_client() -> Daemon {
 }
 
 impl Daemon {
-    /// A remote client that has not said `Hello` yet.
+    /// A remote client that has not said `Hello` yet, speaking this build's
+    /// protocol version.
     pub fn connect_remote(&self, machine: &str) -> Client {
-        connect(&self.ctx, ClientTrust::Remote, machine)
+        connect(&self.ctx, ClientTrust::Remote, machine, None)
+    }
+
+    /// [`Self::connect_remote`], but claiming `version` on the wire — the Mac
+    /// that has not been updated.
+    pub fn connect_remote_with_version(&self, machine: &str, version: u8) -> Client {
+        connect(&self.ctx, ClientTrust::Remote, machine, Some(version))
     }
 
     /// Blocks until no connection holds the lease.
@@ -92,12 +99,13 @@ impl Daemon {
     }
 }
 
-fn connect(ctx: &ClientContext, trust: ClientTrust, machine: &str) -> Client {
+fn connect(ctx: &ClientContext, trust: ClientTrust, machine: &str, version: Option<u8>) -> Client {
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     tokio::spawn(serve_client(server_side, ctx.clone(), trust));
     Client {
         stream: client_side,
         request: 0,
+        version,
         machine: machine.to_owned(),
     }
 }
@@ -106,6 +114,9 @@ fn connect(ctx: &ClientContext, trust: ClientTrust, machine: &str) -> Client {
 pub struct Client {
     stream: DuplexStream,
     request: u64,
+    /// The protocol version to stamp on outgoing frames, or `None` for this
+    /// build's.
+    version: Option<u8>,
     machine: String,
 }
 
@@ -122,7 +133,7 @@ impl Client {
     pub async fn hello(&mut self) -> HelloResult {
         self.request += 1;
         let viewer_id = format!("v-{}", self.machine.to_lowercase().replace(' ', "-"));
-        let frame = Frame::new(
+        let mut frame = Frame::new(
             MessageKind::Hello,
             self.request,
             serde_json::to_vec(&serde_json::json!({
@@ -132,9 +143,15 @@ impl Client {
             }))
             .unwrap(),
         );
+        if let Some(version) = self.version {
+            frame.header.protocol_version = version;
+        }
         write_frame(&mut self.stream, &frame).await.unwrap();
 
-        let reply = tokio::time::timeout(PATIENCE, read_frame(&mut self.stream))
+        // Read the reply with the version-tolerant decoder: a refusal aimed at
+        // a Mac on the old protocol is written in *that* Mac's version, which
+        // is the only way it can be decoded by the app it is meant for.
+        let reply = tokio::time::timeout(PATIENCE, read_handshake_frame(&mut self.stream))
             .await
             .expect("the daemon answered nothing")
             .expect("the daemon closed without answering");

@@ -3,7 +3,16 @@ use std::fmt;
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u8 = 1;
+/// The wire version both ends must agree on.
+///
+/// **2** since environment sharing
+/// (`docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`
+/// §3 "Protocol version"). Local skew does not happen — the app and the daemon
+/// ship in one bundle and `rebuild-app.sh` restarts the daemon with the app —
+/// but *remote* skew does: Mac A updated, Mac B not. That is what the bump is
+/// for, and it is only useful because the daemon can now say so; see
+/// [`read_handshake_frame`].
+pub const PROTOCOL_VERSION: u8 = 2;
 pub const HEADER_LEN: usize = 16;
 pub const MAX_PAYLOAD_LEN: usize = 1024 * 1024;
 
@@ -428,12 +437,26 @@ pub struct Header {
 
 impl Header {
     pub fn decode(bytes: [u8; HEADER_LEN]) -> Result<Self, FrameError> {
+        let header = Self::decode_any_version(bytes)?;
+        if header.protocol_version != PROTOCOL_VERSION {
+            return Err(FrameError::UnsupportedVersion(header.protocol_version));
+        }
+        Ok(header)
+    }
+
+    /// [`Self::decode`] without the version check — everything else about the
+    /// envelope is still validated.
+    ///
+    /// Used for exactly one frame, the handshake ([`read_handshake_frame`]),
+    /// because a version byte that cannot be read is a version skew that
+    /// cannot be reported: the strict decoder's answer to an old peer is a
+    /// dropped stream, which the peer reads as an outage and answers with a
+    /// reconnect loop. Every subsequent frame goes through [`Self::decode`]
+    /// and a mismatch still ends the connection.
+    fn decode_any_version(bytes: [u8; HEADER_LEN]) -> Result<Self, FrameError> {
         let payload_length = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
         if payload_length as usize > MAX_PAYLOAD_LEN {
             return Err(FrameError::PayloadTooLarge(payload_length as usize));
-        }
-        if bytes[4] != PROTOCOL_VERSION {
-            return Err(FrameError::UnsupportedVersion(bytes[4]));
         }
         let flags = u16::from_be_bytes(bytes[6..8].try_into().unwrap());
         if flags != 0 {
@@ -565,10 +588,29 @@ pub fn decode_raw_payload(payload: &[u8]) -> Result<(&str, &[u8]), FrameError> {
 }
 
 pub async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Frame> {
+    read_with(reader, Header::decode).await
+}
+
+/// Reads a connection's **first** frame, whatever protocol version it claims.
+///
+/// The handshake is the one frame that has to cross a version boundary, in
+/// both directions: a peer on the old protocol must be readable enough to be
+/// told to update, and the refusal must be written back in *its* version or it
+/// is bytes that peer's decoder throws away. `serve_client` reads the `Hello`
+/// with this and then decides; the rest of the connection is
+/// [`read_frame`], where a mismatched version still ends the stream.
+pub async fn read_handshake_frame(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Frame> {
+    read_with(reader, Header::decode_any_version).await
+}
+
+async fn read_with(
+    reader: &mut (impl AsyncRead + Unpin),
+    decode: fn([u8; HEADER_LEN]) -> Result<Header, FrameError>,
+) -> io::Result<Frame> {
     let mut header_bytes = [0; HEADER_LEN];
     reader.read_exact(&mut header_bytes).await?;
-    let header = Header::decode(header_bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let header =
+        decode(header_bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let mut payload = vec![0; header.payload_length as usize];
     reader.read_exact(&mut payload).await?;
     Ok(Frame { header, payload })

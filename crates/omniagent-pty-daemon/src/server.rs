@@ -1,10 +1,10 @@
 use crate::connections::{ConnectionRegistry, PresenceFeed, ViewerIdentity};
 use crate::protocol::{
-    decode_raw_payload, encode_raw_payload, read_frame, write_frame, AttachPayload,
-    BrainGetContextPayload, BrainSearchPayload, DirectoryEntryPayload, DirectoryListingPayload,
-    DisconnectViewerPayload, ErrorPayload, Frame, HelloAckPayload, HelloPayload,
-    ListDirectoryPayload, MessageKind, RemoteViewersPayload, ResizePayload, ResponsePayload,
-    ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
+    decode_raw_payload, encode_raw_payload, read_frame, read_handshake_frame, write_frame,
+    AttachPayload, BrainGetContextPayload, BrainSearchPayload, DirectoryEntryPayload,
+    DirectoryListingPayload, DisconnectViewerPayload, ErrorPayload, Frame, HelloAckPayload,
+    HelloPayload, ListDirectoryPayload, MessageKind, RemoteViewersPayload, ResizePayload,
+    ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
     RootsRenameProjectPayload, RootsSetPausedPayload, RootsStartIngestPayload,
     SessionCreatedPayload, SessionExitedPayload, SessionIdPayload, SessionListPayload,
     SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue, LIST_DIRECTORY_MAX_ENTRIES,
@@ -545,7 +545,11 @@ where
     } = ctx;
     let (mut reader, writer) = tokio::io::split(stream);
     let writer: SharedWriter = Arc::new(Mutex::new(Box::new(writer)));
-    let hello = read_frame(&mut reader).await.context("read hello")?;
+    // The handshake is read with the version-tolerant decoder so that a peer
+    // this daemon cannot speak to can still be *told* so; see below.
+    let hello = read_handshake_frame(&mut reader)
+        .await
+        .context("read hello")?;
     if hello.header.message_kind != MessageKind::Hello {
         return Err(anyhow!("first client frame must be Hello"));
     }
@@ -557,6 +561,38 @@ where
         .machine_name
         .clone()
         .unwrap_or_else(|| "Unknown Mac".into());
+    // Version skew, first of every refusal (spec §3 "Protocol version").
+    //
+    // First because it is the only one whose answer this peer can be relied on
+    // to understand: any other refusal, written in a dialect the peer's decoder
+    // rejects, is a dropped stream — which is phase 1's failure exactly, a
+    // 0.25 s reconnect loop with a dead keyboard. So the refusal goes back
+    // stamped with the *peer's* version, and it is deliberately ahead of the
+    // lease: a skewed peer that took the lease on its way to being refused
+    // would lock out the machine that could have used it, and a skewed peer
+    // arriving second would be told about the lease instead of about the
+    // update it actually needs.
+    //
+    // A *local* client on the wrong version is a different situation with no
+    // sentence worth writing: the app and the daemon ship together, so this
+    // means the bundle was replaced under a running daemon, and the app's
+    // answer is to reconnect until the daemon it is talking to is the new one.
+    if hello.header.protocol_version != PROTOCOL_VERSION {
+        if trust != ClientTrust::Remote {
+            return Err(anyhow!(
+                "client speaks protocol {}, this daemon speaks {PROTOCOL_VERSION}",
+                hello.header.protocol_version
+            ));
+        }
+        send_handshake_error(
+            &writer,
+            request,
+            hello.header.protocol_version,
+            anyhow!("update OmniAgent on {machine_name}"),
+        )
+        .await?;
+        return Ok(());
+    }
     // The blocklist is checked here — before the ack, and by the daemon rather
     // than the app — because a kick has to hold against a viewer that still
     // holds a valid device token and re-dials on its own (spec §5).
@@ -1481,6 +1517,29 @@ async fn send_error(
         },
     )
     .await
+}
+
+/// [`send_error`], written in the version the *peer* speaks.
+///
+/// The only frame this daemon ever writes outside its own protocol version,
+/// and only ever as the last one on that connection. A refusal aimed at a Mac
+/// running the old app is worth nothing stamped with the new version: that
+/// app's decoder rejects the header and never reads the sentence inside.
+async fn send_handshake_error(
+    writer: &SharedWriter,
+    request: u64,
+    protocol_version: u8,
+    error: impl std::fmt::Display,
+) -> Result<()> {
+    let mut frame = Frame::new(
+        MessageKind::Error,
+        request,
+        serde_json::to_vec(&ErrorPayload {
+            message: error.to_string(),
+        })?,
+    );
+    frame.header.protocol_version = protocol_version;
+    send_frame(writer, frame).await
 }
 
 async fn send_json(
