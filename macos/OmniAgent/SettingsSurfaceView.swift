@@ -23,6 +23,10 @@ import AppKit
 enum SettingsSection: String, CaseIterable {
     case general
     case accounts
+    /// The machine-wide sharing switch (2026-09-01 remote environment
+    /// sharing spec §2, §10) — next to Accounts, not its own group: who else
+    /// can be this account is the same neighbourhood as who this account is.
+    case remote
     case sessions
     case themes
     case accessibility
@@ -34,6 +38,7 @@ enum SettingsSection: String, CaseIterable {
         switch self {
         case .general: return "General"
         case .accounts: return "Accounts"
+        case .remote: return "Remote"
         case .sessions: return "Sessions"
         case .themes: return "Themes"
         case .accessibility: return "Accessibility"
@@ -48,6 +53,7 @@ enum SettingsSection: String, CaseIterable {
         switch self {
         case .general: return "gearshape"
         case .accounts: return "person.2"
+        case .remote: return "antenna.radiowaves.left.and.right"
         case .sessions: return "arrow.triangle.branch"
         case .themes: return "paintpalette"
         case .accessibility: return "accessibility"
@@ -343,6 +349,29 @@ final class SettingsSurfaceView: NSView {
     var onConnectGitHub: (() -> Void)?
     var onDisconnectGitHub: (() -> Void)?
     var onDeleteAccount: (() -> Void)?
+    /// Remote (2026-09-01 remote environment sharing spec §2, §10): the one
+    /// sharing switch, and this Mac's own relay registration underneath it,
+    /// read-only. The blocked list and Activity are later tasks' — this
+    /// section holds only these two things, deliberately, rather than
+    /// shipping empty placeholders for them.
+    let shareToggle = NSButton(checkboxWithTitle: "Share this environment", target: nil, action: nil)
+    let shareExplanationField = ShellFont.label(
+        "Anyone signed in to your account on another Mac can use this computer as if they were "
+            + "sitting at it. You will see who is connected and everything they do.",
+        font: ShellFont.ui(12),
+        color: ShellPalette.inkMuted
+    )
+    let thisMachineHeaderField = ShellFont.label("This machine", font: ShellFont.ui(13, .semibold), color: ShellPalette.ink)
+    /// This Mac's own name and device id, from the `relay_device_token` row
+    /// — read-only here; registration itself is a later task's to wire up
+    /// to the sharing switch (see `WorkspaceWindowController.registerThisMachine`).
+    let thisMachineNameField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
+    let thisMachineIDField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
+    /// `isSharing` as the model last reported it — the one reading of it, so
+    /// `shareToggle.state` and the spotlight's row (Task 3, §10) can never
+    /// disagree about which way the switch is thrown.
+    private(set) var isSharing = false
+    var onToggleRemoteSharing: (() -> Void)?
     /// General's update block: which version is running, what the updater is
     /// doing, and the one button that advances it. General rather than a
     /// section of its own -- it is where macOS apps put this, and a whole
@@ -385,6 +414,13 @@ final class SettingsSurfaceView: NSView {
         deleteAccountButton.translatesAutoresizingMaskIntoConstraints = false
         applyAccount(email: nil, signedIn: false)
 
+        shareToggle.font = ShellFont.ui(13)
+        shareToggle.target = self
+        shareToggle.action = #selector(shareTogglePressed)
+        shareToggle.translatesAutoresizingMaskIntoConstraints = false
+        applyRemoteSharing(isSharing: false)
+        applyThisMachine(name: nil, deviceID: nil)
+
         updateButton.bezelStyle = .rounded
         updateButton.controlSize = .regular
         updateButton.font = ShellFont.ui(13)
@@ -397,7 +433,8 @@ final class SettingsSurfaceView: NSView {
 
         let column = NSStackView(views: [
             titleField, subtitleField, accountField, accountButton, githubField, githubButton,
-            deleteAccountButton, updateVersionField, updateStatusField, updateButton,
+            deleteAccountButton, shareToggle, shareExplanationField, thisMachineHeaderField,
+            thisMachineNameField, thisMachineIDField, updateVersionField, updateStatusField, updateButton,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -410,6 +447,11 @@ final class SettingsSurfaceView: NSView {
         // Its own gap again: deleting the account is not a third line of the
         // GitHub block.
         column.setCustomSpacing(22, after: githubButton)
+        column.setCustomSpacing(8, after: shareToggle)
+        // "This machine" is its own fact about the Mac, not a second line of
+        // the switch's explanation.
+        column.setCustomSpacing(22, after: shareExplanationField)
+        column.setCustomSpacing(8, after: thisMachineHeaderField)
         column.setCustomSpacing(14, after: updateStatusField)
         column.translatesAutoresizingMaskIntoConstraints = false
 
@@ -462,10 +504,43 @@ final class SettingsSurfaceView: NSView {
         // General has a screen too now: the update block. Which means General
         // no longer says "Under development" either.
         let isGeneral = section == .general
-        subtitleField.isHidden = isAccounts || isGeneral
+        // Remote has a screen too (Task 3, §2/§10): the sharing switch and
+        // this Mac's own identity. The blocked list and Activity are later
+        // tasks' — nothing here stands in for them.
+        let isRemote = section == .remote
+        subtitleField.isHidden = isAccounts || isGeneral || isRemote
         updateVersionField.isHidden = !isGeneral
         updateStatusField.isHidden = !isGeneral
         updateButton.isHidden = !isGeneral
+        shareToggle.isHidden = !isRemote
+        shareExplanationField.isHidden = !isRemote
+        thisMachineHeaderField.isHidden = !isRemote
+        thisMachineNameField.isHidden = !isRemote
+        thisMachineIDField.isHidden = !isRemote
+    }
+
+    /// Bound to `RemoteSharingModel.isSharing` by the controller — never
+    /// flipped locally on a click, since writes are non-optimistic (see
+    /// `RemoteSharingModel`'s own doc comment): the switch shows only what
+    /// the controller has confirmed actually landed.
+    func applyRemoteSharing(isSharing: Bool) {
+        self.isSharing = isSharing
+        shareToggle.state = isSharing ? .on : .off
+    }
+
+    /// This Mac's own relay registration, read-only — `nil` for either
+    /// argument while there is none yet (signed out, or never registered).
+    func applyThisMachine(name: String?, deviceID: String?) {
+        thisMachineNameField.stringValue = "Name: \(name ?? "Not registered")"
+        thisMachineIDField.stringValue = "Device ID: \(deviceID ?? "—")"
+    }
+
+    @objc private func shareTogglePressed() {
+        // The click already moved the checkbox; put it straight back until
+        // the controller confirms the write landed, matching every other
+        // control on this page that only shows a state once it is real.
+        shareToggle.state = isSharing ? .on : .off
+        onToggleRemoteSharing?()
     }
 
     /// The update story, on the Settings page. Same states as the sidebar

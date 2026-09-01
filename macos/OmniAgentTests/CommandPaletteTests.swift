@@ -27,9 +27,10 @@ final class CommandPaletteTests: XCTestCase {
             [
                 "session:new-branch",
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
-                "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
+                "settings:general", "settings:accounts", "settings:remote", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "settings:accounts:signin", "settings:accounts:github:connect",
+                "settings:remote:toggle-sharing",
                 // Idle offers the check; a found or downloaded update swaps
                 // this row for the one that can actually be taken.
                 "update:check",
@@ -382,6 +383,28 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(rows.map(\.symbol), SettingsSection.allCases.map(\.symbol))
         XCTAssertTrue(rows.allSatisfy { $0.subtitle == "Settings" && $0.keywords == "settings" })
         XCTAssertEqual(rows.first?.action, .showSettingsSection(.general))
+    }
+
+    /// Settings › Remote (2026-09-01 remote environment sharing spec §10):
+    /// the section itself is one of the rows above (driven off
+    /// `SettingsSection.allCases`, pinned by the test above), and its one
+    /// control — the sharing switch — is a row of its own, the standing
+    /// rule reaching *inside* the section exactly as it does for Accounts.
+    func testRemoteSettingsRowsExist() {
+        let commands = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        let titles = commands.map(\.title)
+        XCTAssertTrue(titles.contains("Remote"), "the section itself")
+        XCTAssertTrue(titles.contains("Share this environment"))
+
+        let toggleRow = try! XCTUnwrap(commands.first { $0.id == "settings:remote:toggle-sharing" })
+        XCTAssertEqual(toggleRow.title, "Share this environment")
+        XCTAssertEqual(toggleRow.action, .toggleRemoteSharing)
+        XCTAssertEqual(toggleRow.subtitle, "Settings › Remote", "the row says where it lives")
+        XCTAssertEqual(toggleRow.symbol, "antenna.radiowaves.left.and.right")
+        XCTAssertEqual(toggleRow.section, .places)
+        for typed in ["remote", "share", "sharing", "screen", "access", "connect"] {
+            XCTAssertTrue(toggleRow.keywords?.contains(typed) == true, "someone would type \"\(typed)\"")
+        }
     }
 
     /// The two Help pages are spotlight rows too (standing rule: everything

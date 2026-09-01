@@ -530,6 +530,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// out (`syncRemoteMachines`).
     let remoteMachines: RemoteMachinesModel
 
+    /// The machine-wide sharing switch (2026-09-01 remote environment
+    /// sharing spec §2) — `.shared` in production, a fresh `init(store:)`
+    /// instance in tests, `remoteMachines`' own injection pattern. Bound to
+    /// exactly once, here in `init`: the sole subscriber to its
+    /// `onChange`/`onWriteFailed`, fanning out to `settingsView` and (through
+    /// `onRemoteSharingChanged`) the menu bar icon — `updateController
+    /// .onStateChange`'s exact shape, for the same reason: the model's own
+    /// doc comment promises "the menu bar icon and Settings › Remote both
+    /// redraw off this", and a `(() -> Void)?` property can only ever answer
+    /// to one caller, so one place has to be that caller and fan out.
+    private let remoteSharing: RemoteSharingModel
+    /// Fires whenever `remoteSharing`'s state actually changed and this
+    /// controller has finished applying it to `settingsView` — `AppDelegate`
+    /// is the only thing that sets this, to refresh the menu bar icon, which
+    /// this controller has no reference to.
+    var onRemoteSharingChanged: (() -> Void)?
+
     /// `panes` may be empty: the app delegate opens the window before the
     /// socket is up, and `start()` fills it from the `layout` row once the
     /// connection lands. A non-empty seed is for callers that already know
@@ -545,6 +562,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         notifier: SessionNotifier = SessionNotifier(delivery: UserNotificationDelivery()),
         daemonPersistence: DaemonPersistenceController = DaemonPersistenceController(),
         remoteMachines: RemoteMachinesModel = RemoteMachinesModel(),
+        remoteSharing: RemoteSharingModel = .shared,
         settingsClient: SettingsClient? = nil,
         authDefaults: UserDefaults = .standard
     ) {
@@ -552,6 +570,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         self.notifier = notifier
         self.daemonPersistence = daemonPersistence
         self.remoteMachines = remoteMachines
+        self.remoteSharing = remoteSharing
         accountRoot = daemonPersistence.paths.dataDir
         currentAccountID = AccountDirectory.readCurrentAccount(root: daemonPersistence.paths.dataDir)
         let settingsStore = SettingsStore(client: settingsClient ?? connection)
@@ -890,6 +909,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self else { return proceed() }
             stopDaemonForUpdate(then: proceed)
         }
+        // The sharing switch (2026-09-01 remote environment sharing spec
+        // §2) — the sole subscriber to `remoteSharing`'s single-slot
+        // `onChange`/`onWriteFailed`, matching `updateController
+        // .onStateChange` just above. Seeded once immediately after: a
+        // `remoteSharing` handed in already configured (every test's
+        // `init(store:)` path) resolved before this closure existed to hear
+        // about it.
+        remoteSharing.onChange = { [weak self] in self?.applyRemoteSharingChange() }
+        remoteSharing.onWriteFailed = { [weak self] error in self?.applyRemoteSharingWriteFailed(error) }
+        applyRemoteSharingChange()
         // Home's pill and the Settings page's button reach the same three
         // actions the widget does.
         homeView.onUpdatePillPressed = { [weak self] in
@@ -1176,6 +1205,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsView.onConnectGitHub = { [weak self] in self?.connectGitHub() }
         settingsView.onDisconnectGitHub = { [weak self] in self?.disconnectGitHub() }
         settingsView.onDeleteAccount = { [weak self] in self?.deleteAccount() }
+        settingsView.onToggleRemoteSharing = { [weak self] in self?.toggleRemoteSharing() }
         seedAccountFromMirror()
         settingsPanel.onHeightChange = { [weak self] in
             guard let self, settingsPanelPlace != .hidden else { return }
@@ -3509,6 +3539,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             disconnectGitHub()
         case .deleteAccount:
             deleteAccount()
+        case .toggleRemoteSharing:
+            toggleRemoteSharing()
         case .checkForUpdates:
             updateController.checkForUpdates()
         case .downloadUpdate:
@@ -4344,9 +4376,52 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         relayTokenState = (raw ?? "").isEmpty ? .absent : .present
         // The row also names this Mac's own relay device — the one machine
         // the viewer side must never list or dial.
-        if let deviceID = RemoteMachinesModel.deviceID(inTokenRow: raw) {
+        let deviceID = RemoteMachinesModel.deviceID(inTokenRow: raw)
+        if let deviceID {
             remoteMachines.localDeviceID = deviceID
         }
+        // Settings › Remote's read-only "This machine" identity (Task 3,
+        // §2/§10) — the same row, just the other two fields of it.
+        settingsView.applyThisMachine(name: RemoteMachinesModel.name(inTokenRow: raw), deviceID: deviceID)
+    }
+
+    /// Whether this Mac currently shares its environment — the menu bar
+    /// icon, its checkmarked item, and the spotlight row all read this
+    /// rather than reaching for `remoteSharing` themselves, `accountDisplayLabel`'s
+    /// reasoning: one seam, so nothing outside this controller has to know
+    /// the model exists.
+    var isSharingEnvironment: Bool { remoteSharing.isSharing }
+
+    /// Flips the switch — Settings › Remote's toggle, the menu bar's
+    /// checkmarked item, and the spotlight row (§10) all call this rather
+    /// than `remoteSharing.setSharing` directly, so there is exactly one
+    /// place that decides what "toggle" means.
+    func toggleRemoteSharing() {
+        remoteSharing.setSharing(!remoteSharing.isSharing)
+    }
+
+    /// `remoteSharing.onChange`'s one handler: pushes the confirmed state to
+    /// `settingsView` (non-optimistic — this only ever runs after a write
+    /// actually landed, or after a restore) and tells whoever is watching
+    /// the menu bar icon.
+    private func applyRemoteSharingChange() {
+        settingsView.applyRemoteSharing(isSharing: remoteSharing.isSharing)
+        onRemoteSharingChanged?()
+    }
+
+    /// `remoteSharing.onWriteFailed`'s one handler — `registerThisMachine`'s
+    /// catch block, the same liquid-glass ask card every failure in this
+    /// window uses, never an `NSAlert`. Fired whether the write was asked
+    /// for from Settings, the menu bar, or the spotlight: wherever it came
+    /// from, the honest answer is the same card.
+    private func applyRemoteSharingWriteFailed(_ error: Error) {
+        presentWindowAsk(
+            title: "Could not update sharing",
+            message: error.localizedDescription,
+            icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
+            severity: .critical,
+            options: [PaneAskOption("OK", isPrimary: true) { _ in }]
+        )
     }
 
     /// Rewrites `remote_control` from the live layout. Called from

@@ -51,6 +51,11 @@ enum PaletteAction: Equatable {
     /// signed in: deleting nothing is a dead end, not an offer — which is
     /// why this one is not half of a pair like the two above.
     case deleteAccount
+    /// Settings › Remote's one control (2026-09-01 remote environment
+    /// sharing spec §10) — a fixed row, unlike the account/GitHub pairs
+    /// above: sharing is a plain on/off switch with one verb, not a mode
+    /// with a different one on each side.
+    case toggleRemoteSharing
     /// Self-update, in its three takeable forms. Like the account rows
     /// above, only the one the current state actually allows becomes a row —
     /// offering "Restart to Update" with nothing downloaded is a dead end.
@@ -730,6 +735,22 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
+        // Settings › Remote's one control (2026-09-01 remote environment
+        // sharing spec §10) — a fixed row unconditionally, not gated on
+        // current state like the pairs above: the switch has one verb
+        // whichever way it is thrown.
+        commands.append(
+            PaletteCommand(
+                id: "settings:remote:toggle-sharing",
+                title: "Share this environment",
+                detail: nil,
+                action: .toggleRemoteSharing,
+                keywords: "remote share sharing screen access connect environment",
+                section: .places,
+                subtitle: "Settings › Remote",
+                symbol: "antenna.radiowaves.left.and.right"
+            )
+        )
         // Self-update. One row, whichever one can be taken right now — the
         // same rule the account pair follows. `Spotlight finds everything`
         // (the repo's standing rule) is why these exist at all: the sidebar

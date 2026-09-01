@@ -431,6 +431,19 @@ final class RemoteMachinesModel {
         return deviceID
     }
 
+    /// The `name` inside a `relay_device_token` row — `deviceID(inTokenRow:)`'s
+    /// sibling, for Settings › Remote's read-only "This machine" identity
+    /// (2026-09-01 remote environment sharing spec §2).
+    static func name(inTokenRow raw: String?) -> String? {
+        guard
+            let raw, !raw.isEmpty,
+            let data = raw.data(using: .utf8),
+            let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let name = row["name"] as? String, !name.isEmpty
+        else { return nil }
+        return name
+    }
+
     // MARK: - Lookup
 
     /// The connection for an **online** device, `nil` otherwise — what

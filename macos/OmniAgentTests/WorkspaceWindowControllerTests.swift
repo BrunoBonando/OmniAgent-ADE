@@ -3055,6 +3055,102 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(created?.sourceRef, "dev", "created off the chip's base")
     }
 
+    // MARK: - Remote sharing (2026-09-01 remote environment sharing spec §2, §10)
+
+    /// Settings › Remote's switch is bound to `RemoteSharingModel.isSharing`
+    /// through the controller — never optimistic, so pressing it shows the
+    /// new state only once the (fake, synchronous) store confirms the write.
+    @MainActor
+    func testTheShareToggleWritesThroughRemoteSharingAndReflectsTheConfirmedState() throws {
+        let client = FakeSettingsClient()
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-test.sock")),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+
+        XCTAssertFalse(controller.settingsView.isSharing, "off until the row says otherwise")
+        XCTAssertFalse(controller.isSharingEnvironment)
+
+        controller.settingsView.onToggleRemoteSharing?()
+
+        XCTAssertTrue(controller.settingsView.isSharing)
+        XCTAssertTrue(controller.isSharingEnvironment)
+        XCTAssertEqual(client.rows[SettingsKey.remoteSharing], #"{"enabled":true}"#)
+
+        controller.settingsView.onToggleRemoteSharing?()
+        XCTAssertFalse(controller.settingsView.isSharing, "the same control turns it back off")
+        XCTAssertEqual(client.rows[SettingsKey.remoteSharing], #"{"enabled":false}"#)
+    }
+
+    /// A write that fails must not be believed — `RemoteSharingModel`'s own
+    /// non-optimistic rule — and the controller says so the same way every
+    /// other failure in this window does: the liquid-glass ask card, never
+    /// an `NSAlert`.
+    @MainActor
+    func testAFailedSharingWriteAsksInACardAndLeavesTheSwitchAlone() throws {
+        let client = FakeSettingsClient()
+        client.failingWrites = [SettingsKey.remoteSharing]
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-fail-test.sock")),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+
+        controller.settingsView.onToggleRemoteSharing?()
+
+        XCTAssertFalse(controller.settingsView.isSharing, "a failed write leaves the switch exactly as it was")
+        let card = try XCTUnwrap(controller.windowAskOverlay, "the real card, not an NSAlert")
+        XCTAssertEqual(card.options.map(\.title), ["OK"])
+    }
+
+    /// The spotlight row runs through the exact same `toggleRemoteSharing()`
+    /// the page's own switch does — `testEveryPaletteActionRunsTheSameCodeTheMenuItemDoes`'s
+    /// pattern, for the one new action this dispatch adds. A model of its
+    /// own, not `.shared` (`makeEmptyController`'s default): `.shared` is
+    /// process-wide, so a test that toggled it would leak into every other
+    /// test in the suite.
+    @MainActor
+    func testTheToggleRemoteSharingPaletteActionFlipsTheSameSwitch() throws {
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-palette-test.sock")),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: FakeSettingsClient())),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+
+        XCTAssertFalse(controller.isSharingEnvironment)
+        controller.run(.toggleRemoteSharing)
+        XCTAssertTrue(controller.isSharingEnvironment)
+    }
+
+    /// This Mac's own identity, read-only, from the same `relay_device_token`
+    /// row the viewer side already parses for `localDeviceID` —
+    /// `applyRestoredRelayDeviceToken`'s other half.
+    @MainActor
+    func testThisMachinesIdentityIsAppliedFromTheRelayDeviceTokenRow() throws {
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-identity-test.sock")),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: FakeSettingsClient())),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+
+        controller.applyRestoredRelayDeviceToken(nil)
+        XCTAssertEqual(controller.settingsView.thisMachineNameField.stringValue, "Name: Not registered")
+        XCTAssertEqual(controller.settingsView.thisMachineIDField.stringValue, "Device ID: —")
+
+        controller.applyRestoredRelayDeviceToken(#"{"device_id":"dev-1","token":"t","name":"Bruno's Mac Studio","relay_url":"https://relay.omni-agent.ai"}"#)
+        XCTAssertEqual(controller.settingsView.thisMachineNameField.stringValue, "Name: Bruno's Mac Studio")
+        XCTAssertEqual(controller.settingsView.thisMachineIDField.stringValue, "Device ID: dev-1")
+    }
+
     private func makeController() -> WorkspaceWindowController {
         WorkspaceWindowController(
             connection: SessionConnection(
