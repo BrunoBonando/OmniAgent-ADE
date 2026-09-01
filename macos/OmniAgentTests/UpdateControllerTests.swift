@@ -130,6 +130,21 @@ final class UpdateControllerTests: XCTestCase {
         XCTAssertFalse(stopped)
     }
 
+    /// Four surfaces offer "Check for Updates". On a build where Sparkle
+    /// never started -- an unsigned local build, the common case in
+    /// development -- pressing it used to do nothing at all, which reads as a
+    /// broken button rather than a build that cannot update itself.
+    func testCheckingOnABuildThatCannotUpdateItselfSaysSo() {
+        let controller = UpdateController()
+        // `start()` was never called, so there is no updater -- exactly the
+        // state an unsigned build ends up in.
+        controller.checkForUpdates()
+        guard case let .failed(message) = controller.state else {
+            return XCTFail("expected a failure, got \(controller.state)")
+        }
+        XCTAssertFalse(message.isEmpty, "the row has to say something")
+    }
+
     // MARK: - The sidebar widget
 
     func testTheWidgetIsHiddenUntilThereIsSomethingToSay() {
@@ -175,6 +190,74 @@ final class UpdateControllerTests: XCTestCase {
         widget.apply(.checking)
         widget.onPress?()
         XCTAssertEqual([downloads, restarts, retries], [1, 1, 1])
+    }
+
+    /// The widget rides in the nav stack precisely so that hiding it removes
+    /// it from the layout rather than leaving a gap over Home. Assert the
+    /// geometry, not just the `isHidden` flag -- a pinned view with its own
+    /// height constraint would pass the flag check and still push Home down.
+    ///
+    /// Measured in the *sidebar's* coordinate space, not the row's own. A
+    /// row's frame is expressed in the stack's space, where it does not move
+    /// at all when the stack grows -- the stack does. Comparing raw
+    /// `frame.maxY` therefore reports "nothing moved" no matter what happens.
+    func testHidingTheWidgetDoesNotMoveTheNavRows() throws {
+        let sidebar = NavigationSidebarView()
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 280, height: 700),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let content = try XCTUnwrap(window.contentView)
+        content.addSubview(sidebar)
+        NSLayoutConstraint.activate([
+            sidebar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            sidebar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            sidebar.topAnchor.constraint(equalTo: content.topAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        content.layoutSubtreeIfNeeded()
+
+        let home = try XCTUnwrap(sidebar.navRows.first)
+        func homeTop() -> CGFloat { home.convert(home.bounds, to: sidebar).maxY }
+
+        let whileHidden = homeTop()
+
+        sidebar.updateWidget.apply(.available(version: "1.8.0"))
+        content.layoutSubtreeIfNeeded()
+        // Non-flipped: further down the column is a *smaller* y.
+        XCTAssertLessThan(homeTop(), whileHidden, "a visible widget pushes Home down")
+        XCTAssertGreaterThan(
+            sidebar.updateWidget.convert(sidebar.updateWidget.bounds, to: sidebar).minY,
+            homeTop(),
+            "and sits above it, not over it"
+        )
+
+        sidebar.updateWidget.apply(.idle)
+        content.layoutSubtreeIfNeeded()
+        XCTAssertEqual(homeTop(), whileHidden, accuracy: 0.5, "hiding it gives the room back")
+        window.close()
+    }
+
+    /// A widget whose constraints cannot resolve would render as a zero-height
+    /// sliver and nobody would see it -- which, on a screen this test cannot
+    /// look at, is worth asserting directly.
+    func testTheVisibleWidgetHasRoomForItsLabelAndBar() {
+        let widget = SidebarUpdateWidgetView()
+        widget.translatesAutoresizingMaskIntoConstraints = false
+        widget.widthAnchor.constraint(equalToConstant: 264).isActive = true
+
+        widget.apply(.available(version: "1.8.0"))
+        widget.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThanOrEqual(widget.fittingSize.height, 30)
+
+        widget.apply(.updating(fraction: 0.5))
+        widget.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(
+            widget.fittingSize.height, 30,
+            "the progress bar needs its own line"
+        )
     }
 
     // MARK: - Spotlight

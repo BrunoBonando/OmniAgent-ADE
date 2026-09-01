@@ -79,6 +79,9 @@ final class UpdateController: NSObject {
     private var pendingVersion: String?
 
     private var updater: SPUUpdater?
+    /// Why there is no updater, if there is none. Kept so that pressing Check
+    /// for Updates says something instead of nothing.
+    private var startupFailure: String?
 
     /// The running app's own version, for the Settings and Home surfaces.
     var currentVersion: String {
@@ -101,16 +104,28 @@ final class UpdateController: NSObject {
             try updater.start()
             self.updater = updater
         } catch {
-            // Not fatal and not worth a widget: an updater that will not start
-            // (an unsigned dev build, a missing feed URL) means this build
-            // cannot update itself, which is normal for a local build.
+            // Not fatal, and not worth a widget on its own: an updater that
+            // will not start (an unsigned dev build, a missing feed URL) means
+            // this build cannot update itself, which is normal for a local
+            // build and not news anybody asked for. It becomes news only when
+            // someone actually asks for a check -- see `checkForUpdates`.
+            startupFailure = error.localizedDescription
             NSLog("OmniAgent: Sparkle did not start: \(error.localizedDescription)")
         }
     }
 
     /// The Check for Updates… command: menu, Settings, Home, spotlight.
     func checkForUpdates() {
-        guard let updater, updater.canCheckForUpdates else { return }
+        guard let updater else {
+            // Four surfaces call this. A build that cannot update itself must
+            // say so when asked rather than swallow the press -- a menu item
+            // that does nothing is indistinguishable from a broken one.
+            failed(startupFailure ?? "This build cannot update itself.")
+            return
+        }
+        // Busy, not broken: a check or download is already running, and that
+        // is what the widget is already showing.
+        guard updater.canCheckForUpdates else { return }
         state = .checking
         updater.checkForUpdates()
     }
