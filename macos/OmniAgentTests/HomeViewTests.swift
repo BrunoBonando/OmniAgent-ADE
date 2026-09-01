@@ -397,6 +397,13 @@ final class HomeViewTests: XCTestCase {
 
         XCTAssertEqual(home.upNextCard.frame.width, home.whatsNewCard.frame.width, accuracy: 0.5)
         XCTAssertEqual(home.upNextCard.frame.height, home.whatsNewCard.frame.height, accuracy: 0.5)
+        // Both cards start at the same y — pinned card-to-card, so a header
+        // that grew on one side could not drop its card below its neighbour.
+        XCTAssertEqual(
+            home.upNextCard.convert(home.upNextCard.bounds, to: home).minY,
+            home.whatsNewCard.convert(home.whatsNewCard.bounds, to: home).minY,
+            accuracy: 0.5
+        )
         XCTAssertGreaterThan(home.upNextCard.frame.width, 0)
         XCTAssertNotEqual(
             upNextHalf.frame.minX, whatsNewHalf.frame.minX,

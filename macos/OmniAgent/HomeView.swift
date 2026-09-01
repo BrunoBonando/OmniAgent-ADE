@@ -514,6 +514,9 @@ final class HomeSurfaceView: NSView {
     /// pin them to one height, and so a test can prove they sit side by side.
     let upNextCard = HomeCardView()
     let whatsNewCard = HomeCardView()
+    /// Every header `rowHalf` has built, in build order — `init` pins them to
+    /// one height, which is what lets the cards below them be pinned level.
+    private var rowHalfHeaders: [NSView] = []
 
     init() {
         // The scrolling document, owned by the shell from here on — a local
@@ -538,23 +541,25 @@ final class HomeSurfaceView: NSView {
             shell.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             // The column fills the content card now instead of sitting in a
-            // fixed 880pt lane: centred, capped at 1080, never closer than
-            // 40 to either side. The 22.5%-of-height top air went with the
-            // title strip it hung under — the shell's header is the page's
-            // boundary, so the hero starts right below it (spec §7).
+            // fixed 880pt lane: centred and capped at 1080, running to the
+            // body's own edges — the shell's 40pt sides are the 40 the
+            // design asks for between the column and the card, and a second
+            // 40 here would double it. The 22.5%-of-height top air went with
+            // the title strip it hung under — the shell's header is the
+            // page's boundary, so the hero starts right below it (spec §7).
             column.topAnchor.constraint(equalTo: content.topAnchor),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 40),
-            column.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -40),
+            column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor),
+            column.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor),
         ])
         let cap = column.widthAnchor.constraint(lessThanOrEqualToConstant: 1080)
         cap.priority = .defaultHigh
         cap.isActive = true
-        // Under the cap the column is simply the body less its margins, so a
-        // narrow window loses nothing to the sides. Lowest priority of the
-        // three: the cap and the margins both outrank it.
-        let fill = column.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -80)
+        // Under the cap the column is simply the body's width, so a narrow
+        // window loses nothing to the sides. Lowest priority of the three:
+        // the cap and the two edges both outrank it.
+        let fill = column.widthAnchor.constraint(equalTo: content.widthAnchor)
         fill.priority = .defaultLow
         fill.isActive = true
 
@@ -573,7 +578,13 @@ final class HomeSurfaceView: NSView {
         // Up next and What's new take half the row each (spec §7): a section
         // header over a card, equal widths from `fillEqually` and equal
         // heights pinned card-to-card, the same way the suggestion row keeps
-        // its three level.
+        // its three level. The cards are pinned level as well, rather than
+        // trusting the row's `.top` alignment — that aligns the two *halves*,
+        // and a section subtitle that wrapped to two lines on one side would
+        // push its card down past its neighbour's. The headers share one
+        // height for the same reason, and it is what keeps the card-to-card
+        // top pin satisfiable when they do differ: the shorter header
+        // stretches instead of the two pins contradicting each other.
         let highlights = NSStackView(views: [buildUpNext(), buildWhatsNew()])
         highlights.orientation = .horizontal
         highlights.alignment = .top
@@ -582,8 +593,12 @@ final class HomeSurfaceView: NSView {
         column.addArrangedSubview(highlights)
         NSLayoutConstraint.activate([
             highlights.widthAnchor.constraint(equalTo: column.widthAnchor),
+            upNextCard.topAnchor.constraint(equalTo: whatsNewCard.topAnchor),
             upNextCard.heightAnchor.constraint(equalTo: whatsNewCard.heightAnchor),
         ])
+        for (header, next) in zip(rowHalfHeaders, rowHalfHeaders.dropFirst()) {
+            header.heightAnchor.constraint(equalTo: next.heightAnchor).isActive = true
+        }
         column.setCustomSpacing(40, after: highlights)
         buildFooter()
     }
@@ -1342,6 +1357,7 @@ final class HomeSurfaceView: NSView {
     /// both as wide as the half — the 22pt gap is the one every section
     /// leaves between a header and what it introduces.
     private func rowHalf(header: NSView, card: NSView) -> NSView {
+        rowHalfHeaders.append(header)
         let stack = NSStackView(views: [header, card])
         stack.orientation = .vertical
         stack.alignment = .leading
