@@ -27,6 +27,7 @@ final class CommandPaletteTests: XCTestCase {
             [
                 "session:new-branch",
                 "destination:home", "destination:todo", "destination:terminals", "destination:settings",
+                "titlebar:notifications", "titlebar:account",
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "settings:accounts:signin", "settings:accounts:github:connect",
@@ -395,6 +396,31 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(rows.map(\.title), ["Privacy Policy", "Third-Party Notices"])
         XCTAssertTrue(rows.allSatisfy { $0.subtitle == "Help" && $0.keywords?.contains("legal") == true })
         XCTAssertEqual(rows.first?.action, .openLegal(.privacyPolicy))
+    }
+
+    /// The standing rule reaching the window chrome: the bell and the avatar
+    /// are 24pt controls with no name printed anywhere, so the spotlight is
+    /// the only other way to name them.
+    func testTheTitleBarsBellAndAvatarAreSpotlightRows() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil
+        )
+
+        let bell = try XCTUnwrap(commands.first { $0.id == "titlebar:notifications" })
+        XCTAssertEqual(bell.title, "Notifications")
+        XCTAssertEqual(bell.symbol, "bell")
+        XCTAssertEqual(bell.subtitle, "Title bar")
+        XCTAssertEqual(bell.keywords, "notifications bell alerts")
+        XCTAssertEqual(bell.action, .showNotifications)
+        XCTAssertEqual(bell.section, .places)
+
+        let account = try XCTUnwrap(commands.first { $0.id == "titlebar:account" })
+        XCTAssertEqual(account.title, "Account")
+        XCTAssertEqual(account.symbol, "person.crop.circle")
+        XCTAssertEqual(account.subtitle, "Title bar")
+        XCTAssertEqual(account.keywords, "account profile avatar me")
+        XCTAssertEqual(account.action, .showAccountMenu)
+        XCTAssertEqual(account.section, .places)
     }
 
     func testTheSidebarsThreeDestinationsAreRowsWithTheirOwnIcons() {

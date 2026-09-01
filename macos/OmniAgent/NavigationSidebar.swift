@@ -216,9 +216,9 @@ final class SidebarSectionHeaderView: NSView {
 
 // MARK: - Account row
 
-/// The pinned footer: the signed-in account — its picture, or its initials,
-/// or a generic glyph when there is no account at all — beside the gear that
-/// opens the app's existing Settings surface. Pressing the account half opens
+/// The pinned footer: the signed-in account — its circle (`AccountAvatarView`,
+/// shared with the title bar) beside its name — and the gear that opens the
+/// app's existing Settings surface. Pressing the account half opens
 /// Settings › Accounts; pressing the gear offers the Settings panel.
 final class SidebarAccountRowView: NSView {
     var onOpenSettings: (() -> Void)?
@@ -233,15 +233,6 @@ final class SidebarAccountRowView: NSView {
     /// edge-to-edge footer tucks its avatar under the bevel.
     static let height: CGFloat = 44
 
-    /// What the avatar circle is currently showing. Named for what it is
-    /// for: three mutually exclusive layers share the circle, and this is
-    /// the one fact about them a test can read without walking the tree.
-    enum AvatarMode: Equatable {
-        case glyph
-        case initials(String)
-        case picture
-    }
-
     private let nameField = ShellFont.label(
         "Not signed in",
         font: ShellFont.ui(13.5, .medium),
@@ -254,19 +245,12 @@ final class SidebarAccountRowView: NSView {
     /// the same reason the gear is.
     private(set) var accountButton = ShellRowView()
 
-    private let avatar = NSView()
-    private let person = NSImageView()
-    private let pictureView = NSImageView()
-    private let initialsField = ShellFont.label(
-        "",
-        font: ShellFont.ui(12, .semibold),
-        color: ShellPalette.ink
-    )
+    private let avatar = AccountAvatarView(diameter: ShellMetrics.accountAvatar)
 
     /// What the row says about the account — a fact a test can read without
     /// walking the view tree.
     var accountLabel: String { nameField.stringValue }
-    private(set) var avatarModeForTesting: AvatarMode = .glyph
+    var avatarModeForTesting: AccountAvatarView.AvatarMode { avatar.mode }
 
     /// The frames the cursor rects were last built from, so `layout()` only
     /// invalidates them when they actually moved.
@@ -288,32 +272,6 @@ final class SidebarAccountRowView: NSView {
             layer?.borderWidth = 1
             layer?.borderColor = ShellPalette.hairlineStrong.cgColor
         }
-
-        avatar.wantsLayer = true
-        avatar.layer?.cornerRadius = ShellMetrics.accountAvatar / 2
-        avatar.layer?.backgroundColor = ShellPalette.iconTile.cgColor
-        avatar.layer?.borderWidth = 1
-        avatar.layer?.borderColor = ShellPalette.hairlineStrong.cgColor
-        avatar.translatesAutoresizingMaskIntoConstraints = false
-        person.image = NSImage(
-            systemSymbolName: "person.fill",
-            accessibilityDescription: "Account"
-        )?.withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
-        person.contentTintColor = ShellPalette.inkMuted
-        person.translatesAutoresizingMaskIntoConstraints = false
-        initialsField.alignment = .center
-        initialsField.isHidden = true
-        // Clipped by its own layer rather than by the circle's: a
-        // `masksToBounds` on the circle would cut into the hairline ring it
-        // draws around itself, and that ring is what separates a dark
-        // picture from the dark chip behind it.
-        pictureView.wantsLayer = true
-        pictureView.layer?.cornerRadius = ShellMetrics.accountAvatar / 2
-        pictureView.layer?.masksToBounds = true
-        pictureView.imageScaling = .scaleAxesIndependently
-        pictureView.isHidden = true
-        pictureView.translatesAutoresizingMaskIntoConstraints = false
-        for view in [person, initialsField, pictureView] { avatar.addSubview(view) }
 
         accountButton.wantsLayer = true
         accountButton.layer?.cornerRadius = Self.accountButtonHeight / 2
@@ -355,16 +313,6 @@ final class SidebarAccountRowView: NSView {
 
             avatar.leadingAnchor.constraint(equalTo: accountButton.leadingAnchor, constant: 7),
             avatar.centerYAnchor.constraint(equalTo: accountButton.centerYAnchor),
-            avatar.widthAnchor.constraint(equalToConstant: ShellMetrics.accountAvatar),
-            avatar.heightAnchor.constraint(equalToConstant: ShellMetrics.accountAvatar),
-            person.centerXAnchor.constraint(equalTo: avatar.centerXAnchor),
-            person.centerYAnchor.constraint(equalTo: avatar.centerYAnchor),
-            initialsField.centerXAnchor.constraint(equalTo: avatar.centerXAnchor),
-            initialsField.centerYAnchor.constraint(equalTo: avatar.centerYAnchor),
-            pictureView.leadingAnchor.constraint(equalTo: avatar.leadingAnchor),
-            pictureView.trailingAnchor.constraint(equalTo: avatar.trailingAnchor),
-            pictureView.topAnchor.constraint(equalTo: avatar.topAnchor),
-            pictureView.bottomAnchor.constraint(equalTo: avatar.bottomAnchor),
 
             nameField.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 8),
             nameField.trailingAnchor.constraint(equalTo: accountButton.trailingAnchor, constant: -8),
@@ -419,35 +367,7 @@ final class SidebarAccountRowView: NSView {
         }
         setAccessibilityLabel(nameField.stringValue)
         accountButton.setAccessibilityLabel(nameField.stringValue)
-
-        if let picture {
-            avatarModeForTesting = .picture
-        } else if let initials = Self.initials(of: label) {
-            avatarModeForTesting = .initials(initials)
-        } else {
-            avatarModeForTesting = .glyph
-        }
-        // Three layers share the circle; exactly one of them is on.
-        switch avatarModeForTesting {
-        case .glyph:
-            (person.isHidden, initialsField.isHidden, pictureView.isHidden) = (false, true, true)
-            pictureView.image = nil
-        case let .initials(initials):
-            initialsField.stringValue = initials
-            (person.isHidden, initialsField.isHidden, pictureView.isHidden) = (true, false, true)
-            pictureView.image = nil
-        case .picture:
-            pictureView.image = picture
-            (person.isHidden, initialsField.isHidden, pictureView.isHidden) = (true, true, false)
-        }
-    }
-
-    /// The first letters of the first two words, uppercased — `nil` when
-    /// there is no name to take them from.
-    private static func initials(of name: String?) -> String? {
-        guard let name else { return nil }
-        let letters = name.split(whereSeparator: \.isWhitespace).prefix(2).compactMap(\.first)
-        return letters.isEmpty ? nil : String(letters).uppercased()
+        avatar.apply(name: label, picture: picture)
     }
 
     /// Both halves are buttons, and a button says so under the pointer.

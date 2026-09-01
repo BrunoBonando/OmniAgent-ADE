@@ -3507,6 +3507,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             disconnectGitHub()
         case .deleteAccount:
             deleteAccount()
+        case .showNotifications:
+            showNotifications(nil)
+        case .showAccountMenu:
+            showAccountMenu(nil)
         case .checkForUpdates:
             updateController.checkForUpdates()
         case .downloadUpdate:
@@ -5263,6 +5267,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     private func persistNotifications(_ entries: [NotificationEntry]) {
+        // Before the write gate, not after: the dot says what is on screen
+        // right now, and an entry recorded while the persisted row is still
+        // being read is as unread as any other.
+        titleBar.notificationsButton.isUnread = NotificationFeed.unreadCount(entries) > 0
         guard notificationsReadCompleted else { return }
         write(NotificationFeedCodec.serialize(entries), to: SettingsKey.notifications)
     }
@@ -5411,9 +5419,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// checked against before it is allowed on screen.
     private var accountRowName: String?
     private var accountRowPictureURL = ""
+    /// The account's email, kept from the same `auth_account_email` read the
+    /// Settings section already makes — the account popover prints it, and a
+    /// second read of a row this one already has in hand would be one more
+    /// place for the two to disagree.
+    private var accountRowEmail: String?
 
-    /// Hands the sidebar's account chip its identity, and fetches the
-    /// picture behind `pictureURL` when there is one and it is not cached.
+    /// Hands both places the account shows — the sidebar's chip and the
+    /// title bar's avatar — their identity, and fetches the picture behind
+    /// `pictureURL` when there is one and it is not cached.
     /// An empty URL, an unparseable one, or bytes that are not an image all
     /// leave the chip on its initials-or-glyph avatar — a complete state
     /// rather than a placeholder, so nothing here needs to fail loudly.
@@ -5422,6 +5436,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         accountRowName = name
         accountRowPictureURL = url
         shellSidebar.accountRow.apply(name: name, picture: avatarCache[url])
+        titleBar.accountButton.apply(name: name, picture: avatarCache[url])
         guard avatarCache[url] == nil, !url.isEmpty, !avatarFetchesInFlight.contains(url),
               let parsed = URL(string: url)
         else { return }
@@ -5437,6 +5452,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // — a log-out, or a different account signed in behind it.
                 guard self.accountRowPictureURL == url else { return }
                 self.shellSidebar.accountRow.apply(name: self.accountRowName, picture: image)
+                self.titleBar.accountButton.apply(name: self.accountRowName, picture: image)
             }
         }.resume()
     }
@@ -5473,6 +5489,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let signedIn = signedInRaw == "true"
             settingsStore.get(SettingsKey.authAccountEmail) { [weak self] emailResult in
                 guard let self, case .success(let email) = emailResult else { return }
+                accountRowEmail = signedIn ? email : nil
                 settingsStore.get(SettingsKey.authGithubLogin) { [weak self] githubResult in
                     guard let self, case .success(let githubLogin) = githubResult else { return }
                     settingsView.applyAccount(email: email, signedIn: signedIn, githubLogin: githubLogin)
@@ -5496,6 +5513,141 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 }
             }
         }
+    }
+
+    // MARK: - Title bar popovers (flow layout §4)
+
+    /// The bell. `HomeDropdown` rather than an `NSMenu` for the reason every
+    /// other popover in this app is one: the rows are the app's own, in its
+    /// own palette, and a system menu here would read as somebody else's
+    /// chrome bolted to the strip.
+    @objc func showNotifications(_ sender: Any?) {
+        presentNotifications()
+    }
+
+    /// The twin `showNotifications` calls, returning the view it presented so
+    /// a test can read the rows without a popover it cannot open.
+    @discardableResult
+    func presentNotifications() -> HomeDropdownView {
+        let now = Date().timeIntervalSince1970 * 1000
+        let entries = notifier.entries
+        var sections: [HomeDropdown.Section] = []
+        if entries.isEmpty {
+            sections.append(
+                HomeDropdown.Section(
+                    header: "Notifications",
+                    rows: [HomeDropdown.Row(title: "No notifications yet", isEnabled: false) {}]
+                )
+            )
+        } else {
+            sections.append(
+                HomeDropdown.Section(
+                    header: "Notifications",
+                    rows: entries.map { entry in
+                        HomeDropdown.Row(
+                            icon: Self.statusDot(entry.status),
+                            title: [
+                                entry.sessionLabel ?? entry.title,
+                                NotificationFeed.subtitle(for: entry.status),
+                                NotificationFeed.relativeTime(entry.createdAt, now: now),
+                            ].joined(separator: " · ")
+                        ) { [weak self] in
+                            self?.run(.focusPane(sessionID: entry.sessionID))
+                        }
+                    }
+                )
+            )
+            sections.append(
+                HomeDropdown.Section(rows: [
+                    HomeDropdown.Row(
+                        icon: HomeDropdown.symbol("checkmark.circle"),
+                        title: "Mark all as read"
+                    ) { [weak self] in self?.notifier.markAllRead() },
+                    HomeDropdown.Row(
+                        icon: HomeDropdown.symbol("trash"),
+                        title: "Clear all"
+                    ) { [weak self] in self?.notifier.clear() },
+                ])
+            )
+        }
+        let view = HomeDropdown.show(
+            sections,
+            searchPlaceholder: "Search notifications…",
+            from: titleBar.notificationsButton
+        )
+        // Seeing the feed is what makes it read — the same rule the web
+        // panel kept. After presenting, so the rows above still show which
+        // ones were new when they were built.
+        notifier.markAllRead()
+        return view
+    }
+
+    /// `circle.fill` in the status's own dot colour. Baked into the image
+    /// rather than left to the row: `HomeDropdownRowView` tints every
+    /// template icon with the shell's ink, and a status dot in the wrong
+    /// colour says nothing at all.
+    private static func statusDot(_ status: RemoteSessionStatus) -> NSImage? {
+        guard let base = HomeDropdown.symbol("circle.fill") else { return nil }
+        let tinted = NSImage(size: base.size, flipped: false) { rect in
+            base.draw(in: rect)
+            ShellDotsView.color(for: status).set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.isTemplate = false
+        return tinted
+    }
+
+    /// The avatar. Who is signed in, then the two places the account is
+    /// managed from, then the one half of the sign-in/log-out pair that can
+    /// actually be taken — the same rule the spotlight's account rows keep.
+    @objc func showAccountMenu(_ sender: Any?) {
+        presentAccountMenu()
+    }
+
+    @discardableResult
+    func presentAccountMenu() -> HomeDropdownView {
+        let email = accountRowEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let signedIn = settingsView.accountSignedIn
+        var identity: [HomeDropdown.Row] = []
+        if let email, !email.isEmpty {
+            identity.append(
+                HomeDropdown.Row(
+                    icon: HomeDropdown.symbol("envelope"),
+                    title: email,
+                    isEnabled: false
+                ) {}
+            )
+        }
+        let sections: [HomeDropdown.Section] = [
+            HomeDropdown.Section(header: accountRowName ?? "Not signed in", rows: identity),
+            HomeDropdown.Section(rows: [
+                HomeDropdown.Row(
+                    icon: HomeDropdown.symbol("person.crop.circle"),
+                    title: "Manage account"
+                ) { [weak self] in self?.showSettings(section: .accounts) },
+                HomeDropdown.Row(
+                    icon: HomeDropdown.symbol("gearshape"),
+                    title: "Settings"
+                ) { [weak self] in self?.applyDestination(.settings) },
+            ]),
+            HomeDropdown.Section(rows: [
+                signedIn
+                    ? HomeDropdown.Row(
+                        icon: HomeDropdown.symbol("rectangle.portrait.and.arrow.right"),
+                        title: "Log out"
+                    ) { [weak self] in self?.logOutOfAccount() }
+                    : HomeDropdown.Row(
+                        icon: HomeDropdown.symbol("person.crop.circle.badge.plus"),
+                        title: "Sign in"
+                    ) { [weak self] in self?.signInToAccount() },
+            ]),
+        ]
+        return HomeDropdown.show(
+            sections,
+            searchPlaceholder: "Search…",
+            from: titleBar.accountButton
+        )
     }
 
     /// "Sign in…" on the Accounts section, and the spotlight's row for it:

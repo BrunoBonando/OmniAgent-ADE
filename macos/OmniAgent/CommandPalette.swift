@@ -38,6 +38,12 @@ enum PaletteAction: Equatable {
     case showSettingsSection(SettingsSection)
     /// Opens the focused branch/session setup flow for the current workspace.
     case startBranchSession
+    /// The title bar's two popovers (the flow layout spec's §1). Rows of their
+    /// own because the bell and the avatar are 24pt controls in the window's
+    /// chrome — the standing rule says everything navigable is findable, and
+    /// these two have no other name to type.
+    case showNotifications
+    case showAccountMenu
     /// Settings › Accounts' one button, in its two states. Only ever one of
     /// these is a row — whichever the account makes true — because the
     /// spotlight offers what you can do now, not both halves of a toggle.
@@ -645,6 +651,32 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
+        // The title bar's own pair, which are places in the window's chrome
+        // rather than in the sidebar — hence the "Title bar" subtitle.
+        commands.append(
+            PaletteCommand(
+                id: "titlebar:notifications",
+                title: "Notifications",
+                detail: nil,
+                action: .showNotifications,
+                keywords: "notifications bell alerts",
+                section: .places,
+                subtitle: "Title bar",
+                symbol: "bell"
+            )
+        )
+        commands.append(
+            PaletteCommand(
+                id: "titlebar:account",
+                title: "Account",
+                detail: nil,
+                action: .showAccountMenu,
+                keywords: "account profile avatar me",
+                section: .places,
+                subtitle: "Title bar",
+                symbol: "person.crop.circle"
+            )
+        )
         // Every Settings section, findable by its own name or by "settings".
         for section in SettingsSection.allCases {
             commands.append(

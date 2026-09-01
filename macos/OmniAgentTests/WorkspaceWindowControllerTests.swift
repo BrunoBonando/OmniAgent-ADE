@@ -2158,18 +2158,184 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         defer { controller.close() }
 
         let buttons = controller.titleBar.controlsForTesting.compactMap { $0 as? WorkspaceTitleBarButton }
-        XCTAssertEqual(buttons.count, 2, "the sidebar and review toggles")
+        XCTAssertEqual(buttons.count, 3, "the sidebar and review toggles, and the bell")
         XCTAssertEqual(
             buttons.map(\.action),
             [
                 #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:)),
                 #selector(WorkspaceWindowController.toggleReviewPanel(_:)),
+                #selector(WorkspaceWindowController.showNotifications(_:)),
             ]
         )
         XCTAssertFalse(
             controller.splitController?
                 .responds(to: #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:))) ?? true,
             "NSSplitViewController must not answer this selector first"
+        )
+    }
+
+    // MARK: - The title bar's top-right cluster (flow layout §1)
+
+    /// Right to left: the account at the trailing edge, then the bell, then
+    /// the review toggle. `controlsForTesting` is in layout order, and being
+    /// in it at all is what keeps a control's clicks out of the window drag.
+    func testTheAccountAndTheBellSitAtTheTrailingEndOfTheBar() {
+        let controller = makeController()
+        defer { controller.close() }
+        let controls = controller.titleBar.controlsForTesting
+
+        XCTAssertIdentical(controls.last, controller.titleBar.accountButton)
+        XCTAssertIdentical(controls.dropLast().last, controller.titleBar.notificationsButton)
+        XCTAssertEqual(
+            (controls.dropLast(2).last as? WorkspaceTitleBarButton)?.action,
+            #selector(WorkspaceWindowController.toggleReviewPanel(_:)),
+            "the review toggle is the innermost of the three"
+        )
+    }
+
+    /// The bell's unread mark: absent while nothing is waiting, and never
+    /// left standing once the feed has been read.
+    func testTheBellWearsItsDotOnlyWhileSomethingIsUnread() {
+        let bell = WorkspaceTitleBarButton(
+            symbol: "bell",
+            label: "Notifications",
+            action: #selector(WorkspaceWindowController.showNotifications(_:))
+        )
+        XCTAssertNil(bell.unreadDot, "a button nobody has marked carries no extra layer")
+
+        bell.isUnread = true
+        XCTAssertEqual(bell.unreadDot?.isHidden, false)
+
+        bell.isUnread = false
+        XCTAssertEqual(bell.unreadDot?.isHidden, true)
+    }
+
+    /// The feed drives the dot wherever the entries change — an arriving
+    /// approval lights it, reading the feed puts it out.
+    func testTheFeedLightsAndClearsTheBell() {
+        let controller = makeController()
+        defer { controller.close() }
+        XCTAssertFalse(controller.titleBar.notificationsButton.isUnread)
+
+        controller.notifier.restore([notificationEntry(id: "n1")])
+        XCTAssertTrue(controller.titleBar.notificationsButton.isUnread)
+
+        controller.notifier.markAllRead()
+        XCTAssertFalse(controller.titleBar.notificationsButton.isUnread)
+    }
+
+    /// The account moved to the title bar, so the same `auth_*` rows that
+    /// name the sidebar chip have to reach the avatar up there too.
+    func testTheAccountRowsReachTheTitleBarsAvatar() {
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: [
+            "auth_signed_in": "true",
+            "auth_account_email": "bruno@bonando.com",
+            "auth_account_name": "Bruno Bonando",
+            "auth_github_login": "",
+            "auth_account_picture": "",
+        ]))
+        defer { controller.close() }
+
+        controller.refreshAccountSection()
+
+        XCTAssertEqual(controller.titleBar.accountButton.modeForTesting, .initials("BB"))
+    }
+
+    /// An empty feed says so, in one dead row — and offers no "Clear all"
+    /// for a list with nothing in it.
+    func testTheBellsPopoverSaysSoWhenThereIsNothingInTheFeed() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        let dropdown = controller.presentNotifications()
+
+        XCTAssertEqual(dropdown.visibleTitlesForTesting, ["No notifications yet"])
+    }
+
+    /// One entry, one row — named by its session, what happened and how long
+    /// ago — over the two rows that act on the whole list. Opening the feed
+    /// is what marks it read.
+    func testTheBellsPopoverListsTheFeedAndReadsIt() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.notifier.restore([
+            notificationEntry(id: "n1", sessionLabel: "Build", status: .awaitingApproval),
+        ])
+
+        let dropdown = controller.presentNotifications()
+
+        XCTAssertEqual(dropdown.visibleTitlesForTesting.count, 3, "the entry and the two list actions")
+        let row = try XCTUnwrap(dropdown.visibleTitlesForTesting.first)
+        XCTAssertTrue(row.hasPrefix("Build · Needs your approval. · "), row)
+        XCTAssertEqual(
+            Array(dropdown.visibleTitlesForTesting.dropFirst()),
+            ["Mark all as read", "Clear all"]
+        )
+        XCTAssertEqual(controller.notifier.unreadCount, 0, "seeing the feed reads it")
+        XCTAssertFalse(controller.titleBar.notificationsButton.isUnread)
+    }
+
+    /// Signed out: one row that can actually be taken, and no email line over
+    /// an account that does not exist.
+    func testTheAccountPopoverOffersSignInWhileSignedOut() {
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: [
+            "auth_signed_in": "false",
+            "auth_account_email": "bruno@bonando.com",
+            "auth_account_name": "Bruno Bonando",
+            "auth_github_login": "",
+            "auth_account_picture": "",
+        ]))
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.refreshAccountSection()
+
+        let dropdown = controller.presentAccountMenu()
+
+        XCTAssertEqual(dropdown.visibleTitlesForTesting, ["Manage account", "Settings", "Sign in"])
+    }
+
+    /// And signed in: the account's email, and the half of the pair that is
+    /// its opposite.
+    func testTheAccountPopoverNamesTheAccountAndOffersLogOut() {
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: [
+            "auth_signed_in": "true",
+            "auth_account_email": "bruno@bonando.com",
+            "auth_account_name": "Bruno Bonando",
+            "auth_github_login": "",
+            "auth_account_picture": "",
+        ]))
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.refreshAccountSection()
+
+        let dropdown = controller.presentAccountMenu()
+
+        XCTAssertEqual(
+            dropdown.visibleTitlesForTesting,
+            ["bruno@bonando.com", "Manage account", "Settings", "Log out"]
+        )
+    }
+
+    /// One entry, ready to be dropped into a controller's feed.
+    private func notificationEntry(
+        id: String,
+        sessionLabel: String? = nil,
+        status: RemoteSessionStatus = .awaitingApproval
+    ) -> NotificationEntry {
+        NotificationEntry(
+            id: id,
+            sessionID: "sess-a",
+            project: "alpha",
+            projectLabel: "Alpha",
+            cwd: "/a",
+            engine: "shell",
+            status: status,
+            title: "Shell 1",
+            sessionLabel: sessionLabel,
+            createdAt: Date().timeIntervalSince1970 * 1000,
+            read: false
         )
     }
 
@@ -2234,6 +2400,20 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.run(.selectWorkspace(id: "alpha"))
         XCTAssertEqual(controller.selectedProjectID, "alpha")
         XCTAssertEqual(controller.destination, .terminals, "a workspace opens on the Desk")
+
+        // The title bar's two popovers, from the spotlight: the same methods
+        // the bell and the avatar send up the responder chain.
+        controller.run(.showNotifications)
+        XCTAssertEqual(
+            controller.presentNotifications().visibleTitlesForTesting,
+            ["No notifications yet"],
+            "the bell's row opens the feed"
+        )
+        controller.run(.showAccountMenu)
+        XCTAssertTrue(
+            controller.presentAccountMenu().visibleTitlesForTesting.contains("Manage account"),
+            "and the account's row opens the account"
+        )
 
         // Settings › Accounts' button, from the spotlight: the same two
         // methods the page's own button calls. Both external effects are
