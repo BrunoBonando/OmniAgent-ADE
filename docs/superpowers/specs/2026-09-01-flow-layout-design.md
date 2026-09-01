@@ -56,9 +56,9 @@ Both reuse `HomeDropdown` — the app's own popover rows, not `NSMenu`.
 
 ## 7. Home on the shell
 
-- `HomeSurfaceView` wears `PageShellView(title: "Home")`, no tabs. The 22.5%-of-height top air and the title-strip fade are gone (the shell's header anchors the page); the hero mark and composer stay, centred, 8pt under the header.
+- `HomeSurfaceView` wears `PageShellView(title: "Home")`, no tabs. The 22.5%-of-height top air and the title-strip fade are gone (the shell's header anchors the page); the hero mark and composer stay, centred, 24pt under the header (the shell's own body padding).
 - The column widens to fill the card: centred, ≤ 1080pt, ≥ 40pt from each side.
-- Section gaps 72 → 32. **Up next** and **What's new** sit side by side (2-up, equal widths, 16pt gap); the suggestion cards (3-up) and Extend (2-up) rows are unchanged. Footer line unchanged.
+- Section gaps 72 → 32. **Up next** and **What's new** sit side by side (2-up, equal widths, 16pt gap); the suggestion cards (3-up) and Extend (2-up) rows are unchanged. Order: hero, composer, suggestions, the 2-up row, then **Extend your experience** — the user's own work above the marketing cards — with 40pt before the footer. Footer line unchanged.
 - Every word the design says stays (`testTheHomeScreenSaysWhatTheDesignSays` keeps passing).
 
 ## 8. Spotlight rows (standing rule)
