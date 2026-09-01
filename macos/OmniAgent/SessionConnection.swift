@@ -907,27 +907,49 @@ final class SessionConnection {
         }
     }
 
-    /// The daemon answered `Hello` with an `Error` instead of a `HelloAck`.
+    /// Whether a `Hello` refusal is one that dialling again cannot fix.
     ///
-    /// Terminal for this dial, exactly like a 401 from the relay: the daemon
-    /// looked at who is connecting and said no — the machine is in use by
-    /// another Mac, this viewer is blocked, or the two ends are on different
-    /// protocol versions — and dialling again in a quarter of a second asks
-    /// the same question and gets the same answer. Phase 1 did retry, and the
-    /// result was a reconnect loop with a dead keyboard and no explanation
-    /// anywhere; the daemon now writes a sentence for a person, and this is
-    /// what makes sure it is read once rather than four times a second.
+    /// Only version skew is. "update OmniAgent on ‹machine›" is a refusal with
+    /// a human in its way: nothing changes until someone updates the other Mac,
+    /// so retrying is a loop with a dead keyboard — phase 1's exact failure,
+    /// which is what the sentence exists to replace.
+    ///
+    /// Every other refusal clears itself. "in use by ‹machine›" is transient by
+    /// nature, and it is the refusal a viewer sees when it *re-dials after a
+    /// blip*, because the relay holds two sockets for one machine until the
+    /// dead one is reaped — parking there would turn a refusal that resolves in
+    /// a second into one that needs the user to start over. Blocked is the same
+    /// shape: the host turning sharing off and on lifts it, with nothing for
+    /// this end to do but keep asking on the backoff it already has.
+    ///
+    /// Matching on the message is a string contract with `server.rs`'s
+    /// `Hello` arm, kept in one place on each side. The protocol has no
+    /// refusal *code* to branch on; if a third terminal refusal ever appears,
+    /// that is the moment to add one rather than to lengthen this.
+    static func isTerminalRefusal(_ message: String) -> Bool {
+        message.hasPrefix(versionRefusalPrefix)
+    }
+
+    /// The opening of the daemon's version-skew refusal
+    /// (`crates/omniagent-pty-daemon/src/server.rs`, `Hello` arm).
+    private static let versionRefusalPrefix = "update OmniAgent"
+
+    /// The daemon answered `Hello` with an `Error` instead of a `HelloAck` —
+    /// it looked at who is connecting and said no.
     ///
     /// The message is reported through `onError`, which is where the connect
-    /// ceremony reads it (spec §6, step 3). `shouldReconnect` is cleared
-    /// first, because `closeConnection` ends by scheduling a reconnect.
+    /// ceremony reads it (spec §6, step 3). A terminal refusal additionally
+    /// clears `shouldReconnect`, which has to happen *before* the close,
+    /// because `closeConnection` ends by scheduling a reconnect.
     private func refusedAtHello(_ frame: SessionFrame) {
         let message =
             (try? decoder.decode(ErrorPayload.self, from: frame.payload).message)
             ?? "The daemon refused the connection."
         helloRequest = nil
-        shouldReconnect = false
-        nextReconnectDelay = reconnectDelay
+        if Self.isTerminalRefusal(message) {
+            shouldReconnect = false
+            nextReconnectDelay = reconnectDelay
+        }
         closeConnection(error: SessionConnectionError.daemon(message))
     }
 

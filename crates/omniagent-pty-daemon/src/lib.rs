@@ -6,7 +6,7 @@ mod relay;
 mod server;
 mod session;
 
-pub use connections::{ConnectionRegistry, ViewerIdentity};
+pub use connections::{ConnectionRegistry, LeaseHolder, ViewerIdentity};
 pub use relay::{relay_config, run_relay, run_relay_with, DeviceCredential, DEVICE_TOKEN_KEY};
 pub use server::{
     authorize_remote, peer_uid_allowed, protected_setting_key, remote_control_active,

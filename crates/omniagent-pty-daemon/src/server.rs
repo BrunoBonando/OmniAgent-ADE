@@ -1,4 +1,4 @@
-use crate::connections::{ConnectionRegistry, PresenceFeed, ViewerIdentity};
+use crate::connections::{ConnectionRegistry, LeaseHolder, PresenceFeed, ViewerIdentity};
 use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, read_handshake_frame, write_frame,
     AttachPayload, BrainGetContextPayload, BrainSearchPayload, DirectoryEntryPayload,
@@ -615,13 +615,43 @@ where
 
     // Registration comes before the ack because the lease below is taken under
     // a connection id, and a refused `Hello` has to be answered *instead of*
-    // the ack rather than after it. Nothing about a registered connection is
-    // visible to a host until it names itself (`is_listed_viewer`), so
-    // registering a connection that is about to be refused changes no roster.
+    // the ack rather than after it. A registered connection that has not yet
+    // named itself is invisible to a host (`is_listed_viewer`), which is what
+    // makes it safe to register one that may still be refused.
+    //
     // The guard is what takes the entry — and the lease with it — back out
     // however this function ends, including an early `?` and an aborted task.
     let cancel = CancellationToken::new();
     let connection = ConnectionGuard::register(&connections, trust, cancel.clone());
+    // The lease (spec §3, §12 invariant 4): one remote connection drives this
+    // machine at a time. Released by the guard above on every way out of this
+    // function, because a lease that leaks is a daemon that refuses every
+    // future viewer until it restarts.
+    //
+    // **Ahead of the roster, and therefore ahead of the blocklist re-check
+    // below.** A second Mac knocking while the first is driving is the routine
+    // event this whole lease exists for, and taking the lease after
+    // `set_viewer` would put that machine on the host's roster for the moment
+    // between being registered and being refused — a viewer that was never
+    // admitted, flickering through the host's takeover panel. The re-check
+    // cannot move above `set_viewer` (see its comment), so the lease moves
+    // above both. The cost is the mirror case: a viewer blocked in the sliver
+    // *while it is connecting* holds the machine for two synchronous calls
+    // before its guard frees it. That path needs a kick to land inside a
+    // window with no await in it; the roster one happened every time a second
+    // Mac knocked.
+    if trust == ClientTrust::Remote {
+        if let Err(machine) = connections.take_lease(
+            connection.id,
+            LeaseHolder {
+                viewer_id: identity.viewer_id.clone(),
+                machine_name: machine_name.clone(),
+            },
+        ) {
+            send_error(&writer, request, anyhow!("in use by {machine}")).await?;
+            return Ok(());
+        }
+    }
     let viewer_id = identity.viewer_id.clone();
     let named_itself = match identity.viewer_id {
         Some(viewer_id) => connections.set_viewer(
@@ -638,7 +668,7 @@ where
     // nothing to cancel, and this connection would then sit there kicked-but-
     // connected. Re-reading the row once we are visible to `cancel_viewer`
     // closes that sliver from the other side: either the kick sees us, or we
-    // see the kick.
+    // see the kick. That is why it cannot move above `set_viewer`.
     if trust == ClientTrust::Remote {
         if let Some(viewer_id) = viewer_id.as_deref() {
             if blocked_viewers(&settings).contains(viewer_id) {
@@ -650,18 +680,6 @@ where
                 .await?;
                 return Ok(());
             }
-        }
-    }
-    // The lease (spec §3, §12 invariant 4): one remote connection drives this
-    // machine at a time. Last of the refusals, so a connection that is going
-    // to be turned away for any other reason never holds the machine even for
-    // the instant it takes to be told — and released by the guard above on
-    // every way out of this function, because a lease that leaks is a daemon
-    // that refuses every future viewer until it restarts.
-    if trust == ClientTrust::Remote {
-        if let Err(holder) = connections.take_lease(connection.id, &machine_name) {
-            send_error(&writer, request, anyhow!("in use by {holder}")).await?;
-            return Ok(());
         }
     }
     send_json(

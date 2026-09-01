@@ -1009,13 +1009,68 @@ final class SessionConnectionTests: XCTestCase {
     }
 
     /// The daemon can answer `Hello` with an `Error` instead of an ack — the
-    /// machine is in use by another Mac, this viewer is blocked, or the two
-    /// ends are on different protocol versions
+    /// two ends are on different protocol versions, the machine is in use by
+    /// another Mac, or this viewer is blocked
     /// (`docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`
-    /// §3). All three are answers to *who is connecting*, so redialling asks
-    /// the same question and gets the same answer; phase 1 redialled anyway,
-    /// four times a second, with a dead keyboard and the explanation nowhere.
-    /// The refusal has to arrive once, as a sentence, and end the dial.
+    /// §3). They do not want the same response, and the difference is the
+    /// point of `isTerminalRefusal`: only skew needs a human before anything
+    /// can change. This is the classifier on its own; the two cases below run
+    /// it through a real socket.
+    func testOnlyTheVersionRefusalIsTerminal() {
+        XCTAssertTrue(
+            SessionConnection.isTerminalRefusal("update OmniAgent on Mac mini")
+        )
+        for transient in [
+            "in use by MacBook Pro",
+            "viewer v-air is disconnected until Remote Control is turned off and on again",
+            "viewer v-air was disconnected while connecting",
+            "The daemon refused the connection.",
+        ] {
+            XCTAssertFalse(
+                SessionConnection.isTerminalRefusal(transient),
+                "\(transient) clears itself and must not park the connection"
+            )
+        }
+    }
+
+    /// "in use by ‹machine›" is transient — the other Mac disconnects, or the
+    /// relay reaps the dead socket a re-dial after a blip raced. Parking there
+    /// would turn a refusal that resolves in a second into one that needs the
+    /// user to start over, so it keeps dialling on the existing backoff.
+    func testAnInUseRefusalKeepsDialling() throws {
+        let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
+        let server = try UnixTestServer(path: socketPath)
+        let redialled = expectation(description: "a second dial reached the daemon")
+
+        server.run { firstClient in
+            try Self.refuse(on: firstClient, with: "in use by MacBook Pro")
+            // The second dial is the assertion: it has to arrive at all.
+            let secondClient = try server.accept()
+            try Self.refuse(on: secondClient, with: "in use by MacBook Pro")
+            redialled.fulfill()
+        }
+
+        let connection = SessionConnection(
+            socketURL: URL(fileURLWithPath: socketPath),
+            reconnectDelay: 0.02
+        )
+        var reported: String?
+        connection.onError = { error in
+            guard reported == nil else { return }
+            reported = error.localizedDescription
+        }
+        connection.connect()
+
+        wait(for: [redialled], timeout: 3)
+        XCTAssertEqual(reported, "in use by MacBook Pro")
+        connection.disconnect()
+        server.stop()
+    }
+
+    /// Its opposite: "update OmniAgent on ‹machine›" cannot come true until
+    /// somebody updates the other Mac, so it arrives once, as a sentence, and
+    /// ends the dial. Phase 1 redialled instead — four times a second, with a
+    /// dead keyboard and the explanation nowhere.
     func testAnErrorAnsweringHelloEndsTheDialInsteadOfLooping() throws {
         let socketPath = "/tmp/omniagent-\(UUID().uuidString.prefix(8)).sock"
         let server = try UnixTestServer(path: socketPath)
@@ -1024,18 +1079,7 @@ final class SessionConnectionTests: XCTestCase {
         redialled.isInverted = true
 
         server.run { client in
-            let hello = try readFrame(from: client)
-            try writeFrame(
-                SessionFrame(
-                    kind: .error,
-                    requestOrSequence: hello.requestOrSequence,
-                    payload: try JSONSerialization.data(
-                        withJSONObject: ["message": "update OmniAgent on Mac mini"]
-                    )
-                ),
-                to: client
-            )
-            Darwin.close(client)
+            try Self.refuse(on: client, with: "update OmniAgent on Mac mini")
         }
 
         let connection = SessionConnection(
@@ -1062,6 +1106,21 @@ final class SessionConnectionTests: XCTestCase {
         XCTAssertEqual(reported, "update OmniAgent on Mac mini")
         connection.disconnect()
         server.stop()
+    }
+
+    /// Reads this client's `Hello`, answers it with `Error(message)` — the
+    /// daemon's shape for every handshake refusal — and hangs up.
+    private static func refuse(on client: Int32, with message: String) throws {
+        let hello = try readFrame(from: client)
+        try writeFrame(
+            SessionFrame(
+                kind: .error,
+                requestOrSequence: hello.requestOrSequence,
+                payload: try JSONSerialization.data(withJSONObject: ["message": message])
+            ),
+            to: client
+        )
+        Darwin.close(client)
     }
 
     private static func ackHello(on client: Int32) throws {

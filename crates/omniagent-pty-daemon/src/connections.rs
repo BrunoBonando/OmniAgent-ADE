@@ -49,6 +49,25 @@ pub struct ViewerIdentity {
     pub machine_name: String,
 }
 
+/// Who holds the lease (spec §3) — deliberately *not* a [`ViewerIdentity`].
+///
+/// A remote client older than phase 2 sends no `viewer_id` at all, and it can
+/// still take the lease: it is one machine driving this one, which is the only
+/// thing the lease is about. But it cannot be kicked by id, because there is
+/// no id — [`ConnectionRegistry::cancel_viewer`] matches on the identity a
+/// connection registered, and that connection registered none.
+///
+/// So the absence is in the type. A holder's `viewer_id` is `Option`, and the
+/// host's Terminate button has to face that before it can call
+/// `cancel_viewer`. Storing `""` instead would have type-checked and then
+/// no-opped silently at the one moment a host most wants the button to work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseHolder {
+    /// `None` for a client that never named itself in `Hello`.
+    pub viewer_id: Option<String>,
+    pub machine_name: String,
+}
+
 /// One live client connection.
 ///
 /// Note what is *not* here: the connection's writer. Presence reaches a client
@@ -82,9 +101,9 @@ impl ConnectionEntry {
 ///
 /// **Two locks, never held together.** `entries` and `lease` are separate
 /// mutexes, and no method in this module holds one while taking the other —
-/// that is the whole deadlock argument, and it is why
-/// [`Self::take_lease`] reads the connection's identity and drops the entries
-/// guard *before* it touches the lease.
+/// that is the whole deadlock argument. [`Self::take_lease`] touches only the
+/// lease; [`Self::remove`] releases before it locks the entries map, and
+/// [`Self::cancel_viewer`] drops its guard before it releases.
 #[derive(Clone)]
 pub struct ConnectionRegistry {
     entries: Arc<Mutex<HashMap<u64, ConnectionEntry>>>,
@@ -96,7 +115,7 @@ pub struct ConnectionRegistry {
     /// The id is half the value: [`Self::release_lease`] clears the lease only
     /// when it matches, so a release arriving late from a connection that has
     /// already died cannot evict the viewer that took the lease after it.
-    lease: Arc<Mutex<Option<(u64, ViewerIdentity)>>>,
+    lease: Arc<Mutex<Option<(u64, LeaseHolder)>>>,
     /// The current roster. `watch` is exactly the right shape for presence:
     /// publishing never blocks and never fails, and a receiver always observes
     /// the **latest** roster rather than a queue of superseded ones. Two rapid
@@ -132,7 +151,7 @@ impl ConnectionRegistry {
     /// Same reasoning as [`Self::entries`], and one more: a poisoned lease
     /// lock that stayed poisoned would refuse every viewer for the life of the
     /// daemon, which is the exact failure the lease is meant not to have.
-    fn lease(&self) -> MutexGuard<'_, Option<(u64, ViewerIdentity)>> {
+    fn lease(&self) -> MutexGuard<'_, Option<(u64, LeaseHolder)>> {
         self.lease
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -141,23 +160,12 @@ impl ConnectionRegistry {
     /// Claims the machine for this connection: `Ok(())` if it now holds the
     /// lease, `Err(machine_name)` naming the connection that already does.
     ///
-    /// Exclusivity is the check and the write happening under one guard —
-    /// two remote `Hello`s racing cannot both come back `Ok`. `machine` is
-    /// only a fallback label, used when the connection never named itself in
-    /// `Hello`: the identity recorded is the registered one wherever there is
-    /// one, so [`Self::lease_holder`] can offer a viewer id the host can act
-    /// on.
-    pub fn take_lease(&self, id: u64, machine: &str) -> Result<(), String> {
-        // Read the identity and let the entries guard go before the lease is
-        // touched — see the note on the struct.
-        let registered = self
-            .entries()
-            .get(&id)
-            .and_then(|entry| entry.viewer.clone());
-        let holder = registered.unwrap_or_else(|| ViewerIdentity {
-            viewer_id: String::new(),
-            machine_name: machine.to_owned(),
-        });
+    /// Exclusivity is the check and the write happening under one guard — two
+    /// remote `Hello`s racing cannot both come back `Ok`. The caller passes
+    /// the holder rather than the registry looking it up, so this touches one
+    /// lock and so that the lease can be taken *before* a connection is put on
+    /// the roster (see `serve_client`).
+    pub fn take_lease(&self, id: u64, holder: LeaseHolder) -> Result<(), String> {
         let mut lease = self.lease();
         match lease.as_ref() {
             Some((_, held)) => Err(held.machine_name.clone()),
@@ -183,8 +191,8 @@ impl ConnectionRegistry {
     }
 
     /// Who is driving this machine, if anyone.
-    pub fn lease_holder(&self) -> Option<ViewerIdentity> {
-        self.lease().as_ref().map(|(_, viewer)| viewer.clone())
+    pub fn lease_holder(&self) -> Option<LeaseHolder> {
+        self.lease().as_ref().map(|(_, holder)| holder.clone())
     }
 
     pub fn register(&self, trust: ClientTrust, cancel: CancellationToken) -> u64 {
@@ -451,6 +459,13 @@ mod tests {
         }
     }
 
+    fn holder(id: Option<&str>, name: &str) -> LeaseHolder {
+        LeaseHolder {
+            viewer_id: id.map(str::to_owned),
+            machine_name: name.into(),
+        }
+    }
+
     fn attached(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|id| (*id).to_string()).collect()
     }
@@ -559,18 +574,27 @@ mod tests {
         registry.set_viewer(air, viewer("v-air", "Air"));
         let mini = registry.register(ClientTrust::Remote, CancellationToken::new());
 
-        assert_eq!(registry.take_lease(air, "Air"), Ok(()));
-        assert_eq!(registry.take_lease(mini, "Mini"), Err("Air".to_string()));
+        assert_eq!(
+            registry.take_lease(air, holder(Some("v-air"), "Air")),
+            Ok(())
+        );
+        assert_eq!(
+            registry.take_lease(mini, holder(Some("v-mini"), "Mini")),
+            Err("Air".to_string())
+        );
         assert_eq!(
             registry.lease_holder(),
-            Some(viewer("v-air", "Air")),
-            "the holder is the registered identity, not just a machine name"
+            Some(holder(Some("v-air"), "Air")),
+            "the holder carries the viewer id the host would Terminate"
         );
 
         // And it is free again the moment that connection leaves the registry.
         registry.remove(air);
         assert!(registry.lease_holder().is_none());
-        assert_eq!(registry.take_lease(mini, "Mini"), Ok(()));
+        assert_eq!(
+            registry.take_lease(mini, holder(Some("v-mini"), "Mini")),
+            Ok(())
+        );
     }
 
     /// The reason [`ConnectionRegistry::release_lease`] matches on the id.
@@ -584,17 +608,45 @@ mod tests {
     fn a_late_release_from_a_dead_connection_cannot_evict_a_live_one() {
         let registry = ConnectionRegistry::default();
         let dead = registry.register(ClientTrust::Remote, CancellationToken::new());
-        registry.take_lease(dead, "Air").unwrap();
+        registry
+            .take_lease(dead, holder(Some("v-air"), "Air"))
+            .unwrap();
         registry.release_lease(dead);
 
         let live = registry.register(ClientTrust::Remote, CancellationToken::new());
-        registry.take_lease(live, "Mini").unwrap();
+        registry
+            .take_lease(live, holder(Some("v-mini"), "Mini"))
+            .unwrap();
 
         registry.release_lease(dead);
         assert_eq!(
             registry.lease_holder().map(|holder| holder.machine_name),
             Some("Mini".to_string()),
             "the dead connection's release took the live one's lease"
+        );
+    }
+
+    /// A client older than phase 2 sends no `viewer_id`. It may still hold the
+    /// lease — it is a machine driving this one — but the host cannot Terminate
+    /// it by id, and the type says so rather than handing back an empty string
+    /// that `cancel_viewer` would accept and silently no-op on.
+    #[test]
+    fn an_anonymous_holder_offers_no_viewer_id_to_kick_it_with() {
+        let registry = ConnectionRegistry::default();
+        let anonymous = registry.register(ClientTrust::Remote, CancellationToken::new());
+        registry
+            .take_lease(anonymous, holder(None, "Unknown Mac"))
+            .unwrap();
+
+        let held = registry.lease_holder().unwrap();
+        assert_eq!(held.machine_name, "Unknown Mac");
+        assert_eq!(held.viewer_id, None, "there is no id, and it is not \"\"");
+        // The one thing that must be impossible by accident: kicking with it.
+        // There is no `&str` to pass, so this does not type-check at all —
+        // what a caller can do is the `if let Some(id)` the `Option` forces.
+        assert!(
+            !registry.cancel_viewer(""),
+            "and an empty id matches nothing, so a slip is a no-op rather than a wrong kick"
         );
     }
 
@@ -605,7 +657,9 @@ mod tests {
         let registry = ConnectionRegistry::default();
         let air = registry.register(ClientTrust::Remote, CancellationToken::new());
         registry.set_viewer(air, viewer("v-air", "Air"));
-        registry.take_lease(air, "Air").unwrap();
+        registry
+            .take_lease(air, holder(Some("v-air"), "Air"))
+            .unwrap();
 
         assert!(registry.cancel_viewer("v-air"));
         assert!(registry.lease_holder().is_none());

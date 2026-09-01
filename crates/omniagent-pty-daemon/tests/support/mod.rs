@@ -131,13 +131,25 @@ pub enum HelloResult {
 impl Client {
     /// Sends `Hello` and reads the one frame that answers it.
     pub async fn hello(&mut self) -> HelloResult {
-        self.request += 1;
         let viewer_id = format!("v-{}", self.machine.to_lowercase().replace(' ', "-"));
+        self.say_hello(Some(viewer_id)).await
+    }
+
+    /// [`Self::hello`] from a client that sends no `viewer_id` — an app older
+    /// than phase 2, which the daemon can label but never kick by id.
+    pub async fn hello_without_naming_itself(&mut self) -> HelloResult {
+        self.say_hello(None).await
+    }
+
+    async fn say_hello(&mut self, viewer_id: Option<String>) -> HelloResult {
+        self.request += 1;
         let mut frame = Frame::new(
             MessageKind::Hello,
             self.request,
             serde_json::to_vec(&serde_json::json!({
                 "client": "harness",
+                // Omitted entirely when `None` — the daemon declares both
+                // identity fields `Option`, so this is the pre-phase-2 shape.
                 "viewer_id": viewer_id,
                 "machine_name": self.machine,
             }))

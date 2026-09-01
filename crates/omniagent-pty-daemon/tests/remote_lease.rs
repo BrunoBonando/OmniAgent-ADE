@@ -76,6 +76,60 @@ async fn a_blocked_viewer_is_refused_without_taking_the_lease() {
     assert!(matches!(allowed.hello().await, HelloResult::Ack(_)));
 }
 
+/// A refused viewer is never a viewer the host is shown.
+///
+/// The lease is taken *before* the connection names itself, so a machine that
+/// knocks while another is driving is never rostered at all — where taking the
+/// lease afterwards would have put it on the host's roster for the moment
+/// between registering and being refused, flickering an unadmitted machine
+/// through the takeover panel. That window is not observable from out here;
+/// what is, and what this holds, is that nothing is left behind either.
+#[tokio::test]
+async fn a_refused_viewer_is_not_on_the_roster() {
+    let harness = support::daemon_with_local_client().await;
+    let mut first = harness.connect_remote("MacBook Pro");
+    assert!(matches!(first.hello().await, HelloResult::Ack(_)));
+
+    let mut second = harness.connect_remote("Mac mini");
+    assert!(matches!(second.hello().await, HelloResult::Error(_)));
+
+    let machines: Vec<String> = harness
+        .ctx
+        .connections
+        .viewers()
+        .into_iter()
+        .map(|viewer| viewer.machine_name)
+        .collect();
+    assert_eq!(machines, ["MacBook Pro".to_string()]);
+}
+
+/// An app older than phase 2 sends no `viewer_id`. It may still drive the
+/// machine — that is one Mac on another, which is all the lease is about — but
+/// the host cannot Terminate it *by id*, and `lease_holder()` has to say so in
+/// its type rather than hand back an empty string that `cancel_viewer` would
+/// accept and silently do nothing with.
+#[tokio::test]
+async fn an_anonymous_viewer_holds_the_lease_with_no_id_to_kick_it_by() {
+    let harness = support::daemon_with_local_client().await;
+    let mut anonymous = harness.connect_remote("MacBook Pro");
+    assert!(matches!(
+        anonymous.hello_without_naming_itself().await,
+        HelloResult::Ack(_)
+    ));
+
+    let held = harness.ctx.connections.lease_holder().unwrap();
+    assert_eq!(held.machine_name, "MacBook Pro");
+    assert_eq!(held.viewer_id, None);
+    // And it really is holding the machine, not merely recorded as doing so.
+    let mut second = harness.connect_remote("Mac mini");
+    match second.hello().await {
+        HelloResult::Error(message) => {
+            assert!(message.contains("in use by MacBook Pro"), "{message}")
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Protocol version 2 (spec §3 "Protocol version")
 // ---------------------------------------------------------------------------
