@@ -226,10 +226,26 @@ pub struct RemoteViewersPayload {
     pub viewers: Vec<ViewerSummaryPayload>,
 }
 
-/// `DisconnectViewer` request payload — kick and block one machine (phase 2 §5).
+/// `DisconnectViewer` request payload — kick, and optionally block, one
+/// machine (phase 2 §5; `block` since Task 14, spec §7).
+///
+/// Terminate and Block are two different verbs: `block: false` drops the
+/// socket and leaves the machine free to reconnect at once; `block: true`
+/// additionally appends `viewer_id` to `remote_control_blocked`, so it is
+/// refused on its next `Hello` too. `#[serde(default = "default_true")]`
+/// keeps `block` absent meaning what `DisconnectViewer` always meant before
+/// this field existed — a caller built before Task 14 sends no `block` at
+/// all, and must go on getting phase 2's behaviour rather than silently
+/// switching to Terminate underneath it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisconnectViewerPayload {
     pub viewer_id: String,
+    #[serde(default = "default_true")]
+    pub block: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `ListDirectory` request payload — one absolute path on the host (phase 3

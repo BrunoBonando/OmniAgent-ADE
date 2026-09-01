@@ -1551,9 +1551,15 @@ where
             MessageKind::DisconnectViewer => {
                 let payload = decode_payload!(DisconnectViewerPayload);
                 // Block first, then kick: a viewer dropped before the row is
-                // written could re-dial into the gap.
-                let blocked = lock_store(&settings)
-                    .and_then(|store| block_viewer(&store, &payload.viewer_id));
+                // written could re-dial into the gap. Terminate (`block:
+                // false`, Task 14) skips the write entirely, so there is
+                // nothing here for a re-dial to race — the machine is simply
+                // free to come straight back.
+                let blocked = if payload.block {
+                    lock_store(&settings).and_then(|store| block_viewer(&store, &payload.viewer_id))
+                } else {
+                    Ok(())
+                };
                 match blocked {
                     Ok(()) => {
                         connections.cancel_viewer(&payload.viewer_id);

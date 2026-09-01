@@ -25,12 +25,13 @@ use std::time::Duration;
 
 use brain_core::Store;
 use omniagent_pty_daemon::protocol::{
-    read_handshake_frame, write_frame, ErrorPayload, Frame, HelloAckPayload, MessageKind,
+    read_frame, read_handshake_frame, write_frame, ErrorPayload, Frame, HelloAckPayload,
+    MessageKind,
 };
 use omniagent_pty_daemon::{
     serve_client, sharing_should_be_live, AssertedIdentity, ClientContext, ClientTrust,
-    DaemonServer, AUTH_ACCOUNT_EMAIL_KEY, DEVICE_TOKEN_KEY, LOCAL_ABSENCE_GRACE,
-    REMOTE_SHARING_KEY,
+    DaemonServer, AUTH_ACCOUNT_EMAIL_KEY, BLOCKED_VIEWERS_KEY, DEVICE_TOKEN_KEY,
+    LOCAL_ABSENCE_GRACE, REMOTE_SHARING_KEY,
 };
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
@@ -341,6 +342,39 @@ impl Daemon {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
+
+    /// The host's own connection — the one thing on this side of the socket
+    /// that may send `DisconnectViewer` (Task 14), since it is local-only and
+    /// deliberately absent from `authorize_remote`'s allowlist.
+    pub fn local(&mut self) -> &mut Client {
+        self.local
+            .as_mut()
+            .expect("there was no local client to send from")
+    }
+
+    /// [`BLOCKED_VIEWERS_KEY`], parsed — read the same fail-open way the
+    /// daemon itself reads it (a missing or unparsable row is "nobody is
+    /// blocked"), so this is what a caller outside the daemon can observe of
+    /// the same row.
+    pub fn blocked_ids(&self) -> Vec<String> {
+        self.ctx
+            .settings
+            .lock()
+            .unwrap()
+            .get_setting(BLOCKED_VIEWERS_KEY)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+}
+
+/// The `viewer_id` a [`Client`] sends in its own `Hello` for `machine` — the
+/// same derivation [`Client::hello`] uses, factored out so
+/// [`Client::disconnect_viewer`] can name the same viewer by its machine name
+/// rather than a caller having to spell out the slug by hand.
+fn viewer_id_for(machine: &str) -> String {
+    format!("v-{}", machine.to_lowercase().replace(' ', "-"))
 }
 
 fn connect(ctx: &ClientContext, trust: ClientTrust, machine: &str, version: Option<u8>) -> Client {
@@ -379,8 +413,7 @@ pub enum HelloResult {
 impl Client {
     /// Sends `Hello` and reads the one frame that answers it.
     pub async fn hello(&mut self) -> HelloResult {
-        let viewer_id = format!("v-{}", self.machine.to_lowercase().replace(' ', "-"));
-        self.say_hello(Some(viewer_id)).await
+        self.say_hello(Some(viewer_id_for(&self.machine))).await
     }
 
     /// Whether the daemon still has this connection open.
@@ -414,6 +447,24 @@ impl Client {
         }
     }
 
+    /// Whether the daemon has closed this connection — [`Self::wait_until_closed`]
+    /// without the panic, for a test that wants to assert the outcome itself.
+    /// A kick's cancellation reaches the socket a scheduling beat after the
+    /// request that caused it returns, so this polls for up to [`PATIENCE`]
+    /// rather than checking once and racing it.
+    pub async fn is_closed(&mut self) -> bool {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            if !self.is_open().await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     /// [`Self::hello`] from a client that sends no `viewer_id` — an app older
     /// than phase 2, which the daemon can label but never kick by id.
     pub async fn hello_without_naming_itself(&mut self) -> HelloResult {
@@ -433,6 +484,54 @@ impl Client {
     pub fn claiming_in_hello(mut self, email: &str) -> Self {
         self.claimed = Some(email.to_owned());
         self
+    }
+
+    /// Sends `DisconnectViewer` for `machine` — Terminate (`block: false`) or
+    /// Block (`block: true`), the two verbs Task 14 splits apart — and waits
+    /// for the daemon's reply to it, so a caller sees the effects (the
+    /// blocklist row, the kicked socket) rather than racing its own request.
+    pub async fn disconnect_viewer(&mut self, machine: &str, block: bool) {
+        let request = self
+            .send(
+                MessageKind::DisconnectViewer,
+                serde_json::json!({"viewer_id": viewer_id_for(machine), "block": block}),
+            )
+            .await;
+        let reply = self.read_reply(request).await;
+        assert_eq!(
+            reply.header.message_kind,
+            MessageKind::Response,
+            "DisconnectViewer failed: {reply:?}"
+        );
+    }
+
+    /// Writes one post-handshake request frame and returns its request id.
+    async fn send(&mut self, kind: MessageKind, payload: impl serde::Serialize) -> u64 {
+        self.request += 1;
+        let frame = Frame::new(kind, self.request, serde_json::to_vec(&payload).unwrap());
+        write_frame(&mut self.stream, &frame).await.unwrap();
+        self.request
+    }
+
+    /// The reply to one request, skipping any server push (a `RemoteViewers`
+    /// roster update, say) that interleaves with it — the same skip
+    /// `remote_presence.rs`'s own driver uses, needed here because the local
+    /// client this runs on also receives those pushes.
+    async fn read_reply(&mut self, request: u64) -> Frame {
+        loop {
+            let frame = tokio::time::timeout(PATIENCE, read_frame(&mut self.stream))
+                .await
+                .expect("the daemon answered nothing")
+                .expect("the daemon closed without answering");
+            if frame.header.request_or_sequence == request
+                && matches!(
+                    frame.header.message_kind,
+                    MessageKind::Response | MessageKind::Error
+                )
+            {
+                return frame;
+            }
+        }
     }
 
     async fn say_hello(&mut self, viewer_id: Option<String>) -> HelloResult {

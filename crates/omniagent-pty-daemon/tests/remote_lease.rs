@@ -336,3 +336,44 @@ async fn an_anonymous_viewer_never_reclaims() {
         "the anonymous holder was cancelled by a connection that never reclaimed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Terminate and Block are two different verbs (Task 14, spec §7)
+// ---------------------------------------------------------------------------
+
+/// Terminate (`block: false`) kicks the socket and leaves it at that — the
+/// machine is free to reconnect at once, exactly as it would after any other
+/// dropped connection.
+#[tokio::test]
+async fn terminate_kicks_without_blocking() {
+    let mut harness = support::daemon_with_local_client().await;
+    let mut viewer = harness.connect_remote("MacBook Pro");
+    assert!(matches!(viewer.hello().await, HelloResult::Ack(_)));
+
+    harness
+        .local()
+        .disconnect_viewer("MacBook Pro", false)
+        .await;
+    assert!(viewer.is_closed().await);
+    assert!(harness.blocked_ids().is_empty());
+
+    // It may come straight back.
+    let mut again = harness.connect_remote("MacBook Pro");
+    assert!(matches!(again.hello().await, HelloResult::Ack(_)));
+}
+
+/// Block (`block: true`) is today's `DisconnectViewer` behaviour, unchanged:
+/// it kicks and appends to `remote_control_blocked`, so the machine is
+/// refused on its very next `Hello`.
+#[tokio::test]
+async fn block_kicks_and_keeps_it_out() {
+    let mut harness = support::daemon_with_local_client().await;
+    let mut viewer = harness.connect_remote("MacBook Pro");
+    assert!(matches!(viewer.hello().await, HelloResult::Ack(_)));
+
+    harness.local().disconnect_viewer("MacBook Pro", true).await;
+    assert_eq!(harness.blocked_ids(), vec!["v-macbook-pro".to_string()]);
+
+    let mut again = harness.connect_remote("MacBook Pro");
+    assert!(matches!(again.hello().await, HelloResult::Error(_)));
+}

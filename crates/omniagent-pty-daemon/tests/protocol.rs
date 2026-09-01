@@ -356,9 +356,23 @@ fn phase_2_payload_shapes_match_the_swift_client() {
     assert_eq!(
         serde_json::to_value(DisconnectViewerPayload {
             viewer_id: "v-air".into(),
+            block: false,
         })
         .unwrap(),
-        serde_json::json!({"viewer_id": "v-air"})
+        serde_json::json!({"viewer_id": "v-air", "block": false})
+    );
+    // A caller built before Task 14 sends no `block` at all, and must go on
+    // getting `DisconnectViewer`'s original meaning — kick and block — rather
+    // than silently falling to Terminate underneath it.
+    assert_eq!(
+        serde_json::from_value::<DisconnectViewerPayload>(
+            serde_json::json!({"viewer_id": "v-air"})
+        )
+        .unwrap(),
+        DisconnectViewerPayload {
+            viewer_id: "v-air".into(),
+            block: true,
+        }
     );
     // A client older than phase 2 sends `{"client": …}` alone and must still
     // parse — the viewer identity is additive, and self-reported.
