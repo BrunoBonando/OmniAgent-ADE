@@ -38,6 +38,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
+use crate::connections::AssertedIdentity;
 use crate::server::{
     remote_control_active, serve_client, sharing_should_be_live, ClientContext, ClientTrust,
 };
@@ -117,6 +118,19 @@ enum Outcome {
     Dropped { uptime: Duration },
     /// The config we connected with is no longer current: re-read and act now.
     ConfigChanged,
+}
+
+/// The relay's `viewer` dictionary, or `None` when it did not send one
+/// (spec §9).
+///
+/// An **object** is required, not merely something that deserializes: a
+/// missing key is `Value::Null`, and so is an explicit `"viewer": null`, and
+/// both must come back `None` rather than as an all-`None` identity that a
+/// later check might mistake for an assertion. Unknown keys inside the object
+/// are ignored, so the relay can add fields without a daemon release.
+fn asserted_viewer(value: &serde_json::Value) -> Option<AssertedIdentity> {
+    value.as_object()?;
+    serde_json::from_value(value.clone()).ok()
 }
 
 /// Whether a relay-issued connection id is safe to interpolate into a path.
@@ -315,16 +329,22 @@ async fn control_session(
             msg = stream.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     last_seen = Instant::now();
-                    let open = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
+                    let message = serde_json::from_str::<serde_json::Value>(&text).ok();
+                    let open = message
+                        .as_ref()
                         .and_then(|v| v["open"].as_str().map(str::to_owned));
                     if let Some(id) = open {
+                        // Parsed from the *same* message as the connection id
+                        // and passed down beside it, so the identity a data
+                        // socket is served under can only ever be the one the
+                        // relay attached to that `conn_id` (spec §9).
+                        let asserted = message.as_ref().and_then(|v| asserted_viewer(&v["viewer"]));
                         if !valid_conn_id(&id) {
                             tracing::debug!("relay sent an invalid connection id; ignoring");
                         } else if data.len() >= MAX_DATA_CONNECTIONS {
                             tracing::warn!("relay open {id} refused: {MAX_DATA_CONNECTIONS} data connections already up");
                         } else {
-                            data.spawn(data_connection(ctx.clone(), cred.clone(), id));
+                            data.spawn(data_connection(ctx.clone(), cred.clone(), id, asserted));
                         }
                     }
                 }
@@ -349,8 +369,21 @@ async fn control_session(
 }
 
 /// One relayed viewer: dial the data socket, adapt it to a byte stream and
-/// hand it to the ordinary handler as a `Remote` client.
-async fn data_connection(ctx: ClientContext, cred: DeviceCredential, conn_id: String) {
+/// hand it to the ordinary handler as a `Remote` client — carrying the
+/// identity the relay asserted for this `conn_id` (spec §9).
+///
+/// `asserted` is `None` only when the relay opened a connection it did not
+/// describe. That is **refused outright** rather than served with an empty
+/// identity: the account check in `server.rs` exists to be run on every remote
+/// connection, and a check that can be skipped by omitting a field is not a
+/// check. The socket is still dialled first so the waiting viewer is closed on
+/// at once instead of hanging until the relay times it out.
+async fn data_connection(
+    ctx: ClientContext,
+    cred: DeviceCredential,
+    conn_id: String,
+    asserted: Option<AssertedIdentity>,
+) {
     let Ok(req) = request(&cred, &format!("/v1/device/conn/{conn_id}")) else {
         return;
     };
@@ -360,6 +393,14 @@ async fn data_connection(ctx: ClientContext, cred: DeviceCredential, conn_id: St
             tracing::debug!("relay data connect for {conn_id} failed: {error}");
             return;
         }
+    };
+    let Some(asserted) = asserted else {
+        tracing::warn!(
+            "relay opened {conn_id} with no asserted viewer identity; closing it unserved"
+        );
+        let (mut sink, _) = ws.split();
+        let _ = sink.close().await;
+        return;
     };
     let (sink, stream) = ws.split();
     let reader = tokio_util::io::StreamReader::new(stream.filter_map(|message| {
@@ -378,8 +419,12 @@ async fn data_connection(ctx: ClientContext, cred: DeviceCredential, conn_id: St
                 std::future::ready(Ok::<_, std::io::Error>(Message::Binary(bytes)))
             }),
     ));
-    if let Err(error) =
-        serve_client(tokio::io::join(reader, writer), ctx, ClientTrust::Remote).await
+    if let Err(error) = serve_client(
+        tokio::io::join(reader, writer),
+        ctx,
+        ClientTrust::Remote(Box::new(asserted)),
+    )
+    .await
     {
         tracing::debug!("relayed client {conn_id} ended: {error}");
     }

@@ -27,8 +27,8 @@ use omniagent_pty_daemon::protocol::{
     read_handshake_frame, write_frame, ErrorPayload, Frame, HelloAckPayload, MessageKind,
 };
 use omniagent_pty_daemon::{
-    serve_client, sharing_should_be_live, ClientContext, ClientTrust, DaemonServer,
-    DEVICE_TOKEN_KEY, LOCAL_ABSENCE_GRACE, REMOTE_SHARING_KEY,
+    serve_client, sharing_should_be_live, AssertedIdentity, ClientContext, ClientTrust,
+    DaemonServer, DEVICE_TOKEN_KEY, LOCAL_ABSENCE_GRACE, REMOTE_SHARING_KEY,
 };
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
@@ -36,6 +36,34 @@ use tokio::sync::oneshot;
 /// How long any wait in this harness gives the daemon before it calls the
 /// behaviour missing rather than slow.
 const PATIENCE: Duration = Duration::from_secs(4);
+
+/// The account every daemon in these tests is signed in to and serving.
+pub const HOST_ACCOUNT_EMAIL: &str = "bruno@bonando.com";
+
+/// What the relay asserts about a viewer signed in as `email` — the trusted
+/// half of an identity, as it arrives on the control channel's `open` message
+/// (spec §9). The `ip`/`country`/`client` fields are filled in so that a test
+/// asserting on them is asserting on something.
+pub fn asserted_as(email: &str) -> AssertedIdentity {
+    AssertedIdentity {
+        user_sub: None,
+        account_email: Some(email.to_owned()),
+        ip: Some("203.0.113.7".into()),
+        country: Some("DE".into()),
+        client: Some("OmniAgent/1.7.22 macOS 27.0".into()),
+    }
+}
+
+/// A relayed connection carrying the relay's assertion for `email`.
+pub fn remote_trust_for(email: &str) -> ClientTrust {
+    ClientTrust::Remote(Box::new(asserted_as(email)))
+}
+
+/// A relayed connection the relay described only partially — no
+/// `account_email` at all, the shape the account check has to fail closed on.
+pub fn remote_trust_asserting_nothing() -> ClientTrust {
+    ClientTrust::Remote(Box::default())
+}
 
 /// A running daemon, sharing switched on, with or without a local client.
 pub struct Daemon {
@@ -129,15 +157,34 @@ pub async fn daemon_without_local_client() -> Daemon {
 
 impl Daemon {
     /// A remote client that has not said `Hello` yet, speaking this build's
-    /// protocol version.
+    /// protocol version, and which the relay asserts is this daemon's own
+    /// account — the ordinary case every other admission test is about.
     pub fn connect_remote(&self, machine: &str) -> Client {
-        connect(&self.ctx, ClientTrust::Remote, machine, None)
+        self.connect_remote_asserting(machine, HOST_ACCOUNT_EMAIL)
+    }
+
+    /// A remote client the **relay** says is signed in as `email`. The email
+    /// is not sent by the client and there is no way for it to be: it rides
+    /// the `ClientTrust::Remote` value, exactly as `relay.rs` builds it from
+    /// the control channel's `open` message.
+    pub fn connect_remote_asserting(&self, machine: &str, email: &str) -> Client {
+        connect(&self.ctx, remote_trust_for(email), machine, None)
+    }
+
+    /// A remote client the relay opened without saying who it is.
+    pub fn connect_remote_asserting_nothing(&self, machine: &str) -> Client {
+        connect(&self.ctx, remote_trust_asserting_nothing(), machine, None)
     }
 
     /// [`Self::connect_remote`], but claiming `version` on the wire — the Mac
     /// that has not been updated.
     pub fn connect_remote_with_version(&self, machine: &str, version: u8) -> Client {
-        connect(&self.ctx, ClientTrust::Remote, machine, Some(version))
+        connect(
+            &self.ctx,
+            remote_trust_for(HOST_ACCOUNT_EMAIL),
+            machine,
+            Some(version),
+        )
     }
 
     /// Whether this daemon would hold a relay control channel right now —
@@ -222,6 +269,7 @@ fn connect(ctx: &ClientContext, trust: ClientTrust, machine: &str, version: Opti
         request: 0,
         version,
         machine: machine.to_owned(),
+        claimed: None,
     }
 }
 
@@ -233,6 +281,9 @@ pub struct Client {
     /// build's.
     version: Option<u8>,
     machine: String,
+    /// Extra identity keys smuggled into the client's own `Hello` payload —
+    /// see [`Client::claiming_in_hello`].
+    claimed: Option<String>,
 }
 
 /// What the daemon answered a `Hello` with. There are only two answers, and
@@ -271,19 +322,43 @@ impl Client {
         self.say_hello(None).await
     }
 
+    /// Makes this client's own `Hello` claim to be signed in as `email`, by
+    /// putting every identity key the relay asserts into the payload the
+    /// *client* controls — `account_email`, `user_sub`, and a whole nested
+    /// `viewer` object of the shape `relay.rs` parses.
+    ///
+    /// It is a lie by construction. `HelloPayload` has no such fields and
+    /// serde drops what it does not know, so this is exactly what an attacker
+    /// gets to do: write anything into the one message it owns. A daemon that
+    /// ever grew an account check reading `identity.*` would start passing a
+    /// test it must fail, which is the point of asserting on it from out here.
+    pub fn claiming_in_hello(mut self, email: &str) -> Self {
+        self.claimed = Some(email.to_owned());
+        self
+    }
+
     async fn say_hello(&mut self, viewer_id: Option<String>) -> HelloResult {
         self.request += 1;
+        let mut payload = serde_json::json!({
+            "client": "harness",
+            // Omitted entirely when `None` — the daemon declares both
+            // identity fields `Option`, so this is the pre-phase-2 shape.
+            "viewer_id": viewer_id,
+            "machine_name": self.machine,
+        });
+        if let Some(email) = self.claimed.clone() {
+            let object = payload.as_object_mut().unwrap();
+            object.insert("account_email".into(), serde_json::json!(email));
+            object.insert("user_sub".into(), serde_json::json!("whoever-i-say"));
+            object.insert(
+                "viewer".into(),
+                serde_json::json!({"account_email": email, "user_sub": "whoever-i-say"}),
+            );
+        }
         let mut frame = Frame::new(
             MessageKind::Hello,
             self.request,
-            serde_json::to_vec(&serde_json::json!({
-                "client": "harness",
-                // Omitted entirely when `None` — the daemon declares both
-                // identity fields `Option`, so this is the pre-phase-2 shape.
-                "viewer_id": viewer_id,
-                "machine_name": self.machine,
-            }))
-            .unwrap(),
+            serde_json::to_vec(&payload).unwrap(),
         );
         if let Some(version) = self.version {
             frame.header.protocol_version = version;

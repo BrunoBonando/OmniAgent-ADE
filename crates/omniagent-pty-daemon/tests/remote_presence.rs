@@ -167,7 +167,7 @@ async fn local_and_remote_clients(
     let host = connect(&ctx, ClientTrust::Local)
         .hello(serde_json::json!({"client": "omniagent-native-macos"}))
         .await;
-    let viewer = connect(&ctx, ClientTrust::Remote)
+    let viewer = connect(&ctx, support::remote_trust_for(support::HOST_ACCOUNT_EMAIL))
         .hello(serde_json::json!({
             "client": "omniagent-native-macos", "viewer_id": "v-air", "machine_name": "Air"}))
         .await;
@@ -247,7 +247,11 @@ async fn a_blocked_viewer_cannot_say_hello() {
         .unwrap();
 
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(serve_client(server_side, ctx.clone(), ClientTrust::Remote));
+    tokio::spawn(serve_client(
+        server_side,
+        ctx.clone(),
+        support::remote_trust_for(support::HOST_ACCOUNT_EMAIL),
+    ));
     let mut blocked = Duplex {
         stream: client_side,
         request: 0,

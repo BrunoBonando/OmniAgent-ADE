@@ -42,15 +42,53 @@ use crate::server::{ClientTrust, SharedWriter};
 
 /// What a viewer calls itself in `Hello` (spec §5).
 ///
-/// **Self-reported, on purpose.** Both Macs belong to the same account and the
-/// relay already refuses anyone else, so this is a labelling and convenience
-/// mechanism, not an authorization boundary. Making it tamper-proof means
-/// having the relay assert identity in its `{"open": …}` message; that is a
-/// later hardening, recorded rather than papered over.
+/// **Self-reported, and this type holds nothing else.** Everything in here
+/// arrived in the connecting client's own `Hello` payload, so it is a label
+/// for a human to read and never an input to a decision. The trusted half —
+/// what Cloudflare and the relay *observed* — is [`AssertedIdentity`], and it
+/// deliberately does not live in this struct: a check written against
+/// `viewer.account_email` would be a check whose input the caller chooses, and
+/// the way to make that impossible is for there to be no such field to reach
+/// for. The assertion rides [`ClientTrust::Remote`] instead, which is to say it
+/// arrives *with the connection* rather than in the client's first frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewerIdentity {
     pub viewer_id: String,
     pub machine_name: String,
+}
+
+/// What the **relay** says about a connection, carried on the control
+/// channel's `{"open": "<conn_id>", "viewer": {…}}` message (spec §9).
+///
+/// The split from [`ViewerIdentity`] is the whole point of the type. These
+/// fields are observations, not claims: `ip` is Cloudflare's
+/// `CF-Connecting-IP` and `country` its `CF-IPCountry`, neither settable by
+/// the client; `user_sub` and `account_email` come from the viewer's JWT,
+/// which the relay verified before it opened anything. **Only these fields may
+/// be read by a check.** Anything the connecting app says about itself lands
+/// in `ViewerIdentity`, and a check run on a value the connecting client
+/// supplies checks nothing.
+///
+/// Every field is optional because the relay omits what it does not know
+/// rather than inventing it (spec §9: "City is omitted, not faked"), and
+/// unknown keys are ignored so the relay may add to the dictionary without a
+/// daemon release. An assertion with no `account_email` therefore exists, and
+/// [`crate::server::viewer_owns_this_account`] refuses it — absence fails
+/// closed rather than defaulting to anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct AssertedIdentity {
+    /// The viewer's account, from the JWT the relay verified.
+    pub user_sub: Option<String>,
+    /// The email that account signs in with — the one fact the daemon's
+    /// account check runs on ([`crate::server::viewer_owns_this_account`]).
+    pub account_email: Option<String>,
+    /// `CF-Connecting-IP` at the edge.
+    pub ip: Option<String>,
+    /// `CF-IPCountry` at the edge.
+    pub country: Option<String>,
+    /// The viewer app's user agent, as the relay saw it.
+    pub client: Option<String>,
 }
 
 /// Who holds the lease (spec §3) — deliberately *not* a [`ViewerIdentity`].
@@ -67,9 +105,17 @@ pub struct ViewerIdentity {
 /// no-opped silently at the one moment a host most wants the button to work.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeaseHolder {
-    /// `None` for a client that never named itself in `Hello`.
+    /// `None` for a client that never named itself in `Hello`. Self-reported.
     pub viewer_id: Option<String>,
+    /// Self-reported. A label for the host's panel, never a decision input.
     pub machine_name: String,
+    /// What the relay asserted about the connection holding the lease — the
+    /// trusted half, kept here because this record is what the host's takeover
+    /// panel is drawn from and what `server.rs` compares a returning viewer
+    /// against. A lease is only ever taken by a `ClientTrust::Remote`
+    /// connection, which by construction has one, so this is not an `Option`:
+    /// there is no way to record a holder whose identity nobody asserted.
+    pub asserted: AssertedIdentity,
 }
 
 /// One live client connection.
@@ -97,7 +143,7 @@ impl ConnectionEntry {
     /// every roster entry carries a Disconnect that has to hold — which means
     /// blocking a stable viewer id, which such a client does not have.
     fn is_listed_viewer(&self) -> bool {
-        self.trust == ClientTrust::Remote && self.viewer.is_some()
+        self.trust.is_remote() && self.viewer.is_some()
     }
 }
 
@@ -190,9 +236,7 @@ impl ConnectionRegistry {
     /// construction, so this cannot be satisfied from the other end of the
     /// relay.
     pub fn has_local(&self) -> bool {
-        self.entries()
-            .values()
-            .any(|entry| entry.trust == ClientTrust::Local)
+        self.entries().values().any(|entry| entry.trust.is_local())
     }
 
     /// When the last local connection went away, for the grace that
@@ -242,6 +286,7 @@ impl ConnectionRegistry {
 
     pub fn register(&self, trust: ClientTrust, cancel: CancellationToken) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let is_local = trust.is_local();
         self.entries().insert(
             id,
             ConnectionEntry {
@@ -252,7 +297,7 @@ impl ConnectionRegistry {
                 since: SystemTime::now(),
             },
         );
-        if trust == ClientTrust::Local {
+        if is_local {
             // The app is back, so there is no absence to time. Clearing is not
             // load-bearing — `has_local` is asked first and would short-circuit
             // a stale timestamp — but a marker that outlived what it recorded
@@ -277,14 +322,8 @@ impl ConnectionRegistry {
         self.release_lease(id);
         let mut entries = self.entries();
         let removed = entries.remove(&id);
-        let was_local = removed
-            .as_ref()
-            .is_some_and(|entry| entry.trust == ClientTrust::Local);
-        if was_local
-            && !entries
-                .values()
-                .any(|entry| entry.trust == ClientTrust::Local)
-        {
+        let was_local = removed.as_ref().is_some_and(|entry| entry.trust.is_local());
+        if was_local && !entries.values().any(|entry| entry.trust.is_local()) {
             // Under the entries guard on purpose: "no local is left" and "the
             // absence started now" have to become true together, or a local
             // connection arriving in between would leave behind a timestamp
@@ -407,9 +446,9 @@ impl ConnectionRegistry {
     /// that hands out access to the roster, rather than at each call site.
     pub fn presence_updates(
         &self,
-        trust: ClientTrust,
+        trust: &ClientTrust,
     ) -> Option<watch::Receiver<Arc<RemoteViewersPayload>>> {
-        (trust == ClientTrust::Local).then(|| self.roster.subscribe())
+        trust.is_local().then(|| self.roster.subscribe())
     }
 
     /// Drops every **remote** connection with this viewer id, returning
@@ -428,7 +467,7 @@ impl ConnectionRegistry {
         let kicked: Vec<u64> = entries
             .iter()
             .filter(|(_, entry)| {
-                entry.trust == ClientTrust::Remote
+                entry.trust.is_remote()
                     && entry
                         .viewer
                         .as_ref()
@@ -533,7 +572,22 @@ mod tests {
         LeaseHolder {
             viewer_id: id.map(str::to_owned),
             machine_name: name.into(),
+            asserted: asserted_for("bruno@bonando.com"),
         }
+    }
+
+    /// What the relay asserts about a viewer signed in as `email`.
+    fn asserted_for(email: &str) -> AssertedIdentity {
+        AssertedIdentity {
+            account_email: Some(email.to_owned()),
+            ..AssertedIdentity::default()
+        }
+    }
+
+    /// A relayed connection, for the registry tests — which are about
+    /// presence and the kick, not about who the relay said was calling.
+    fn remote() -> ClientTrust {
+        ClientTrust::Remote(Box::new(asserted_for("bruno@bonando.com")))
     }
 
     fn attached(ids: &[&str]) -> HashSet<String> {
@@ -547,8 +601,8 @@ mod tests {
     fn only_remote_connections_that_named_themselves_are_listed() {
         let registry = ConnectionRegistry::default();
         let host = registry.register(ClientTrust::Local, CancellationToken::new());
-        let anonymous = registry.register(ClientTrust::Remote, CancellationToken::new());
-        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let anonymous = registry.register(remote(), CancellationToken::new());
+        let air = registry.register(remote(), CancellationToken::new());
 
         // A local connection may carry an identity; it is still not a viewer.
         assert!(!registry.set_viewer(host, viewer("v-host", "Studio")));
@@ -565,8 +619,8 @@ mod tests {
     #[test]
     fn a_remote_connection_cannot_subscribe_to_the_roster() {
         let registry = ConnectionRegistry::default();
-        assert!(registry.presence_updates(ClientTrust::Local).is_some());
-        assert!(registry.presence_updates(ClientTrust::Remote).is_none());
+        assert!(registry.presence_updates(&ClientTrust::Local).is_some());
+        assert!(registry.presence_updates(&remote()).is_none());
     }
 
     /// One machine, two sockets — the relay opens a fresh data connection when
@@ -574,8 +628,8 @@ mod tests {
     #[test]
     fn two_connections_from_one_machine_are_one_roster_entry() {
         let registry = ConnectionRegistry::default();
-        let old = registry.register(ClientTrust::Remote, CancellationToken::new());
-        let new = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let old = registry.register(remote(), CancellationToken::new());
+        let new = registry.register(remote(), CancellationToken::new());
         registry.set_viewer(old, viewer("v-air", "Air"));
         registry.set_viewer(new, viewer("v-air", "Air"));
         registry.set_attached(old, attached(&["s2"]));
@@ -595,7 +649,7 @@ mod tests {
     #[test]
     fn only_changes_a_host_can_see_report_true() {
         let registry = ConnectionRegistry::default();
-        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let air = registry.register(remote(), CancellationToken::new());
         registry.set_viewer(air, viewer("v-air", "Air"));
 
         assert!(registry.set_attached(air, attached(&["s1"])));
@@ -629,7 +683,7 @@ mod tests {
         assert!(!host_cancel.is_cancelled(), "the host's socket survives");
 
         // And the same id on a remote connection still goes, host or no host.
-        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let air = registry.register(remote(), CancellationToken::new());
         registry.set_viewer(air, viewer("v-shared", "Air"));
         assert!(registry.cancel_viewer("v-shared"));
         assert!(!host_cancel.is_cancelled(), "and the host still survives");
@@ -640,9 +694,9 @@ mod tests {
     #[test]
     fn one_connection_holds_the_lease_and_the_next_is_told_whose_it_is() {
         let registry = ConnectionRegistry::default();
-        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let air = registry.register(remote(), CancellationToken::new());
         registry.set_viewer(air, viewer("v-air", "Air"));
-        let mini = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let mini = registry.register(remote(), CancellationToken::new());
 
         assert_eq!(
             registry.take_lease(air, holder(Some("v-air"), "Air")),
@@ -677,13 +731,13 @@ mod tests {
     #[test]
     fn a_late_release_from_a_dead_connection_cannot_evict_a_live_one() {
         let registry = ConnectionRegistry::default();
-        let dead = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let dead = registry.register(remote(), CancellationToken::new());
         registry
             .take_lease(dead, holder(Some("v-air"), "Air"))
             .unwrap();
         registry.release_lease(dead);
 
-        let live = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let live = registry.register(remote(), CancellationToken::new());
         registry
             .take_lease(live, holder(Some("v-mini"), "Mini"))
             .unwrap();
@@ -703,7 +757,7 @@ mod tests {
     #[test]
     fn an_anonymous_holder_offers_no_viewer_id_to_kick_it_with() {
         let registry = ConnectionRegistry::default();
-        let anonymous = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let anonymous = registry.register(remote(), CancellationToken::new());
         registry
             .take_lease(anonymous, holder(None, "Unknown Mac"))
             .unwrap();
@@ -725,7 +779,7 @@ mod tests {
     #[test]
     fn kicking_a_viewer_frees_the_lease_with_its_entry() {
         let registry = ConnectionRegistry::default();
-        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let air = registry.register(remote(), CancellationToken::new());
         registry.set_viewer(air, viewer("v-air", "Air"));
         registry
             .take_lease(air, holder(Some("v-air"), "Air"))
@@ -741,11 +795,11 @@ mod tests {
     #[tokio::test]
     async fn publishing_never_waits_and_a_late_subscriber_sees_the_current_roster() {
         let registry = ConnectionRegistry::default();
-        let air = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let air = registry.register(remote(), CancellationToken::new());
         registry.set_viewer(air, viewer("v-air", "Air"));
         registry.notify_presence();
 
-        let updates = registry.presence_updates(ClientTrust::Local).unwrap();
+        let updates = registry.presence_updates(&ClientTrust::Local).unwrap();
         assert_eq!(updates.borrow().viewers.len(), 1);
     }
 
@@ -763,15 +817,15 @@ mod tests {
     #[test]
     fn the_last_published_roster_is_the_newest_one() {
         let registry = ConnectionRegistry::default();
-        let updates = registry.presence_updates(ClientTrust::Local).unwrap();
+        let updates = registry.presence_updates(&ClientTrust::Local).unwrap();
 
-        let old = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let old = registry.register(remote(), CancellationToken::new());
         registry.set_viewer(old, viewer("v-air", "Air"));
         registry.notify_presence();
         assert_eq!(updates.borrow().viewers.len(), 1);
 
         // The reconnect: the replacement attaches, the dead socket is reaped.
-        let new = registry.register(ClientTrust::Remote, CancellationToken::new());
+        let new = registry.register(remote(), CancellationToken::new());
         registry.set_viewer(new, viewer("v-mini", "Mini"));
         registry.notify_presence();
         registry.remove(old);

@@ -26,8 +26,8 @@ use omniagent_pty_daemon::protocol::{
     read_frame, write_frame, Frame, MessageKind, SessionListPayload, SessionSizePayload,
 };
 use omniagent_pty_daemon::{
-    authorize_remote, protected_setting_key, serve_client, ClientContext, ClientTrust,
-    CreateSession, DaemonServer,
+    authorize_remote, protected_setting_key, serve_client, ClientContext, CreateSession,
+    DaemonServer,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -349,7 +349,11 @@ async fn remote_client_sharing(
     support::enable_sharing(&ctx);
     support::hold_local_client(&ctx).await;
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(serve_client(server_side, ctx.clone(), ClientTrust::Remote));
+    tokio::spawn(serve_client(
+        server_side,
+        ctx.clone(),
+        support::remote_trust_for(support::HOST_ACCOUNT_EMAIL),
+    ));
     (
         Duplex {
             stream: client_side,

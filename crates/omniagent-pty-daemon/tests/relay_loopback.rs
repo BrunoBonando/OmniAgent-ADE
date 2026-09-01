@@ -120,6 +120,24 @@ async fn boot_daemon(
     (ctx, stop)
 }
 
+/// The relay's `open` control message, carrying the identity it asserts for
+/// the viewer on the other end (spec §9). Every `open` the real relay sends
+/// has one; the tests that leave it out are the ones about what happens when
+/// it does not.
+fn open(conn_id: &str) -> String {
+    serde_json::json!({
+        "open": conn_id,
+        "viewer": {
+            "user_sub": "auth0|bruno",
+            "account_email": support::HOST_ACCOUNT_EMAIL,
+            "ip": "203.0.113.7",
+            "country": "DE",
+            "client": "OmniAgent/1.7.22 macOS 27.0",
+        },
+    })
+    .to_string()
+}
+
 /// Accepts one TCP connection from the daemon and refuses the WebSocket
 /// upgrade with `status`, the way the relay denies a bad device token.
 #[allow(clippy::result_large_err)]
@@ -251,7 +269,7 @@ async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
         "hello was {hello_text}"
     );
     control
-        .send(Message::Text(r#"{"open":"c1"}"#.into()))
+        .send(Message::Text(open("c1").into()))
         .await
         .unwrap();
 
@@ -537,4 +555,135 @@ async fn sharing_disabled_never_dials_the_relay_even_with_a_populated_projection
         dialled.is_err(),
         "the daemon dialled the relay with sharing off"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The relay asserts who is connecting (spec §9)
+// ---------------------------------------------------------------------------
+
+/// The identity travels from the control channel's `open` message onto the
+/// data connection it describes — and it is that identity, not the client's
+/// own `Hello`, that the daemon records.
+///
+/// The viewer here lies in the one message it controls: its `Hello` carries an
+/// `account_email` of its own choosing. `HelloPayload` has no such field, so
+/// serde drops it, and what ends up on the lease is what the relay said. That
+/// is the whole property — the trusted and the self-reported halves arrive by
+/// different routes and only one of them is ever read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_relay_asserted_identity_reaches_the_connection() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ctx, _stop) = start_daemon_with_relay(root.path(), port, None).await;
+
+    let (mut control, _, _) = accept_ws(&listener).await;
+    tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    control
+        .send(Message::Text(open("c1").into()))
+        .await
+        .unwrap();
+
+    let (mut data, path, _) = accept_ws(&listener).await;
+    assert_eq!(path, "/v1/device/conn/c1");
+    let hello = Frame::new(
+        MessageKind::Hello,
+        1,
+        serde_json::to_vec(&serde_json::json!({
+            "client": "relay-loopback",
+            "viewer_id": "v-air",
+            "machine_name": "Air",
+            // The lie. Nothing reads it; nothing may ever read it.
+            "account_email": "someone@else.com",
+            "user_sub": "auth0|someone-else",
+        }))
+        .unwrap(),
+    );
+    data.send(Message::Binary(hello.encode().unwrap().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_frame_from_ws(&mut data).await.header.message_kind,
+        MessageKind::HelloAck
+    );
+
+    let held = ctx
+        .connections
+        .lease_holder()
+        .expect("the admitted viewer holds the lease");
+    assert_eq!(
+        held.asserted.account_email.as_deref(),
+        Some(support::HOST_ACCOUNT_EMAIL),
+        "the client's own Hello reached the identity the daemon trusts"
+    );
+    assert_eq!(held.asserted.user_sub.as_deref(), Some("auth0|bruno"));
+    assert_eq!(held.asserted.ip.as_deref(), Some("203.0.113.7"));
+    assert_eq!(held.asserted.country.as_deref(), Some("DE"));
+    // …and the self-reported half is still kept, still labelled as such.
+    assert_eq!(held.machine_name, "Air");
+    assert_eq!(held.viewer_id.as_deref(), Some("v-air"));
+}
+
+/// A data connection the relay never described is refused outright: the
+/// account check has nothing to run on, and a check that can be skipped by
+/// leaving a field out is not a check.
+///
+/// Both shapes of "not described" are covered — the key missing, and an
+/// explicit `null` — because they arrive at `serde_json` as the same value and
+/// must leave it as the same decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_data_connection_the_relay_did_not_describe_is_closed_unserved() {
+    for undescribed in [r#"{"open":"c1"}"#, r#"{"open":"c1","viewer":null}"#] {
+        let root = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ctx, _stop) = start_daemon_with_relay(root.path(), port, None).await;
+
+        let (mut control, _, _) = accept_ws(&listener).await;
+        tokio::time::timeout(Duration::from_secs(4), control.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        control
+            .send(Message::Text(undescribed.into()))
+            .await
+            .unwrap();
+
+        let (mut data, path, _) = accept_ws(&listener).await;
+        assert_eq!(path, "/v1/device/conn/c1");
+        let hello = Frame::new(
+            MessageKind::Hello,
+            1,
+            serde_json::to_vec(&serde_json::json!({"client": "relay-loopback"})).unwrap(),
+        );
+        let _ = data
+            .send(Message::Binary(hello.encode().unwrap().into()))
+            .await;
+
+        let closed = tokio::time::timeout(Duration::from_secs(4), async {
+            while let Some(message) = data.next().await {
+                match message {
+                    Ok(Message::Close(_)) | Err(_) => return true,
+                    Ok(Message::Binary(_)) => return false,
+                    Ok(_) => {}
+                }
+            }
+            true
+        })
+        .await;
+        assert_eq!(
+            closed,
+            Ok(true),
+            "an undescribed data connection was served: {undescribed}"
+        );
+        assert!(
+            ctx.connections.lease_holder().is_none(),
+            "an undescribed data connection took the lease: {undescribed}"
+        );
+    }
 }

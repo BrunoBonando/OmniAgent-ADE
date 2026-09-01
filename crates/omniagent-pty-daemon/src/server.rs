@@ -1,4 +1,6 @@
-use crate::connections::{ConnectionRegistry, LeaseHolder, PresenceFeed, ViewerIdentity};
+use crate::connections::{
+    AssertedIdentity, ConnectionRegistry, LeaseHolder, PresenceFeed, ViewerIdentity,
+};
 use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, read_handshake_frame, write_frame,
     AttachPayload, BrainGetContextPayload, BrainSearchPayload, DirectoryEntryPayload,
@@ -44,10 +46,45 @@ pub fn peer_uid_allowed(peer_uid: u32, runtime_owner_uid: u32) -> bool {
 /// [`authorize_remote`] before dispatch. Since phase 3 that is a boundary
 /// around *kinds* and the protected settings rows, not around a set of
 /// sessions — the lease holder drives the whole machine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// **`Remote` carries the relay's assertion about who is connecting** (spec
+/// §9), and that is a type-level decision rather than a convenience. The
+/// alternative — a `Remote` unit variant plus an identity read out of the
+/// client's `Hello` — puts the caller's own words within reach of every check
+/// written downstream. Here there is nothing to reach for: the only
+/// `AssertedIdentity` in the process arrived on the control channel, a remote
+/// connection cannot be constructed without one, and a local connection has
+/// none at all because the peer-UID check already answered the same question
+/// better.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientTrust {
     Local,
-    Remote,
+    /// A connection the relay opened for a viewer, with what the relay and
+    /// Cloudflare observed about it. Boxed so the common `Local` case does not
+    /// pay for the payload on every connection and every registry entry.
+    Remote(Box<AssertedIdentity>),
+}
+
+impl ClientTrust {
+    /// Whether this connection came in over the relay. Prefer destructuring
+    /// where the assertion is wanted; this is for the arms that only need to
+    /// know which side of the boundary they are on.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote(_))
+    }
+
+    /// Whether this connection came through the unix socket's peer-UID check.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+
+    /// What the relay asserted, or `None` for a local connection.
+    pub fn asserted(&self) -> Option<&AssertedIdentity> {
+        match self {
+            Self::Local => None,
+            Self::Remote(asserted) => Some(asserted),
+        }
+    }
 }
 
 /// Everything one client connection needs from the daemon — cloned out of
@@ -679,7 +716,7 @@ where
     // means the bundle was replaced under a running daemon, and the app's
     // answer is to reconnect until the daemon it is talking to is the new one.
     if hello.header.protocol_version != PROTOCOL_VERSION {
-        if trust != ClientTrust::Remote {
+        if !trust.is_remote() {
             return Err(anyhow!(
                 "client speaks protocol {}, this daemon speaks {PROTOCOL_VERSION}",
                 hello.header.protocol_version
@@ -711,7 +748,7 @@ where
     // refusal must never take the lease on its way out (`remote_lease.rs`).
     // The version check stays ahead of it, because a peer on the old protocol
     // has to be refused in a dialect it can decode.
-    if trust == ClientTrust::Remote {
+    if trust.is_remote() {
         if let Some(host) = unavailable_as(&settings, &connections) {
             send_error(&writer, request, anyhow!("{host} is not available")).await?;
             return Ok(());
@@ -720,7 +757,7 @@ where
     // The blocklist is checked here — before the ack, and by the daemon rather
     // than the app — because a kick has to hold against a viewer that still
     // holds a valid device token and re-dials on its own (spec §5).
-    if trust == ClientTrust::Remote {
+    if trust.is_remote() {
         if let Some(viewer_id) = identity.viewer_id.as_deref() {
             if blocked_viewers(&settings).contains(viewer_id) {
                 send_error(
@@ -746,7 +783,7 @@ where
     // The guard is what takes the entry — and the lease with it — back out
     // however this function ends, including an early `?` and an aborted task.
     let cancel = CancellationToken::new();
-    let connection = ConnectionGuard::register(&connections, trust, cancel.clone());
+    let connection = ConnectionGuard::register(&connections, trust.clone(), cancel.clone());
     // The lease (spec §3, §12 invariant 4): one remote connection drives this
     // machine at a time. Released by the guard above on every way out of this
     // function, because a lease that leaks is a daemon that refuses every
@@ -764,12 +801,18 @@ where
     // before its guard frees it. That path needs a kick to land inside a
     // window with no await in it; the roster one happened every time a second
     // Mac knocked.
-    if trust == ClientTrust::Remote {
+    //
+    // The holder is built by **destructuring the trust value**, so the
+    // assertion recorded against the lease is necessarily the relay's own: a
+    // `Local` connection cannot reach this block at all, and a `Remote` one
+    // has nowhere else to get an `AssertedIdentity` from.
+    if let ClientTrust::Remote(asserted) = &trust {
         if let Err(machine) = connections.take_lease(
             connection.id,
             LeaseHolder {
                 viewer_id: identity.viewer_id.clone(),
                 machine_name: machine_name.clone(),
+                asserted: (**asserted).clone(),
             },
         ) {
             send_error(&writer, request, anyhow!("in use by {machine}")).await?;
@@ -793,7 +836,7 @@ where
     // connected. Re-reading the row once we are visible to `cancel_viewer`
     // closes that sliver from the other side: either the kick sees us, or we
     // see the kick. That is why it cannot move above `set_viewer`.
-    if trust == ClientTrust::Remote {
+    if trust.is_remote() {
         if let Some(viewer_id) = viewer_id.as_deref() {
             if blocked_viewers(&settings).contains(viewer_id) {
                 send_error(
@@ -821,7 +864,7 @@ where
     // The feed writes it to this one connection — never a broadcast to all —
     // and only when it is news; see `PresenceFeed::spawn`.
     let _presence = connections
-        .presence_updates(trust)
+        .presence_updates(&trust)
         .map(|updates| PresenceFeed::spawn(updates, Arc::clone(&writer)));
     if named_itself {
         connections.notify_presence();
@@ -844,7 +887,7 @@ where
         // The remote trust boundary. The dispatch below is byte-for-byte the
         // local path: nothing in it consults trust, which is what keeps the
         // decision in one readable place.
-        if trust == ClientTrust::Remote {
+        if trust.is_remote() {
             if let Err(reason) = authorize_remote(&frame) {
                 if send_error(&writer, request, reason).await.is_err() {
                     break;
