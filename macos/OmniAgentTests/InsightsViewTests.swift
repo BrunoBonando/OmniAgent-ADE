@@ -8,14 +8,27 @@ final class InsightsViewTests: XCTestCase {
     // MARK: - The KPI row
 
     /// The three cards read the numbers the usage analytics derive: two
-    /// grouped counts and the run's active hours to one decimal.
+    /// grouped counts and the run's active hours to one decimal. The locale
+    /// is injected because the page follows the viewer's — asserting a
+    /// grouping means naming the locale it is grouped in.
     func testTheKPICardsReadTheInsights() {
-        let view = InsightsSurfaceView()
+        let view = InsightsSurfaceView(locale: Locale(identifier: "en_US"))
 
         view.applyInsights(insights(sessions: 1_234, tokens: 56_789, hoursPerDay: 2.5, days: 5))
 
         XCTAssertEqual(view.kpiCards.map { $0.labelField.stringValue }, ["SESSIONS", "TOKENS", "ACTIVE HOURS"])
         XCTAssertEqual(view.kpiCards.map { $0.valueField.stringValue }, ["1,234", "56,789", "12.5"])
+    }
+
+    /// The counts are grouped the way the viewer's Mac writes numbers — a
+    /// German locale says "1.234", and only the hours stay `%.1f`, which is
+    /// locale-independent by construction.
+    func testTheCountsFollowTheViewersLocale() {
+        let view = InsightsSurfaceView(locale: Locale(identifier: "de_DE"))
+
+        view.applyInsights(insights(sessions: 1_234, tokens: 56_789, hoursPerDay: 2.5, days: 5))
+
+        XCTAssertEqual(view.kpiCards.map { $0.valueField.stringValue }, ["1.234", "56.789", "12.5"])
     }
 
     /// A fresh page has cards, not blanks — and nothing that reads as a real

@@ -1556,6 +1556,32 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    /// Closing a pane takes its lane with it. `destroyPane` forgets the
+    /// pane's status series, but nothing redraws itself — without the
+    /// refresh the closed pane's lane sat on the page until some other pane
+    /// happened to report.
+    func testClosingAPaneTakesItsLaneOffTheInsightsPage() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.sessionKiller = { _ in }
+        controller.showWindow(nil)
+        let closing = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        controller.recordNotification(
+            for: SessionStatusEvent(id: closing, status: .thinking, notify: false, engine: "shell")
+        )
+
+        controller.applyDestination(.insights)
+        controller.insightsView.select(.activity)
+        XCTAssertEqual(controller.insightsView.activity.lanes.map(\.paneID), [closing])
+
+        controller.closePane(nil)
+
+        XCTAssertTrue(
+            controller.insightsView.activity.lanes.isEmpty,
+            "a closed pane's lane must not outlive it"
+        )
+    }
+
     /// The bar names the session on screen, and names nothing anywhere else —
     /// no app name, no fallback. The review toggle goes with it: gone, not
     /// greyed out, since a disabled control invites a click that cannot work.

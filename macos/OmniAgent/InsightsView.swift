@@ -7,10 +7,11 @@ import SwiftUI
 //
 // Neither tab invents data. **Usage** is three KPI cards over the SwiftUI
 // `UsageView` the Settings window already shows — the same
-// `UsageAnalytics.deriveUsageInsights` numbers, with that view's own totals
-// grid switched off so the cards are not printed twice. **Activity** is the
-// review panel's `ReviewPanelInsightsView`, unchanged, widened from the one
-// session the panel reviews to every session in the window
+// `UsageAnalytics.deriveUsageInsights` numbers, hosted `embedded` so it
+// drops its own totals grid (the cards say those) and its own ground (the
+// card behind it is the ground). **Activity** is the review panel's
+// `ReviewPanelInsightsView`, unchanged, widened from the one session the
+// panel reviews to every session in the window
 // (`WorkspaceWindowController.syncPageInsights`).
 
 /// The page's two faces. `Int`-raw so `PageShellView`'s index-based tab strip
@@ -135,8 +136,19 @@ final class InsightsSurfaceView: NSView {
     private var usageHost: NSView?
     private var usageBodyBottom: NSLayoutConstraint?
     private var activityBottom: NSLayoutConstraint?
+    /// Grouped thousands, no fraction: the counts are `Double` only because
+    /// the store's JSON oracle has no integers. Grouped in the *viewer's*
+    /// locale — a Mac set to German reads "8.783" here the way its other
+    /// apps write it — which is why the locale is an argument: a test has to
+    /// be able to assert one exact grouping.
+    private let countFormatter: NumberFormatter
 
-    init() {
+    init(locale: Locale = .current) {
+        let formatter = NumberFormatter()
+        formatter.locale = locale
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        countFormatter = formatter
         let cards = [
             InsightsKPICardView(label: "SESSIONS"),
             InsightsKPICardView(label: "TOKENS"),
@@ -169,8 +181,8 @@ final class InsightsSurfaceView: NSView {
         row.spacing = 16
         row.translatesAutoresizingMaskIntoConstraints = false
         usageBody.translatesAutoresizingMaskIntoConstraints = false
-        // The hosted SwiftUI view paints its own opaque ground, which would
-        // square off the card's corners without this.
+        // The hosted charts run the card's full width; clipping is what
+        // keeps them inside its rounded corners.
         usageCard.layer?.masksToBounds = true
         usageBody.addSubview(row)
         usageBody.addSubview(usageCard)
@@ -232,8 +244,8 @@ final class InsightsSurfaceView: NSView {
     /// days it was averaged over — which is what "active hours" means on a
     /// page with no date range picker.
     func applyInsights(_ insights: UsageInsights) {
-        kpiCards[0].setValue(Self.count(insights.totals.sessionsOpened))
-        kpiCards[1].setValue(Self.count(insights.totals.tokenCount))
+        kpiCards[0].setValue(count(insights.totals.sessionsOpened))
+        kpiCards[1].setValue(count(insights.totals.tokenCount))
         kpiCards[2].setValue(
             String(format: "%.1f", insights.avgActiveHoursPerDay * Double(insights.trackedDays))
         )
@@ -245,7 +257,7 @@ final class InsightsSurfaceView: NSView {
     /// with it, since an `NSHostingView` retains its model.
     func applyUsage(model: UsageViewModel) {
         usageHost?.removeFromSuperview()
-        let host = NSHostingView(rootView: UsageView(model: model, showsTotals: false))
+        let host = NSHostingView(rootView: UsageView(model: model, embedded: true))
         host.translatesAutoresizingMaskIntoConstraints = false
         usageCard.addSubview(host)
         NSLayoutConstraint.activate([
@@ -257,23 +269,7 @@ final class InsightsSurfaceView: NSView {
         usageHost = host
     }
 
-    /// Grouped thousands, no fraction: the counts are `Double` only because
-    /// the store's JSON oracle has no integers.
-    ///
-    /// Fixed to `en_US`, for `ReviewPanelInsightsView.axisFormatter`'s
-    /// reason: every word on this page is English, and a Mac set to a
-    /// European locale would otherwise print "56.789" beside them — which
-    /// reads as a decimal, not as fifty-six thousand. (`en_US_POSIX`, the
-    /// usual pick, groups nothing at all: it prints "56789".)
-    private static let countFormatter: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.locale = Locale(identifier: "en_US")
-        formatter.numberStyle = .decimal
-        formatter.maximumFractionDigits = 0
-        return formatter
-    }()
-
-    private static func count(_ value: Double) -> String {
-        countFormatter.string(from: NSNumber(value: value)) ?? placeholderValue
+    private func count(_ value: Double) -> String {
+        countFormatter.string(from: NSNumber(value: value)) ?? Self.placeholderValue
     }
 }

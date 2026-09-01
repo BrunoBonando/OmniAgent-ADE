@@ -2582,6 +2582,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         activity.forget(paneID: focused)
         statusSeries.forget(paneID: focused)
         workspace.closePane(focused)
+        // The pane's lane goes with the pane. Both timelines are drawn from
+        // the series just forgotten, and neither redraws itself — without
+        // this a closed pane's lane sits on screen until some *other* pane
+        // reports a status. Guarded inside, so a closed panel and a page
+        // nobody is on both cost nothing.
+        syncReviewPanelInsights()
+        syncPageInsights()
     }
 
     /// ⌘S. Monaco has its own ⌘S while it holds focus, but that only fires

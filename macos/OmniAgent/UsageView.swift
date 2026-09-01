@@ -37,22 +37,25 @@ final class UsageViewModel: ObservableObject {
 /// a compact summary a settings-adjacent window can host.
 struct UsageView: View {
     @ObservedObject var model: UsageViewModel
-    /// The totals grid. Off on the Insights page (spec §6), which prints the
-    /// headline numbers as its own KPI cards above this view and would
-    /// otherwise say them twice.
-    var showsTotals = true
+    /// Hosted inside another surface rather than owning a window — the
+    /// Insights page's charts card (spec §6). It drops two things the page
+    /// already provides: the totals grid, whose numbers are the page's KPI
+    /// cards right above this view, and the opaque ground, which inside a
+    /// card reads as a slab sitting on it. The text colour stays: it is the
+    /// same dark language either way.
+    var embedded = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 projectPicker
-                if showsTotals { totalsRow }
+                if !embedded { totalsRow }
                 dailyChart
                 hourlyChart
             }
             .padding(20)
         }
-        .background(OmniAgentPalette.background)
+        .background { if !embedded { OmniAgentPalette.background } }
         .foregroundStyle(OmniAgentPalette.textPrimary)
     }
 
