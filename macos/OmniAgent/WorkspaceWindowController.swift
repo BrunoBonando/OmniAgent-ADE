@@ -6202,8 +6202,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // 6, not 8: the gear's centre sits 32pt up, and the panel's foot
             // lands at 6.8 — a bigger margin lifts it and, through the corner
             // clamp, drags the drop off the gear.
+            //
+            // The floor always wins (2026-09-01, Remote's ninth row): with
+            // enough sections the *unfiltered* panel is taller than the room
+            // between the gear and the title bar, while a typed query's
+            // shorter one is not — so a ceiling clamp applied unconditionally
+            // moved the foot between the two (breaking "the panel keeps its
+            // foot" below) and, applied after the floor with no shared floor
+            // of its own, could push the foot below `room.minY` entirely.
+            // Skipping the ceiling clamp whenever it would fight the floor
+            // keeps the foot at the same gear-anchored position regardless of
+            // row count, and lets a panel too tall for the room overflow the
+            // top a few points instead — reachable and still finds the gear,
+            // where a moving foot or a floor breach did not.
             offered.origin.y = max(offered.origin.y, room.minY + 6)
-            offered.origin.y = min(offered.origin.y, room.maxY - WorkspaceTitleBarView.height - 8 - size.height)
+            let ceiling = room.maxY - WorkspaceTitleBarView.height - 8 - size.height
+            if ceiling >= room.minY + 6 {
+                offered.origin.y = min(offered.origin.y, ceiling)
+            }
             frame = offered
             panel.pointTip(at: gearMidY - offered.minY)
             panel.isTipVisible = true

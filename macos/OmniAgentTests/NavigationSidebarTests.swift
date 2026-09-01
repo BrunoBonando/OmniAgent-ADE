@@ -244,7 +244,8 @@ final class NavigationSidebarTests: XCTestCase {
     /// with the Desk.
     /// Settings is its own screen: the gear/⌘, land on it, it opens on the
     /// section it was last on, and every section still says "Under
-    /// development" — the design's eight, in its order.
+    /// development" — the design's eight plus Remote (2026-09-01 remote
+    /// environment sharing spec), in its order.
     func testSettingsIsItsOwnScreenWithItsOwnColumn() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -263,7 +264,10 @@ final class NavigationSidebarTests: XCTestCase {
         let panel = controller.settingsPanel
         XCTAssertEqual(
             panel.rows.map(\.titleText),
-            ["General", "Accounts", "Sessions", "Themes", "Accessibility", "Customize", "Model providers", "Experimental"]
+            [
+                "General", "Accounts", "Remote", "Sessions", "Themes", "Accessibility", "Customize",
+                "Model providers", "Experimental",
+            ]
         )
         XCTAssertEqual(settings.section, .general)
         XCTAssertEqual(settings.titleField.stringValue, "General")
