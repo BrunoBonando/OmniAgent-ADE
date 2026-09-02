@@ -1450,6 +1450,15 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             "the strip above it, not a margin"
         )
         XCTAssertEqual(card.layer?.cornerRadius, ContentCardView.cornerRadius)
+        // Tinted glass, its own colour off the ground: the wash is the token
+        // a theme will later swap, hosted on a Liquid Glass sheet where there
+        // is one, and it fills the card either way.
+        XCTAssertEqual(card.glassTint.colors, ShellPalette.contentCardTint)
+        XCTAssertEqual(card.glassTint.frame.size, card.bounds.size, "the wash fills the card")
+        if #available(macOS 26.0, *) {
+            XCTAssertNotNil(card.glassHost, "on 26 and later the card is a glass sheet")
+            XCTAssertEqual(card.glassHost?.frame, card.bounds)
+        }
 
         let placeholder = try XCTUnwrap(
             card.subviews.compactMap { $0 as? WorkspacePlaceholderView }.first,
@@ -2512,9 +2521,9 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
-    /// Signed out: one row that can actually be taken, and no email line over
-    /// an account that does not exist.
-    func testTheAccountPopoverOffersSignInWhileSignedOut() {
+    /// Signed out: no plan to be on, no email over an account that does not
+    /// exist, and "Sign in" leading the doors.
+    func testTheAccountMenuOffersSignInWhileSignedOut() {
         let controller = makeController(settingsClient: FakeSettingsClient(rows: [
             "auth_signed_in": "false",
             "auth_account_email": "bruno@bonando.com",
@@ -2526,19 +2535,18 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.showWindow(nil)
         controller.refreshAccountSection()
 
-        let dropdown = controller.presentAccountMenu()
+        let menu = controller.presentAccountMenu()
 
-        XCTAssertEqual(dropdown.visibleTitlesForTesting, ["Manage account", "Settings", "Sign in"])
-        XCTAssertEqual(
-            dropdown.visibleHeadersForTesting,
-            ["Not signed in"],
-            "the popover still says whose it is, even with no email row under the heading"
-        )
+        XCTAssertEqual(menu.nameTextForTesting, "Not signed in")
+        XCTAssertNil(menu.emailTextForTesting)
+        XCTAssertNil(menu.planTextForTesting, "no plan row over an account that does not exist")
+        XCTAssertEqual(menu.visibleTitlesForTesting, ["Sign in", "Manage account"])
     }
 
-    /// And signed in: the account's email, and the half of the pair that is
-    /// its opposite.
-    func testTheAccountPopoverNamesTheAccountAndOffersLogOut() {
+    /// Signed in: who, the plan they are on with the way up from it, and the
+    /// door to the account — and no "Log out", which lives behind that door
+    /// (Settings › Accounts) rather than one click from the avatar.
+    func testTheAccountMenuNamesTheAccountAndItsPlanWithoutLogOut() {
         let controller = makeController(settingsClient: FakeSettingsClient(rows: [
             "auth_signed_in": "true",
             "auth_account_email": "bruno@bonando.com",
@@ -2550,12 +2558,22 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.showWindow(nil)
         controller.refreshAccountSection()
 
-        let dropdown = controller.presentAccountMenu()
+        let menu = controller.presentAccountMenu()
 
-        XCTAssertEqual(
-            dropdown.visibleTitlesForTesting,
-            ["bruno@bonando.com", "Manage account", "Settings", "Log out"]
-        )
+        XCTAssertEqual(menu.nameTextForTesting, "Bruno Bonando")
+        XCTAssertEqual(menu.emailTextForTesting, "bruno@bonando.com")
+        XCTAssertEqual(menu.avatarModeForTesting, .initials("BB"))
+        XCTAssertEqual(menu.planTextForTesting, AccountMenuView.freePlanTitle)
+        XCTAssertEqual(menu.visibleTitlesForTesting, ["Manage account"], "and nothing that logs out")
+
+        var upgrades = 0
+        menu.onUpgrade = { upgrades += 1 }
+        menu.pressUpgradeForTesting()
+        XCTAssertEqual(upgrades, 1, "the pill is the menu's one primary action")
+
+        controller.presentAccountMenu().pressRowForTesting("Manage account")
+        XCTAssertEqual(controller.destination, .settings)
+        XCTAssertEqual(controller.settingsView.section, .accounts, "Manage account is the Accounts page")
     }
 
     /// One entry, ready to be dropped into a controller's feed.

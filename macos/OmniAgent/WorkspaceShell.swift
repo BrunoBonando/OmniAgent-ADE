@@ -171,6 +171,13 @@ enum ShellPalette {
     /// same 4% over that much of the window reads as a second grey slab
     /// instead of a lift off the ground.
     static let contentCardFill = NSColor(white: 1, alpha: 0.035)
+    /// The content card's own colour: an indigo wash over its Liquid Glass,
+    /// top-lit like the ground but a hue off it, so the card reads as its own
+    /// tinted pane rather than a lighter patch of the same navy. Translucent
+    /// for the reason `sidebarGlassTint` is — paint over glass hides the
+    /// material. The theme, when there is one (Bruno, 2026-09-02), swaps this
+    /// pair from outside; nothing else about the card is colour.
+    static let contentCardTint = [srgb(124, 136, 255, 0.10), srgb(70, 80, 150, 0.06)]
     static let backRowFill = NSColor(white: 1, alpha: 0.03)
     static let fieldFill = NSColor(white: 1, alpha: 0.05)
     static let dashedStroke = NSColor(white: 1, alpha: 0.16)
@@ -1093,23 +1100,28 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     }
 }
 
-/// The blue the review panel's glass wears (the sidebar's too, until
-/// 2026-09-02). Its backing layer *is* the gradient, so the wash resizes with
-/// the sheet and there is no sublayer frame for anyone to keep in step.
+/// The wash a glass sheet wears: the review panel's blue (the sidebar's too,
+/// until 2026-09-02) by default, the content card's own indigo by
+/// `contentCardTint`. Its backing layer *is* the gradient, so the wash resizes
+/// with the sheet and there is no sublayer frame for anyone to keep in step.
 final class ShellGlassTintView: NSView {
+    /// Top stop first.
+    let colors: [NSColor]
+
+    init(colors: [NSColor] = ShellPalette.sidebarGlassTint) {
+        self.colors = colors
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
     override func makeBackingLayer() -> CALayer {
         let layer = CAGradientLayer()
-        layer.colors = ShellPalette.sidebarGlassTint.map(\.cgColor)
+        layer.colors = colors.map(\.cgColor)
         // (0.5, 1) is the top of a layer's y-up unit space — the direction
         // `NSGradient`'s -90° gave the opaque gradient this replaces.
         layer.startPoint = CGPoint(x: 0.5, y: 1)
         layer.endPoint = CGPoint(x: 0.5, y: 0)
         return layer
-    }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
     }
 
     @available(*, unavailable)
@@ -1135,6 +1147,16 @@ final class ContentCardView: NSView {
     static let inset: CGFloat = 12
     static let cornerRadius: CGFloat = 14
 
+    /// The card is tinted Liquid Glass (Bruno, 2026-09-02): a sheet under
+    /// every page, wearing `ShellPalette.contentCardTint` — the same
+    /// glass-plus-wash the review panel and the sidebar's cards are built
+    /// from, so the window is one material. Below macOS 26 there is no glass
+    /// to ask for: the wash sits on the flat `contentCardFill` instead, with
+    /// the hairline the glass rim would otherwise draw. Sized in `layout`
+    /// for the reason `ReviewPanelView` gives.
+    private(set) var glassHost: NSView?
+    let glassTint = ShellGlassTintView(colors: ShellPalette.contentCardTint)
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
@@ -1143,13 +1165,25 @@ final class ContentCardView: NSView {
         layer.cornerRadius = Self.cornerRadius
         layer.cornerCurve = .continuous
         layer.masksToBounds = true
-        layer.backgroundColor = ShellPalette.contentCardFill.cgColor
-        layer.borderWidth = 1
-        layer.borderColor = ShellPalette.cardStroke.cgColor
+        if let glass = WorkspaceGlass.sheet(cornerRadius: Self.cornerRadius, content: glassTint) {
+            glassHost = glass
+            addSubview(glass)
+        } else {
+            layer.backgroundColor = ShellPalette.contentCardFill.cgColor
+            layer.borderWidth = 1
+            layer.borderColor = ShellPalette.cardStroke.cgColor
+            addSubview(glassTint)
+        }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func layout() {
+        super.layout()
+        glassHost?.frame = bounds
+        glassTint.frame = NSRect(origin: .zero, size: bounds.size)
+    }
 }
 
 /// The window's split view, with a seam that paints nothing: the sidebar and

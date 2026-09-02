@@ -5729,56 +5729,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         return tinted
     }
 
-    /// The avatar. Who is signed in, then the two places the account is
-    /// managed from, then the one half of the sign-in/log-out pair that can
-    /// actually be taken — the same rule the spotlight's account rows keep.
+    /// The avatar. Who is signed in, the plan they are on and the way up
+    /// from it, then the door to the account (`AccountMenuView`). No "Log
+    /// out": that is behind Manage account, where Settings › Accounts keeps
+    /// it — not something anyone does every day (Bruno, 2026-09-02). Signed
+    /// out, the plan row goes and "Sign in" leads.
     @objc func showAccountMenu(_ sender: Any?) {
         presentAccountMenu()
     }
 
     @discardableResult
-    func presentAccountMenu() -> HomeDropdownView {
+    func presentAccountMenu() -> AccountMenuView {
         let email = accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let signedIn = settingsView.accountSignedIn
-        var identity: [HomeDropdown.Row] = []
-        if let email, !email.isEmpty {
-            identity.append(
-                HomeDropdown.Row(
-                    icon: HomeDropdown.symbol("envelope"),
-                    title: email,
-                    isEnabled: false
-                ) {}
+        let menu = HomeDropdown.present(from: titleBar.accountButton) { dismiss in
+            AccountMenuView(
+                name: accountName,
+                email: email.flatMap { $0.isEmpty ? nil : $0 },
+                picture: avatarCache[accountPictureURL],
+                signedIn: settingsView.accountSignedIn,
+                dismiss: dismiss
             )
         }
-        let sections: [HomeDropdown.Section] = [
-            HomeDropdown.Section(header: accountName ?? "Not signed in", rows: identity),
-            HomeDropdown.Section(rows: [
-                HomeDropdown.Row(
-                    icon: HomeDropdown.symbol("person.crop.circle"),
-                    title: "Manage account"
-                ) { [weak self] in self?.showSettings(section: .accounts) },
-                HomeDropdown.Row(
-                    icon: HomeDropdown.symbol("gearshape"),
-                    title: "Settings"
-                ) { [weak self] in self?.applyDestination(.settings) },
-            ]),
-            HomeDropdown.Section(rows: [
-                signedIn
-                    ? HomeDropdown.Row(
-                        icon: HomeDropdown.symbol("rectangle.portrait.and.arrow.right"),
-                        title: "Log out"
-                    ) { [weak self] in self?.logOutOfAccount() }
-                    : HomeDropdown.Row(
-                        icon: HomeDropdown.symbol("person.crop.circle.badge.plus"),
-                        title: "Sign in"
-                    ) { [weak self] in self?.signInToAccount() },
-            ]),
-        ]
-        return HomeDropdown.show(
-            sections,
-            searchPlaceholder: "Search…",
-            from: titleBar.accountButton
-        )
+        menu.onUpgrade = { NSWorkspace.shared.open(AccountMenuView.upgradeURL) }
+        menu.onManageAccount = { [weak self] in self?.showSettings(section: .accounts) }
+        menu.onSignIn = { [weak self] in self?.signInToAccount() }
+        return menu
     }
 
     /// "Sign in…" on the Accounts section, and the spotlight's row for it:
