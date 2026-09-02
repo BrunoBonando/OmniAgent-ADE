@@ -20,17 +20,22 @@ final class FrameCodecTests: XCTestCase {
     }
 
     func testMalformedHeadersAreRejectedBeforePayloadAllocation() throws {
+        // Written against the constant rather than a literal: the wire version
+        // moves (1 -> 2 with environment sharing), and a test that hard-codes
+        // "2 is unsupported" quietly asserts the opposite of the truth the day
+        // 2 ships.
+        let unsupported = SessionFrame.protocolVersion &+ 1
         var unsupportedVersion = Data(repeating: 0, count: 16)
-        unsupportedVersion[4] = 2
+        unsupportedVersion[4] = unsupported
         unsupportedVersion[5] = MessageKind.hello.rawValue
         var decoder = FrameDecoder()
         XCTAssertThrowsError(try decoder.append(unsupportedVersion)) {
-            XCTAssertEqual($0 as? SessionProtocolError, .unsupportedVersion(2))
+            XCTAssertEqual($0 as? SessionProtocolError, .unsupportedVersion(unsupported))
         }
 
         var oversized = Data(repeating: 0, count: 16)
         oversized.replaceSubrange(0..<4, with: UInt32(1_048_577).bigEndianBytes)
-        oversized[4] = 1
+        oversized[4] = SessionFrame.protocolVersion
         oversized[5] = MessageKind.output.rawValue
         decoder = FrameDecoder()
         XCTAssertThrowsError(try decoder.append(oversized)) {

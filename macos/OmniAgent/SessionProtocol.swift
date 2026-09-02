@@ -64,6 +64,23 @@ enum MessageKind: UInt8 {
     /// Kicks one remote viewer and blocks it until Remote Control is turned
     /// on again (phase 2 §5). Local-only. Mirrors `DisconnectViewer`.
     case disconnectViewer = 0x1b
+    /// Publishes the host's own state — the gauges, the Claude usage limits
+    /// and engine availability the app computes in-process (2026-09-01
+    /// remote environment sharing spec §4, Task 22). The payload is opaque
+    /// JSON the daemon stores and forwards to the lease holder without ever
+    /// parsing it. Local-only, like `listViewers`/`disconnectViewer`: it is
+    /// in `authorize_remote`'s deny arm, so a remote client's own attempt is
+    /// refused. Mirrors
+    /// `omniagent_pty_daemon::protocol::MessageKind::PublishHostState`.
+    case publishHostState = 0x1c
+    /// Lists one directory on the connection's own machine — names and
+    /// `is_dir` only, no contents (Task 9, 2026-09-01 remote environment
+    /// sharing spec §4). Deliberately in `authorize_remote`'s allow arm,
+    /// unlike its two siblings above: this is what lets "Add local
+    /// folder…" browse the HOST's disk while driving (Task 28) rather than
+    /// this Mac's own, which is the one thing `NSOpenPanel` cannot do.
+    /// Mirrors `omniagent_pty_daemon::protocol::MessageKind::ListDirectory`.
+    case listDirectory = 0x1d
     case helloAck = 0x81
     case sessionList = 0x82
     case sessionCreated = 0x83
@@ -75,16 +92,28 @@ enum MessageKind: UInt8 {
     case response = 0x89
     case resyncRequired = 0x8a
     case error = 0x8b
-    /// The session's current grid, `{id, cols, rows}` (phase 2 §1 —
-    /// appended, never renumbering an existing kind). Pushed on `Attach`,
-    /// just before the snapshot, and again on every accepted resize; a local
-    /// client ignores it, a remote viewer re-pins its scaled render to it.
-    /// Mirrors `omniagent_pty_daemon::protocol::MessageKind::SessionResized`.
-    case sessionResized = 0x8c
+    // 0x8c was `sessionResized`, deleted in the 2026-09-01 remote
+    // environment sharing spec §5/§1: under exclusive takeover the viewer
+    // owns the grid and sends `Resize` itself, so nobody needs telling the
+    // size any more. Mirrors the daemon's own retired byte
+    // (`omniagent_pty_daemon::protocol::MessageKind`, `protocol.rs`).
     /// The presence roster push, `{"viewers":[…]}` (phase 2 §5). Sent to
     /// local connections only — a viewer never learns about other viewers.
     /// Mirrors `RemoteViewers`.
     case remoteViewers = 0x8d
+    /// The host's own state — `publishHostState`'s opaque JSON payload,
+    /// forwarded byte-for-byte (spec §4, Task 22). Pushed to the lease
+    /// holder only, on attach and again on every publish; the app's own
+    /// (local) connection never receives its own publishes echoed back to
+    /// it, which is why nothing in this app decodes this kind today — that
+    /// is the *viewer* side, a later task. Mirrors
+    /// `omniagent_pty_daemon::protocol::MessageKind::HostState`.
+    case hostState = 0x8e
+    /// One batch of daemon-witnessed activity rows,
+    /// `{"entries":[{"ts","kind","summary","detail"}]}` (phase 3 spec §8 —
+    /// Task 19). Sent to local connections only — a remote viewer must never
+    /// learn what the log says about it. Mirrors `RemoteActivity`.
+    case remoteActivity = 0x8f
 }
 
 enum SessionProtocolError: Error, Equatable {
@@ -98,7 +127,12 @@ enum SessionProtocolError: Error, Equatable {
 }
 
 struct SessionFrame: Equatable {
-    static let protocolVersion: UInt8 = 1
+    /// The wire version, matching `PROTOCOL_VERSION` in the daemon's
+    /// `protocol.rs` — **2** since environment sharing. The two ship in one
+    /// bundle, so the app and its own daemon never disagree; what the bump is
+    /// for is the *other* Mac, which the daemon refuses at `Hello` with
+    /// "update OmniAgent on ‹machine›" rather than by dropping the stream.
+    static let protocolVersion: UInt8 = 2
     static let headerLength = 16
     static let maximumPayloadLength = 1_048_576
 

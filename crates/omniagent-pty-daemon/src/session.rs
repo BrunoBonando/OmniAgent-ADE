@@ -279,14 +279,6 @@ pub enum SessionEvent {
         status: SessionStatus,
         engine: String,
     },
-    /// The grid changed (phase 2 §1). Broadcast like `Status`: subscribers
-    /// only, never recorded in `history`, since it describes the session as
-    /// it is now rather than a byte of its output to replay.
-    Resized {
-        sequence: u64,
-        cols: u16,
-        rows: u16,
-    },
     Exited {
         sequence: u64,
         exit_code: Option<u32>,
@@ -299,7 +291,6 @@ impl SessionEvent {
             Self::Output { sequence, .. }
             | Self::ResyncRequired { sequence }
             | Self::Status { sequence, .. }
-            | Self::Resized { sequence, .. }
             | Self::Exited { sequence, .. } => *sequence,
         }
     }
@@ -481,9 +472,7 @@ impl ManagedSession {
     /// stamp an `AttachState::Snapshot` carries.
     ///
     /// Every server push stamps `request_or_sequence` with a sequence; only a
-    /// reply stamps it with a request id. `SessionResized` is a push on both
-    /// of its routes (attach time and every accepted resize), so both must
-    /// read this rather than one of them borrowing the attach's request id.
+    /// reply stamps it with a request id.
     pub fn sequence(&self) -> u64 {
         self.terminal
             .lock()
@@ -513,25 +502,23 @@ impl ManagedSession {
                 pixel_height,
             })
             .context("resize PTY")?;
-        let sequence = {
+        {
             let mut terminal = self
                 .terminal
                 .lock()
                 .map_err(|e| anyhow!("terminal lock poisoned: {e}"))?;
             terminal.parser.set_size(rows, cols);
-            terminal.sequence
-        };
+        }
         *self
             .size
             .lock()
             .map_err(|e| anyhow!("session size lock poisoned: {e}"))? = (cols, rows);
-        // Told, not asked: attached clients re-pin to the new grid the way
-        // they do for a status change.
-        self.broadcast(SessionEvent::Resized {
-            sequence,
-            cols,
-            rows,
-        });
+        // Nothing is broadcast: whoever drives owns the grid (2026-09-01
+        // remote environment sharing spec §5), and the driver is the one
+        // that called this in the first place. The old `SessionResized`
+        // push told *every* attached client to re-pin to a size that used
+        // to be the host's alone to set; under exclusive takeover there is
+        // exactly one driver and it already knows the size it just sent.
         Ok(())
     }
 
@@ -883,7 +870,35 @@ impl SessionRegistry {
         Self::default()
     }
 
+    /// Every existing caller — every test in this crate included. Resolves
+    /// a bare `command[0]` against this machine's own inherited `PATH` and
+    /// fixed lookup list only (`resolve_engine_binary`'s doc), with no
+    /// login-shell `PATH` to check nvm/asdf install locations against. The
+    /// one production caller that has one to offer is `server.rs`'s
+    /// `CreateSession` dispatch, which calls
+    /// [`Self::create_session_with_search_path`] instead.
     pub fn create_session(&self, request: CreateSession) -> Result<Arc<ManagedSession>> {
+        self.create_session_with_search_path(request, None)
+    }
+
+    /// Fix round 1 (2026-09-01 remote environment sharing spec §4/§6): same
+    /// as [`Self::create_session`], but `host_search_path` — this
+    /// machine's own login-shell `PATH`, the settings row
+    /// `engine_search_path` written by the app after
+    /// `EngineLauncher.loginShellPath()` resolves it — is available to
+    /// `resolve_engine_binary` for a bare `command[0]`. `HostState`
+    /// reports engine availability from that exact same login-shell `PATH`
+    /// (`EngineLauncher.searchPath`); resolving a launch against anything
+    /// narrower would let the two disagree again; `host_search_path` is
+    /// **never** taken from the wire request itself (`CreateSession` has no
+    /// such field, deliberately — a client-supplied search path is the
+    /// exact bug this exists to close, moved rather than fixed) — it is
+    /// read from this daemon's own settings store by the caller.
+    pub fn create_session_with_search_path(
+        &self,
+        request: CreateSession,
+        host_search_path: Option<&str>,
+    ) -> Result<Arc<ManagedSession>> {
         {
             let mut state = self
                 .state
@@ -902,7 +917,7 @@ impl SessionRegistry {
             }
         }
 
-        let spawned = spawn_session(&request);
+        let spawned = spawn_session(&request, host_search_path);
         let (session, mut reader, mut transcript) = match spawned {
             Ok(spawned) => spawned,
             Err(error) => {
@@ -1091,7 +1106,186 @@ fn strip_inherited_agent_identity(command: &mut CommandBuilder) {
     }
 }
 
-fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
+/// Resolves a *bare* engine name (`"claude"`, no `/`) to an absolute path on
+/// **this** machine — the daemon's own host — rather than trusting whatever
+/// `PATH` happened to arrive in `request.env`.
+///
+/// The only caller that ever sends a bare name is a remote viewer driving
+/// this Mac (2026-09-01 remote environment sharing spec §4/§6, the Task 28
+/// carried gap): a local launch always resolves to an absolute path before
+/// it reaches the daemon at all (`EngineLauncher.resolveBinary`, the Swift
+/// side), so `spawn_session` never sees a bare name from this machine's own
+/// app. A viewer's own `PATH` names directories on *its* disk, not this
+/// one — sending it here and letting `portable_pty` search it the ordinary
+/// way would just move the "wrong machine's facts" bug from argv[0] to the
+/// search path instead of fixing it, and would silently "work" only by
+/// coincidence when both Macs happen to use identical install layouts. So
+/// this Mac resolves the name itself, using only what actually exists on
+/// its own disk.
+///
+/// **`host_search_path` (fix round 1).** The fixed list below has no entry
+/// that can name an `nvm`/`asdf` install — those live under a *versioned*
+/// subdirectory (`~/.nvm/versions/node/v22.4.0/bin`, `~/.asdf/shims`) no
+/// fixed path can spell, and are exactly where `npm install -g` puts
+/// `claude`/`codex`/`copilot` most often. Checking only the fixed list
+/// while `HostState` reports availability from `EngineLauncher.searchPath`
+/// — the app's own login-shell `PATH`, which *does* reach those —
+/// reintroduced this fix's own bug one layer down: an honestly-reported
+/// "available" that then fails to launch. So `host_search_path` — that
+/// exact same login-shell `PATH`, published by the app to the
+/// `engine_search_path` settings row and threaded in by
+/// `SessionRegistry::create_session_with_search_path` — is checked
+/// **first**, ahead of the daemon's own inherited `PATH` and the fixed
+/// list, both kept as the fallback for whenever the app has not published
+/// the row yet (a very first launch) or a caller (every test in this
+/// crate) has none to offer.
+///
+/// **Why not spawn a login shell here instead.** `EngineLauncher
+/// .loginShellPath()` on the Swift side runs `$SHELL -ilc 'printf %s
+/// "$PATH"'` once per app launch and caches the result — fine for a
+/// foreground app the user is watching start up. This function runs
+/// synchronously inside a session-create RPC; a slow or hung login shell
+/// (an rc chain that touches the network, or — with no controlling
+/// terminal under launchd — one that never returns at all, exactly the
+/// failure `loginShellPath()`'s own timeout exists to survive) would stall
+/// every terminal a viewer tries to open on this machine. Reading a
+/// settings row the app already resolved has no process to hang; this
+/// function still never spawns one itself.
+///
+/// **Why the daemon's own inherited `PATH` almost never has these either.**
+/// It runs as a `LaunchAgent` (`macos/embed-daemon.sh`'s production plist),
+/// which ships with **no `EnvironmentVariables` key at all** — deliberately,
+/// so the daemon computes its data paths from its own runtime `$HOME`
+/// rather than one baked into the plist at build time (see that script's
+/// comment). launchd's default environment for a plist with no
+/// `EnvironmentVariables` is `/usr/bin:/bin:/usr/sbin:/sbin` plus session
+/// variables such as `HOME` — none of the places Homebrew, `cargo`,
+/// `nvm`/`bun`, or `pip --user` actually install a CLI. Checked anyway,
+/// second, because it costs nothing and covers an unusual setup (a
+/// hand-edited plist, a future build that does set `PATH`).
+fn resolve_engine_binary(name: &str, host_search_path: Option<&str>) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = host_search_path {
+        candidates.extend(std::env::split_paths(path));
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        candidates.extend(std::env::split_paths(&path_var));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(home);
+        candidates.push(home.join(".local/bin"));
+        candidates.push(home.join(".bun/bin"));
+        candidates.push(home.join(".cargo/bin"));
+    }
+    for fixed in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        candidates.push(PathBuf::from(fixed));
+    }
+
+    candidates
+        .into_iter()
+        // An empty `PATH` entry (a leading/trailing/doubled `:`) means "the
+        // current directory" — the classic `.`-in-`PATH` pitfall — and
+        // `dir.join(name)` on an empty `PathBuf` would silently produce
+        // that relative path rather than an absolute one, resolving
+        // against whatever the daemon's own working directory happens to
+        // be (Task 28 fix round 2, item 3). Only a local writer can put an
+        // empty entry in `host_search_path` (the row is protected), so
+        // this is not an escalation path, but it is skipped regardless.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| {
+            let candidate = dir.join(name);
+            is_executable_file(&candidate).then_some(candidate)
+        })
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// A unit test, not an integration one, and deliberately so: an
+/// end-to-end `CreateSession` round trip cannot isolate this fix.
+/// `resolve_engine_binary`'s own (pre-fix) match on an empty `PATH` entry
+/// returns nothing more than the bare name back
+/// (`PathBuf::from("").join(name) == PathBuf::from(name)`), which
+/// `portable_pty::CommandBuilder` then re-resolves *itself* — against its
+/// own, decoupled notion of the child's cwd/PATH — so the overall spawn
+/// fails at that later, unrelated layer regardless of whether this
+/// function's own filter is present. Calling the function directly is what
+/// actually proves it (Task 28 fix round 2, item 3).
+#[cfg(test)]
+mod resolve_engine_binary_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Serializes against the other test in this module — both mutate the
+    /// real process working directory, which every thread in the binary
+    /// shares. Nothing outside this module does; every other test in this
+    /// crate resolves purely absolute paths.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// An empty `PATH` entry (a leading/trailing/doubled `:`) means "the
+    /// current directory" — the classic `.`-in-`PATH` pitfall. Proven by
+    /// placing the fake binary exactly where a naive (un-filtered) empty
+    /// entry would resolve it — the process's own working directory — and
+    /// changing into it: without the filter this resolves for the wrong
+    /// reason; with it, the empty entry is skipped, `/definitely/not/a
+    /// /real/dir` does not exist, and nothing else offers this made-up
+    /// name, so resolution correctly fails.
+    #[test]
+    fn an_empty_path_entry_is_not_treated_as_the_current_directory() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let name = "totally-fake-cwd-only-engine";
+        let path = temp.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+        // A leading empty entry — the classic `:/real/dir` typo.
+        let result = resolve_engine_binary(name, Some(":/definitely/not/a/real/dir"));
+        std::env::set_current_dir(original_cwd).unwrap();
+
+        assert!(
+            result.is_none(),
+            "an empty PATH entry must not resolve relative to the process's own cwd: {result:?}"
+        );
+    }
+
+    /// The filter's own existence is not what stands between a real,
+    /// *non-empty* entry and a match — proven by a leading empty entry
+    /// immediately followed by the directory that actually holds the
+    /// binary.
+    #[test]
+    fn a_real_entry_after_an_empty_one_still_resolves() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let name = "totally-fake-real-entry-engine";
+        let path = temp.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let search_path = format!(":{}", temp.path().display());
+        let result = resolve_engine_binary(name, Some(&search_path));
+
+        assert_eq!(result, Some(path));
+    }
+}
+
+fn spawn_session(
+    request: &CreateSession,
+    host_search_path: Option<&str>,
+) -> Result<SpawnedSession> {
     let engine = infer_engine(&request.command);
     let pair = NativePtySystem::default()
         .openpty(PtySize {
@@ -1102,7 +1296,20 @@ fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
         })
         .context("open PTY")?;
     let mut command = if let Some(program) = request.command.first() {
-        let mut command = CommandBuilder::new(program);
+        // An absolute path is a local launch's already-resolved binary —
+        // used exactly as given, unchanged from before this function
+        // existed. A bare name only ever arrives from a remote viewer's
+        // `CreateSession` (see `resolve_engine_binary`'s doc), and is
+        // resolved against *this* machine's own disk before anything is
+        // spawned.
+        let resolved = if program.starts_with('/') {
+            program.clone()
+        } else {
+            resolve_engine_binary(program, host_search_path)
+                .map(|path| path.to_string_lossy().into_owned())
+                .ok_or_else(|| anyhow!("{program} is not installed on this Mac"))?
+        };
+        let mut command = CommandBuilder::new(&resolved);
         command.args(request.command.iter().skip(1));
         command
     } else {
@@ -1193,13 +1400,17 @@ mod status_tests {
 
     #[test]
     fn an_approval_prompt_is_recognised() {
-        assert!(contains_attention_marker("Do you want to create notes.txt?"));
+        assert!(contains_attention_marker(
+            "Do you want to create notes.txt?"
+        ));
         assert!(contains_attention_marker("Would you like to continue?"));
         // The shared selection-dialog footer: AskUserQuestion, trust prompt.
         assert!(contains_attention_marker(
             "Enter to select · ↑/↓ to navigate · Esc to cancel"
         ));
-        assert!(contains_attention_marker("Enter to confirm · Esc to cancel"));
+        assert!(contains_attention_marker(
+            "Enter to confirm · Esc to cancel"
+        ));
         assert!(!contains_attention_marker("Reading src/main.rs"));
         // The busy-state hint is lowercase and must not read as blocked.
         assert!(!contains_attention_marker("esc to interrupt"));
@@ -1228,16 +1439,22 @@ mod status_tests {
     /// The finished line is the one that used to be indistinguishable.
     #[test]
     fn a_working_footer_is_recognised_and_a_finished_one_is_not() {
-        assert!(contains_working_marker("✽ Brewing… (4m 59s · ↓ 17.2k tokens)"));
+        assert!(contains_working_marker(
+            "✽ Brewing… (4m 59s · ↓ 17.2k tokens)"
+        ));
         assert!(contains_working_marker(
             "✶ Beboppin'… (2m 28s · ↓ 7.4k tokens · thought for 1s)"
         ));
         assert!(contains_working_marker("  ✻ Recombobulating… (5s)"));
         assert!(!contains_working_marker("✻ Baked for 6m 32s"));
-        assert!(!contains_working_marker("⏵⏵ auto mode on (shift+tab to cycle)"));
+        assert!(!contains_working_marker(
+            "⏵⏵ auto mode on (shift+tab to cycle)"
+        ));
         // A truncated command line ends in an ellipsis too, but does not open
         // with a spinner.
-        assert!(!contains_working_marker("  echo \"=== LOG ===\"; git log --oneli…"));
+        assert!(!contains_working_marker(
+            "  echo \"=== LOG ===\"; git log --oneli…"
+        ));
     }
 
     #[test]

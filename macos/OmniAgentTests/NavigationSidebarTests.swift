@@ -258,14 +258,92 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertLessThanOrEqual(memory ?? 0, 1)
     }
 
+    // MARK: - HostMetricsSource cadence (fix round 1, IMPORTANT 1)
+    //
+    // `.shared` is one singleton for the whole test process — `resetForTesting()`
+    // after each of these, so a leaked observer from one test cannot skew the
+    // "tightest requested interval" another test asserts on. Assertions read
+    // `currentInterval` directly rather than waiting out real timer ticks:
+    // deterministic, and exactly what production code itself consults.
+
+    override func tearDown() {
+        HostMetricsSource.shared.resetForTesting()
+        super.tearDown()
+    }
+
+    /// Nobody watching, so no timer at all — the base case every other
+    /// cadence test builds on.
+    func testNoObserversMeansNoCadence() {
+        XCTAssertNil(HostMetricsSource.shared.currentInterval)
+    }
+
+    /// The sidebar's dial alone gets its own two-second cadence — unchanged
+    /// from before `HostStatePublisher` existed.
+    func testOneObserverGetsExactlyItsOwnInterval() {
+        let owner = NSObject()
+        HostMetricsSource.shared.addObserver(owner, interval: 2) { _ in }
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 2)
+    }
+
+    /// A second, tighter observer joining — the publisher taking the lease
+    /// while the sidebar is already visible — tightens the shared cadence to
+    /// the minimum of the two, not to either one's own idea of it.
+    func testASecondTighterObserverTightensTheSharedCadence() {
+        let sidebar = NSObject()
+        let publisher = NSObject()
+        HostMetricsSource.shared.addObserver(sidebar, interval: 2) { _ in }
+        HostMetricsSource.shared.addObserver(publisher, interval: 1) { _ in }
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 1)
+    }
+
+    /// The finding itself, made explicit: the tighter observer leaving must
+    /// relax the cadence back to what the remaining one needs — not leave it
+    /// pinned at 1 s for a sidebar that only ever asked for 2.
+    func testTheTighterObserverLeavingRelaxesTheSharedCadenceBack() {
+        let sidebar = NSObject()
+        let publisher = NSObject()
+        HostMetricsSource.shared.addObserver(sidebar, interval: 2) { _ in }
+        HostMetricsSource.shared.addObserver(publisher, interval: 1) { _ in }
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 1)
+
+        HostMetricsSource.shared.removeObserver(publisher)
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 2)
+    }
+
+    /// The last observer leaving stops the timer entirely, not merely
+    /// relaxes it — the machine-with-nobody-watching case.
+    func testTheLastObserverLeavingStopsTheCadenceEntirely() {
+        let owner = NSObject()
+        HostMetricsSource.shared.addObserver(owner, interval: 2) { _ in }
+        XCTAssertNotNil(HostMetricsSource.shared.currentInterval)
+
+        HostMetricsSource.shared.removeObserver(owner)
+        XCTAssertNil(HostMetricsSource.shared.currentInterval)
+    }
+
+    /// A third observer joining at an interval nobody's cadence depends on
+    /// (looser than the current tightest) must not touch the running
+    /// cadence at all.
+    func testALooserObserverJoiningDoesNotRelaxAnAlreadyTighterCadence() {
+        let publisher = NSObject()
+        let onlooker = NSObject()
+        HostMetricsSource.shared.addObserver(publisher, interval: 1) { _ in }
+        HostMetricsSource.shared.addObserver(onlooker, interval: 5) { _ in }
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 1)
+    }
+
     // MARK: - Content routing (controller)
 
     /// Home shows its real screen, To Do List still lands on the "Under
     /// development" placeholder, and the pane workspace hides and comes back
     /// with the Desk.
-    /// Settings is its own screen: the gear/⌘, land on it, it opens on the
-    /// section it was last on, and every section still says "Under
-    /// development" — the design's eight, in its order.
+    /// Settings is its own screen: the gear/⌘, land on it, and it opens on
+    /// the section it was last on — the design's eight plus Remote
+    /// (2026-09-01 remote environment sharing spec), in its order. Three of
+    /// them have a real screen now (General's update block, Accounts, and
+    /// Remote's sharing switch, machine identity and blocked list); the rest
+    /// still say "Under development", which is what this checks on General
+    /// before the update block hides that line.
     func testSettingsIsItsOwnScreenWithItsOwnColumn() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -284,7 +362,10 @@ final class NavigationSidebarTests: XCTestCase {
         let panel = controller.settingsPanel
         XCTAssertEqual(
             panel.rows.map(\.titleText),
-            ["General", "Accounts", "Sessions", "Themes", "Accessibility", "Customize", "Model providers", "Experimental"]
+            [
+                "General", "Accounts", "Remote", "Sessions", "Themes", "Accessibility", "Customize",
+                "Model providers", "Experimental",
+            ]
         )
         XCTAssertEqual(settings.section, .general)
         XCTAssertEqual(settings.titleField.stringValue, "General")
@@ -312,9 +393,10 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(settings.section, .experimental, "⌘, on the page changes nothing")
     }
 
-    /// Accounts and General are the two sections with a screen — Accounts
-    /// names who is signed in, General carries the self-update block. The
-    /// rest still keep the "Under development" line.
+    /// Accounts, General and Remote are the sections with a screen —
+    /// Accounts names who is signed in, General carries the self-update
+    /// block, Remote the sharing switch, this machine's identity and the
+    /// blocked list. The rest still keep the "Under development" line.
     func testTheAccountsSectionNamesTheAccountAndOffersOneButton() throws {
         let controller = makeController()
         defer { controller.close() }
@@ -812,151 +894,6 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertEqual(sidebar.footerRows.frame.minY, 10, accuracy: 0.5)
     }
 
-    // MARK: - Remote machines
-
-    /// Finding 1 of Bruno's two-Mac session: the remote sidebar looked
-    /// nothing like the host's, and three panes of one session showed up as
-    /// "Session 1" three times. A remote machine's workspace is now drawn by
-    /// the *same* row type as a local one, from the same projection the host
-    /// writes — so one session with two panes is one row with two dots, here
-    /// as there (the phase-2 spec's §2 "Rendering").
-    func testARemoteWorkspaceRendersLikeALocalOne() throws {
-        // A fold left behind by an earlier run would hide the session rows
-        // this asserts on.
-        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
-        let view = makeSidebar()
-        let payload = RemoteControlProjection.build(
-            panes: [pane("s1", group: "g1", project: "/a", groupLabel: "Session 1"),
-                    pane("s2", group: "g1", project: "/a", groupLabel: "Session 1")],
-            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
-        view.reloadWorkspaces(
-            workspaces: [],
-            panes: [],
-            focusedPaneID: nil,
-            statuses: [:],
-            projectLabels: [:],
-            remoteMachines: [
-                RemoteMachineTreeEntry(deviceID: "d1", name: "Studio",
-                                       workspaces: RemoteControlProjection.treeEntries(payload))
-            ]
-        )
-
-        let workspaceRows = view.descendants(ofType: WorkspaceRowView.self)
-        XCTAssertEqual(workspaceRows.map(\.titleText), ["Alpha"],
-                       "a remote workspace uses the same row type as a local one")
-        let sessionRows = view.descendants(ofType: SessionRowView.self)
-        XCTAssertEqual(sessionRows.count, 1, "two panes of one session are one row, not two")
-        XCTAssertEqual(sessionRows[0].paneDotCount, 2)
-    }
-
-    /// A remote session row counts every pane — the dots have to match the
-    /// host's — but opens a **terminal**: only a terminal has a daemon
-    /// session behind it, and an editor's id handed to `Attach` names nothing
-    /// the daemon knows, so the pane would open empty and never connect (the
-    /// phase-2 spec's §2). The editor is ordered first here, which is exactly
-    /// the case an "open the first pane" rule gets wrong.
-    func testARemoteSessionRowOpensItsTerminalNotItsEditor() throws {
-        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
-        let view = makeSidebar()
-        var opened: [String] = []
-        view.onOpenRemoteSession = { _, sessionID, _ in opened.append(sessionID) }
-        let payload = RemoteControlProjection.build(
-            panes: [pane("e1", group: "g1", project: "/a", groupLabel: "Session 1", kind: .editor),
-                    pane("t1", group: "g1", project: "/a", groupLabel: "Session 1")],
-            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
-        view.reloadWorkspaces(
-            workspaces: [],
-            panes: [],
-            focusedPaneID: nil,
-            statuses: [:],
-            projectLabels: [:],
-            remoteMachines: [
-                RemoteMachineTreeEntry(deviceID: "d1", name: "Studio",
-                                       workspaces: RemoteControlProjection.treeEntries(
-                                           payload, idPrefix: "remote:d1"))
-            ]
-        )
-
-        let sessionRow = try XCTUnwrap(view.descendants(ofType: SessionRowView.self).first)
-        XCTAssertEqual(sessionRow.paneDotCount, 2, "both panes still count — the host shows two dots")
-        sessionRow.onPress?()
-        XCTAssertEqual(opened, ["t1"], "the terminal, not the editor sitting in front of it")
-    }
-
-    /// And a session with nothing but editors in it renders, dots and all,
-    /// with no door: pressing it must not open a pane bound to an id the
-    /// daemon has no session behind.
-    func testARemoteSessionOfEditorsOnlyHasNothingToOpen() throws {
-        UserDefaults.standard.removeObject(forKey: WorkspacesTreeView.collapsedDefaultsKey)
-        let view = makeSidebar()
-        view.onOpenRemoteSession = { _, _, _ in XCTFail("there is nothing here to attach to") }
-        let payload = RemoteControlProjection.build(
-            panes: [pane("e1", group: "g1", project: "/a", groupLabel: "Notes", kind: .editor)],
-            enabledWorkspaceIDs: ["/a"], workspaceLabels: ["/a": "Alpha"], tints: [:])
-        view.reloadWorkspaces(
-            workspaces: [], panes: [], focusedPaneID: nil, statuses: [:], projectLabels: [:],
-            remoteMachines: [
-                RemoteMachineTreeEntry(deviceID: "d1", name: "Studio",
-                                       workspaces: RemoteControlProjection.treeEntries(
-                                           payload, idPrefix: "remote:d1"))
-            ]
-        )
-
-        let sessionRow = try XCTUnwrap(view.descendants(ofType: SessionRowView.self).first)
-        XCTAssertEqual(sessionRow.paneDotCount, 1, "the row is still there, with its dot")
-        sessionRow.onPress?()
-    }
-
-    /// One section per online machine (the remote-session-control spec's §4
-    /// "Viewer side"): a header naming the machine, its projected workspaces
-    /// under the remote glyph, and session rows that hand the click — device,
-    /// session, title — to whoever can open a remote pane.
-    func testRemoteMachinesRenderTheirOwnSectionAndOpenOnClick() throws {
-        let sidebar = makeSidebar()
-        var opened: [String] = []
-        sidebar.onOpenRemoteSession = { deviceID, sessionID, title in
-            opened.append("\(deviceID)/\(sessionID)/\(title)")
-        }
-        sidebar.reloadWorkspaces(
-            workspaces: [BrainProjectSummary(id: "p1", label: "Alpha", path: nil)],
-            panes: [],
-            focusedPaneID: nil,
-            statuses: [:],
-            projectLabels: [:],
-            remoteMachines: [
-                RemoteMachineTreeEntry(deviceID: "d1", name: "Studio", workspaces: [
-                    WorkspaceTreeEntry(id: "remote:d1//a", label: "Beta", sessions: [
-                        SessionGroupNode(
-                            id: "s1", project: "remote:d1", name: "migrate",
-                            label: "migrate", cwd: "", paneIDs: ["s1"], isCurrent: false
-                        )
-                    ])
-                ])
-            ]
-        )
-
-        XCTAssertEqual(sidebar.workspacesTree.renderedRemoteMachineNames, ["Studio"])
-        XCTAssertNotNil(
-            descendants(WorkspacesBucketHeaderView.self, under: sidebar)
-                .first { $0.title == "Studio · remote" },
-            "the machine's section header names the machine and says remote"
-        )
-        let workspaceRow = try XCTUnwrap(
-            descendants(WorkspaceRowView.self, under: sidebar)
-                .first { $0.workspaceID == "remote:d1//a" },
-            "the projected workspace renders under the machine's header"
-        )
-        XCTAssertEqual(workspaceRow.titleText, "Beta")
-        XCTAssertEqual(workspaceRow.mark, .viewing, "and wears the remote glyph, not the globe")
-        XCTAssertFalse(workspaceRow.remoteGlyph.isHidden)
-
-        let sessionRow = try XCTUnwrap(
-            sidebar.workspacesTree.rowView(for: .session("s1")) as? SessionRowView
-        )
-        sessionRow.onPress?()
-        XCTAssertEqual(opened, ["d1/s1/migrate"], "clicking a remote session opens it, not a local select")
-    }
-
     /// The plus menu's remote future comes alive: with the sidebar's seam
     /// wired, Resume remote session… is enabled, wears the remote glyph, and
     /// fires the seam — the controller's side opens the remote-session
@@ -1035,6 +972,74 @@ final class NavigationSidebarTests: XCTestCase {
         let directory = URL(fileURLWithPath: dir, isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? png.write(to: directory.appendingPathComponent("\(name).png"))
+    }
+
+    // MARK: - Settings › Remote (2026-09-01 remote environment sharing spec)
+
+    /// The blocked list (§7): one row per id the daemon refuses, each with
+    /// the **Unblock** that is the only way an entry ever leaves that row —
+    /// and a real empty state rather than a section that vanishes.
+    @MainActor
+    func testTheRemoteSectionListsBlockedMachinesAndOffersUnblock() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let settings = controller.settingsView
+
+        controller.showSettings(section: .remote)
+        XCTAssertTrue(settings.subtitleField.isHidden, "Remote has a screen")
+        XCTAssertFalse(settings.shareToggle.isHidden)
+        XCTAssertFalse(settings.blockedHeaderField.isHidden)
+        XCTAssertFalse(settings.blockedEmptyField.isHidden, "an empty state, not an absent section")
+        XCTAssertEqual(settings.blockedEmptyField.stringValue, "No machines are blocked.")
+        XCTAssertTrue(settings.blockedList.isHidden)
+
+        settings.applyBlockedMachines(["v-air", "v-mbp"])
+        XCTAssertTrue(settings.blockedEmptyField.isHidden)
+        XCTAssertFalse(settings.blockedList.isHidden)
+        XCTAssertEqual(settings.blockedList.arrangedSubviews.count, 2)
+
+        var unblocked: [String] = []
+        settings.onUnblock = { unblocked.append($0) }
+        let row = try XCTUnwrap(settings.blockedList.arrangedSubviews.first as? NSStackView)
+        let button = try XCTUnwrap(row.arrangedSubviews.compactMap { $0 as? NSButton }.first)
+        XCTAssertEqual(button.title, "Unblock")
+        button.performClick(nil)
+        XCTAssertEqual(unblocked, ["v-air"], "the row's own id, not whichever row was built last")
+
+        // And nothing of Remote's leaks onto another section.
+        controller.showSettings(section: .themes)
+        XCTAssertTrue(settings.blockedHeaderField.isHidden)
+        XCTAssertTrue(settings.blockedList.isHidden)
+        XCTAssertTrue(settings.blockedEmptyField.isHidden)
+    }
+
+    /// Sharing needs an account to share *with* (carried over, 2026-09-02):
+    /// the daemon refuses every viewer when `auth_account_email` is missing,
+    /// with a message that points nowhere near the cause. So the switch is
+    /// disabled and the copy under it says what to do instead of describing
+    /// a feature that cannot run.
+    @MainActor
+    func testTheSharingSwitchIsDisabledWithCopyWhileSignedOut() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let settings = controller.settingsView
+        controller.showSettings(section: .remote)
+
+        settings.applyRemoteSharing(isSharing: false, canShare: false)
+        XCTAssertFalse(settings.shareToggle.isEnabled)
+        XCTAssertTrue(settings.shareExplanationField.stringValue.contains("Sign in"))
+
+        settings.applyRemoteSharing(isSharing: false, canShare: true)
+        XCTAssertTrue(settings.shareToggle.isEnabled)
+        XCTAssertEqual(settings.shareExplanationField.stringValue, SettingsSurfaceView.shareExplanation)
+
+        // Switching sharing *off* must always be possible, whatever the
+        // account rows say — including for a host whose row went away while
+        // sharing was on.
+        settings.applyRemoteSharing(isSharing: true, canShare: false)
+        XCTAssertTrue(settings.shareToggle.isEnabled)
     }
 
     private func makeController() -> WorkspaceWindowController {
@@ -2070,6 +2075,32 @@ final class NavigationSidebarTests: XCTestCase {
             "higher up the column than CPU/MEM/GPU"
         )
         XCTAssertGreaterThan(sidebar.statsRow.frame.height, 0, "the gauges are still there")
+    }
+
+    // MARK: - Remote live-session card (2026-09-01 remote environment sharing spec §6, Task 25)
+
+    /// The column's order, down: remote session → update → limits — one
+    /// stack of cards, the remote session card uppermost since it is the
+    /// most urgent fact about this window right now.
+    func testTheRemoteSessionCardSitsAboveTheUpdateCardWhichSitsAboveTheLimitsCard() {
+        let sidebar = makeSidebar()
+        sidebar.remoteSessionWidget.apply(RemoteSessionInfo(machineName: "Mac Studio", since: Date()))
+        sidebar.updateWidget.apply(.available(version: "1.8.0"))
+        sidebar.layoutSubtreeIfNeeded()
+        func minY(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: sidebar).minY }
+
+        XCTAssertGreaterThan(minY(sidebar.remoteSessionWidget), minY(sidebar.updateWidget))
+        XCTAssertGreaterThan(minY(sidebar.updateWidget), minY(sidebar.claudeLimits))
+    }
+
+    /// Hidden — and hidden *properly*, dropped from the stack's layout —
+    /// for the entire time nobody is being driven: `SidebarUpdateWidgetView`'s
+    /// own reasoning, pinned here for its neighbour.
+    func testTheRemoteSessionCardIsHiddenUntilASessionIsLive() {
+        let sidebar = makeSidebar()
+        XCTAssertTrue(sidebar.remoteSessionWidget.isHidden)
+        sidebar.remoteSessionWidget.apply(RemoteSessionInfo(machineName: "Mac Studio", since: Date()))
+        XCTAssertFalse(sidebar.remoteSessionWidget.isHidden)
     }
 
     private func makeLimitsCard() -> SidebarClaudeLimitsView {

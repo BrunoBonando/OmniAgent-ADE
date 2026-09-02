@@ -31,6 +31,31 @@ struct BrainProjectSummary: Codable, Equatable {
     let path: String?
 }
 
+/// One `ListDirectory` entry — a name and whether it is a directory, never
+/// more (`omniagent_pty_daemon::protocol::DirectoryEntryPayload`'s doc: "a
+/// boundary, not an oversight" — no size, no mode, no timestamp, and above
+/// all no contents). A file is listed for context; only a directory can be
+/// chosen.
+struct DirectoryEntry: Codable, Equatable {
+    let name: String
+    let isDir: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case isDir = "is_dir"
+    }
+}
+
+/// `ListDirectory`'s reply: one directory's entries — directories-first,
+/// then case-insensitively by name, the daemon's own ordering — and whether
+/// its `LIST_DIRECTORY_MAX_ENTRIES` cap (512) cut the listing off. A caller
+/// must render `truncated`: showing part of a directory as if it were the
+/// whole thing is how a folder picker lies.
+struct DirectoryListing: Codable, Equatable {
+    let entries: [DirectoryEntry]
+    let truncated: Bool
+}
+
 /// The shared node projection `mcp_server::tools`'s `search_brain`/`related`/
 /// `get_context` all reuse: `{id, kind, project, label, path?, summary?}`
 /// (Task 6a — `get_context`'s `recent_decisions`/`memory_notes` entries).
@@ -73,12 +98,51 @@ struct RemoteViewer: Codable, Equatable {
     let sessions: [String]
     /// RFC 3339, when this viewer connected.
     let since: String
+    /// Relay-asserted: the account the viewer's JWT is signed in as
+    /// (`AssertedIdentity`, daemon `connections.rs`; spec §9).
+    let accountEmail: String?
+    /// Relay-asserted: `CF-Connecting-IP`, set by Cloudflare at the edge.
+    let ip: String?
+    /// Relay-asserted: `CF-IPCountry`, same.
+    let country: String?
+    /// The viewer app's user agent as the relay saw it — relayed, but *set
+    /// by the client*, so the takeover panel shows what it carries (app
+    /// version, OS) **unmarked**, beside the self-reported machine name.
+    /// Only `accountEmail`/`ip`/`country` were checked by anybody.
+    let client: String?
+
+    /// The four asserted fields are absent on a row the relay said nothing
+    /// about — and on every row an older daemon sends, which is why they
+    /// decode as `nil` rather than failing the whole roster.
+    init(
+        viewerID: String,
+        machineName: String,
+        sessions: [String],
+        since: String,
+        accountEmail: String? = nil,
+        ip: String? = nil,
+        country: String? = nil,
+        client: String? = nil
+    ) {
+        self.viewerID = viewerID
+        self.machineName = machineName
+        self.sessions = sessions
+        self.since = since
+        self.accountEmail = accountEmail
+        self.ip = ip
+        self.country = country
+        self.client = client
+    }
 
     enum CodingKeys: String, CodingKey {
         case viewerID = "viewer_id"
         case machineName = "machine_name"
         case sessions
         case since
+        case accountEmail = "account_email"
+        case ip
+        case country
+        case client
     }
 }
 
@@ -157,6 +221,21 @@ enum SessionConnectionError: Error, LocalizedError {
     /// a 403 means the host is not registered *yet* and keeps retrying
     /// (`isTokenRefusal`).
     case unauthorized
+    /// A `Hello` the daemon refused — `refusedAtHello`'s own case, carrying
+    /// the machine-readable `code` (Task 14 item 2) alongside the display
+    /// text, rather than folding into `.daemon(String)` and losing it.
+    ///
+    /// `.daemon` stays exactly what it was for every *other* kind of
+    /// failure (an ordinary request the daemon rejected); this case exists
+    /// because one caller — the 2026-09-01 remote environment sharing
+    /// spec's connect ceremony (`RemoteConnectCeremony`, §6) — must *decide
+    /// behaviour* from a refusal ("in use by ‹machine›" resolves on its
+    /// own; "update OmniAgent on ‹machine›" does not) rather than merely
+    /// display it, and `isTerminalRefusal` already reads the same `code` a
+    /// step earlier for exactly that reason. Re-parsing `message` for the
+    /// same answer would be a second, driftable copy of the classification
+    /// this file already owns.
+    case helloRefused(code: String?, message: String)
 
     var errorDescription: String? {
         switch self {
@@ -171,6 +250,8 @@ enum SessionConnectionError: Error, LocalizedError {
         case let .invalidResponse(kind):
             return "Unexpected daemon response: \(kind)."
         case let .daemon(message):
+            return message
+        case let .helloRefused(_, message):
             return message
         }
     }
@@ -200,16 +281,16 @@ final class SessionConnection {
     var onAttention: ((String) -> Void)?
     var onExit: ((SessionExitedEvent) -> Void)?
     var onError: ((Error) -> Void)?
-    /// The host's grid for one session — `(sessionID, cols, rows)` — from a
-    /// `SessionResized` push (phase 2 §1). The daemon sends one on attach,
-    /// just before the snapshot, and again whenever the host resizes. A
-    /// local pane ignores it (its own view drives the size); a remote pane
-    /// pins its terminal to this grid and scales it into the space it has.
-    var onSessionSize: ((String, UInt16, UInt16) -> Void)?
     /// The machines currently watching sessions on this daemon, from a
     /// `RemoteViewers` push (phase 2 §5). Local connections only: the daemon
     /// never tells a viewer about other viewers.
     var onRemoteViewers: (([RemoteViewer]) -> Void)?
+    /// One batch of daemon-witnessed activity rows, from a `RemoteActivity`
+    /// push (Task 19, spec §8). Local connections only, the same reasoning as
+    /// `onRemoteViewers`: a remote viewer must never learn what the log says
+    /// about it. A row this build cannot parse (an unparseable timestamp) is
+    /// dropped rather than crashing the batch it arrived in.
+    var onRemoteActivity: (([RemoteActivityLog.Entry]) -> Void)?
     /// Fires when a **reconnect's automatic reattach** comes back "session
     /// not found" — Task 6c's restart-loss signal. Only the reconnect-time
     /// blind reattach (the `helloAck` handler's loop below) is tracked, not
@@ -218,6 +299,13 @@ final class SessionConnection {
     /// `listSessions` first, so a failure there would be a genuine protocol
     /// anomaly, not "the daemon restarted and forgot this session."
     var onReattachFailed: ((String) -> Void)?
+    /// The host's own state — gauges, Claude usage limits and engine
+    /// availability — from a `HostState` push (2026-09-01 remote environment
+    /// sharing spec §4, Task 26). Pushed to the lease holder only, on attach
+    /// and again on every publish; a local connection never receives one.
+    /// Carries the raw JSON verbatim, exactly as `publishHostState` sent it —
+    /// this connection never parses it, `HostStateModel` does.
+    var onHostState: ((Data) -> Void)?
 
     private struct Attachment {
         var sequence: UInt64?
@@ -274,6 +362,36 @@ final class SessionConnection {
     /// reconnects); read on `ioQueue`, where every mutation happens, so it
     /// can never race the connection's own I/O.
     var pendingReattachCount: Int { ioQueue.sync { pendingReattachSessions.count } }
+
+    /// Whether **anything** is still listening to this connection's pushes.
+    ///
+    /// The observable half of the no-chaining property (2026-09-01 remote
+    /// environment sharing spec §3): while this app drives another Mac, its
+    /// own local connection must have no subscribers left and must not be
+    /// attached, because a machine that is driving is not a machine that can
+    /// be driven. `WorkspaceWindowController.swapConnection` clears every one
+    /// of these on the way out and `ConnectionSwapTests` asserts the result —
+    /// a stale capture somewhere else in the app would show up here as a
+    /// closure that outlived the swap.
+    var hasSubscribers: Bool {
+        onStateChange != nil
+            || onTerminalData != nil
+            || onStatus != nil
+            || onAttention != nil
+            || onExit != nil
+            || onError != nil
+            || onRemoteViewers != nil
+            || onRemoteActivity != nil
+            || onReattachFailed != nil
+            || onHostState != nil
+    }
+
+    /// Whether this connection is attached or trying to be — `connect()` sets
+    /// it, `disconnect()` clears it. Read on `ioQueue`, where it is owned, so
+    /// it cannot race a connect or a close, and ordered *after* the
+    /// `disconnect()` that precedes it because that queue is serial.
+    var wantsConnection: Bool { ioQueue.sync { shouldReconnect } }
+
     private var shouldReconnect = false
     private var reconnectScheduled = false
     /// The delay the *next* remote reconnect waits. Doubles per failed
@@ -527,15 +645,42 @@ final class SessionConnection {
         }
     }
 
-    /// Kicks one viewer: the daemon drops its data WebSocket immediately and
-    /// blocks the viewer id (in its own `remote_control_blocked` settings
-    /// row) until Remote Control is switched on again. Local-only, like
-    /// `listViewers`.
+    /// Kicks one viewer: the daemon drops its data WebSocket immediately.
+    ///
+    /// **Terminate and Block are two different verbs** (2026-09-01 remote
+    /// environment sharing spec §7, daemon Task 14). `block: false`
+    /// terminates — the socket goes and the machine is free to dial straight
+    /// back. `block: true` also appends the viewer id to the daemon's own
+    /// `remote_control_blocked` row, so it is refused at its next `Hello`
+    /// until someone unblocks it in Settings › Remote. The daemon is the only
+    /// writer of that row; the app only ever removes from it
+    /// (`RemoteSharingModel.unblock`).
+    ///
+    /// `block` defaults to `true`, which is what `DisconnectViewer` meant
+    /// before the field existed. Local-only, like `listViewers`.
     func disconnectViewer(
         viewerID: String,
+        block: Bool = true,
         completion: ((Result<Void, Error>) -> Void)? = nil
     ) {
-        sendCodable(kind: .disconnectViewer, value: DisconnectViewerPayload(viewerID: viewerID)) {
+        sendCodable(
+            kind: .disconnectViewer,
+            value: DisconnectViewerPayload(viewerID: viewerID, block: block)
+        ) {
+            self.finishResponse($0, completion: completion)
+        }
+    }
+
+    // MARK: - Host state (spec §4, Task 22)
+
+    /// Publishes this host's own state — `HostStatePublisher.payload()` —
+    /// to whichever remote connection currently holds the lease. `payload`
+    /// is sent **verbatim**, never through `sendCodable`: it is already the
+    /// wire JSON, and re-encoding it here would be a second pass through the
+    /// same promise the daemon already keeps — that it never parses this
+    /// payload. Local-only, like `disconnectViewer`.
+    func publishHostState(_ payload: Data, completion: ((Result<Void, Error>) -> Void)? = nil) {
+        request(kind: .publishHostState, payload: payload) {
             self.finishResponse($0, completion: completion)
         }
     }
@@ -658,6 +803,32 @@ final class SessionConnection {
                     return Result {
                         try self.decoder.decode(RootsAddProjectResponse.self, from: frame.payload).project
                     }
+                }
+            )
+        }
+    }
+
+    /// Lists one directory on **this connection's own machine** — the
+    /// HOST's disk while this is a remote connection driving another Mac,
+    /// never this Mac's own (2026-09-01 remote environment sharing spec §4,
+    /// Task 9/28). Mirrors `list_directory`: names and `is_dir` only, no
+    /// contents, no size, no mode — there is no file-read RPC in this
+    /// system. `RemoteFolderBrowser` is the caller.
+    func listDirectory(
+        path: String,
+        showHidden: Bool = false,
+        completion: @escaping (Result<DirectoryListing, Error>) -> Void
+    ) {
+        sendCodable(
+            kind: .listDirectory,
+            value: ListDirectoryPayload(path: path, showHidden: showHidden)
+        ) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result { try self.decoder.decode(DirectoryListing.self, from: frame.payload) }
                 }
             )
         }
@@ -907,6 +1078,88 @@ final class SessionConnection {
         }
     }
 
+    /// Whether a `Hello` refusal's **code** — never its sentence, with one
+    /// narrow, bounded exception below — is one that dialling again cannot
+    /// fix (Task 14 item 2; fix round 1).
+    ///
+    /// Only `RefusalCode.versionSkew` is. Version skew is a refusal with a
+    /// human in its way: nothing changes until someone updates the other Mac,
+    /// so retrying is a loop with a dead keyboard — phase 1's exact failure,
+    /// which is what the refusal exists to replace.
+    ///
+    /// Every other code clears itself. A lease held elsewhere is transient by
+    /// nature, and it is the refusal a viewer sees when it *re-dials after a
+    /// blip*, because the relay holds two sockets for one machine until the
+    /// dead one is reaped — parking there would turn a refusal that resolves in
+    /// a second into one that needs the user to start over. Blocked is the same
+    /// shape: the host turning sharing off and on lifts it, with nothing for
+    /// this end to do but keep asking on the backoff it already has.
+    ///
+    /// **An unrecognised code defaults to non-terminal, on purpose.** A code
+    /// this build has never heard of is what a daemon ahead of this app sends,
+    /// for some future refusal neither side has written yet — wrongly
+    /// continuing to retry costs one more backoff cycle and self-corrects the
+    /// moment this app updates; wrongly parking strands the connection with no
+    /// cause visible anywhere on this end.
+    ///
+    /// **An absent code is not the same question, and does not get the same
+    /// answer.** No code at all is what a daemon *built before this contract
+    /// existed* sends — for every refusal, version skew included — and that is
+    /// exactly the pairing remote sharing exists for: two Macs updated
+    /// independently, one of them old. Treating an absent code as uniformly
+    /// non-terminal would make a genuinely version-skewed old daemon redial
+    /// forever against a peer that cannot change without a human updating
+    /// it — phase 1's dead-keyboard failure, reintroduced in the one case this
+    /// whole feature targets. So there is a narrow, bounded legacy bridge for
+    /// this one case only: **no code, and the message carries the stable
+    /// `"update OmniAgent"` prefix `server.rs`'s `send_handshake_error` has
+    /// always sent for version skew** (that function exists specifically so a
+    /// skewed peer can still decode its own refusal, so this is a designed-for
+    /// path, not a hypothetical one). Any other message with no code stays
+    /// non-terminal. This is not the general string contract coming back —
+    /// every *other* classification here keys on the code alone — it is one
+    /// fallback for peers old enough to predate `code` entirely, and it can be
+    /// deleted once no un-updated daemon can be met.
+    ///
+    /// Before this field existed, the whole classification was a prefix match
+    /// on the sentence — one string literal on each side of the wire that
+    /// happened to agree — and a routine copy edit to `server.rs`'s "update
+    /// OmniAgent on …" could silently turn a terminal refusal into an infinite
+    /// retry loop, with nothing to catch it. The code is the fix for every
+    /// case a current daemon can send; the prefix survives only as the
+    /// narrowly-scoped bridge above.
+    static func isTerminalRefusal(_ code: String?, message: String) -> Bool {
+        guard let code else {
+            return message.hasPrefix(Self.legacyVersionSkewPrefix)
+        }
+        return RefusalCode(rawValue: code) == .versionSkew
+    }
+
+    /// The opening of the daemon's version-skew sentence
+    /// (`crates/omniagent-pty-daemon/src/server.rs`, `send_handshake_error`),
+    /// read only when a `Hello` refusal carries no `code` at all — a daemon
+    /// built before Task 14 item 2. See `isTerminalRefusal` for why this one
+    /// case still reads the sentence.
+    private static let legacyVersionSkewPrefix = "update OmniAgent"
+
+    /// The daemon answered `Hello` with an `Error` instead of a `HelloAck` —
+    /// it looked at who is connecting and said no.
+    ///
+    /// The message is reported through `onError`, which is where the connect
+    /// ceremony reads it (spec §6, step 3). A terminal refusal additionally
+    /// clears `shouldReconnect`, which has to happen *before* the close,
+    /// because `closeConnection` ends by scheduling a reconnect.
+    private func refusedAtHello(_ frame: SessionFrame) {
+        let payload = try? decoder.decode(ErrorPayload.self, from: frame.payload)
+        let message = payload?.message ?? "The daemon refused the connection."
+        helloRequest = nil
+        if Self.isTerminalRefusal(payload?.code, message: message) {
+            shouldReconnect = false
+            nextReconnectDelay = reconnectDelay
+        }
+        closeConnection(error: SessionConnectionError.helloRefused(code: payload?.code, message: message))
+    }
+
     private func connectionFailed(_ error: Error) {
         finishConnectSignpost()
         transition(to: .disconnected)
@@ -997,6 +1250,10 @@ final class SessionConnection {
             }
             return
         }
+        if frame.kind == .error, frame.requestOrSequence == helloRequest {
+            refusedAtHello(frame)
+            return
+        }
 
         switch frame.kind {
         case .response, .sessionList, .sessionCreated:
@@ -1060,17 +1317,28 @@ final class SessionConnection {
             } catch {
                 closeConnection(error: error)
             }
-        case .sessionResized:
-            // Deliberately *not* run through `updateSequence`: a resize is
-            // not terminal output, and advancing a session's resume cursor
-            // past output it has not received would drop that output on the
-            // next reattach.
-            if let size = try? decoder.decode(SessionSizePayload.self, from: frame.payload) {
-                callbackQueue.async { self.onSessionSize?(size.id, size.cols, size.rows) }
-            }
         case .remoteViewers:
             if let payload = try? decoder.decode(RemoteViewersPayload.self, from: frame.payload) {
                 callbackQueue.async { self.onRemoteViewers?(payload.viewers) }
+            }
+        case .hostState:
+            // Sent verbatim (spec §4): the daemon never parses it, and
+            // neither does this connection — `HostStateModel` does, on the
+            // window controller's own queue. No `updateSequence` for the
+            // same reason `sessionResized` never got one: this describes the
+            // host machine, not a byte of a session's output to replay.
+            callbackQueue.async { self.onHostState?(frame.payload) }
+        case .remoteActivity:
+            if let payload = try? decoder.decode(RemoteActivityPushPayload.self, from: frame.payload) {
+                var entries = payload.entries.compactMap(RemoteActivityLog.Entry.init(wire:))
+                // Fix round 1, IMPORTANT 2: a gap this feed fell behind is
+                // put on screen, not silently skipped — and it comes first,
+                // since it covers whatever happened *before* the entries in
+                // this same push.
+                if payload.dropped > 0 {
+                    entries.insert(.init(gapCount: payload.dropped), at: 0)
+                }
+                callbackQueue.async { self.onRemoteActivity?(entries) }
             }
         case .attention:
             if let id = try? decoder.decode(SessionIDPayload.self, from: frame.payload).id {
@@ -1335,14 +1603,41 @@ private struct ResizePayload: Codable {
 
 private struct ErrorPayload: Codable {
     let message: String
+    /// The wire value of `omniagent_pty_daemon::protocol::RefusalCode`
+    /// (Task 14 item 2), kept as a raw `String?` rather than decoded straight
+    /// into `RefusalCode` — decoding a `String`-backed enum synthesised by
+    /// `Codable` *throws* on a raw value it does not recognise, and that
+    /// would fail this whole payload's decode, losing `message` along with
+    /// it, the moment a daemon ahead of this app sends a code this build has
+    /// never heard of. `RefusalCode(rawValue:)` is where "unknown" gets
+    /// decided instead, at the one place that reads it —
+    /// `isTerminalRefusal`. Absent entirely on an `Error` a daemon built
+    /// before this field existed sends, or on any `Error` outside the
+    /// `Hello` arm — both decode to `nil` the same ordinary way any missing
+    /// `Optional` key does.
+    let code: String?
 }
 
-/// `SessionResized`'s payload — the daemon's `SessionSizePayload`
-/// (`{id, cols, rows}`), the host's current grid for one session.
-private struct SessionSizePayload: Codable {
-    let id: String
-    let cols: UInt16
-    let rows: UInt16
+/// Mirrors `omniagent_pty_daemon::protocol::RefusalCode`
+/// (`crates/omniagent-pty-daemon/src/protocol.rs`) — the wire values on both
+/// sides must agree, kept in step by hand since nothing generates one side
+/// from the other. Read only by `isTerminalRefusal`; every other user of a
+/// refusal reads `ErrorPayload.message` instead, which stays free to reword.
+///
+/// Internal rather than `private`, solely so
+/// `testRefusalCodeWireValuesMatchTheRustEnum` (`SessionConnectionTests.swift`,
+/// via `@testable import`) can pin each case's raw value against a literal
+/// list identical to Rust's `refusal_code_wire_values_are_frozen`
+/// (`crates/omniagent-pty-daemon/tests/protocol.rs`) — the mirror-image half
+/// of that test, so a wire string changed on either side without the other
+/// turns exactly one of the two red (fix round 1, FIX 2).
+enum RefusalCode: String {
+    case versionSkew = "version_skew"
+    case leaseHeld = "lease_held"
+    case machineUnavailable = "machine_unavailable"
+    case hostSignedOut = "host_signed_out"
+    case wrongAccount = "wrong_account"
+    case blocked = "blocked"
 }
 
 /// The `RemoteViewers` push payload, and `ListViewers`' `Response` payload —
@@ -1353,9 +1648,14 @@ private struct RemoteViewersPayload: Codable {
 
 private struct DisconnectViewerPayload: Codable {
     let viewerID: String
+    /// Kick and keep out (`true`) or kick only (`false`) — the daemon's
+    /// `DisconnectViewerPayload.block`. Always sent explicitly from here;
+    /// the daemon's `#[serde(default)]` covers callers older than the field.
+    let block: Bool
 
     enum CodingKeys: String, CodingKey {
         case viewerID = "viewer_id"
+        case block
     }
 }
 
@@ -1407,6 +1707,16 @@ private struct RootsRenameProjectPayload: Codable {
     enum CodingKeys: String, CodingKey {
         case id
         case newLabel = "new_label"
+    }
+}
+
+private struct ListDirectoryPayload: Codable {
+    let path: String
+    let showHidden: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case showHidden = "show_hidden"
     }
 }
 

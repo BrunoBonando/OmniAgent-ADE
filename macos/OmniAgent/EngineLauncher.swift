@@ -629,7 +629,9 @@ enum EngineLauncher {
 
     // MARK: - Command
 
-    /// The argv for one engine, or `nil` when its binary is not installed.
+    /// The argv for one engine, or `nil` when its binary is not installed on
+    /// **this** machine — only checked, and only possible, when
+    /// `isDrivingRemote` is `false` (see that parameter's own doc below).
     ///
     /// Deliberately *not* ported from the Tauri builder: Claude's
     /// `--mcp-config` and `--append-system-prompt` pre-briefing, and Codex's
@@ -654,13 +656,38 @@ enum EngineLauncher {
     ///
     /// `codex`/`shell`/`agy` have no conversation concept and are untouched.
     /// `copilot` takes the same flag as `claude`.
+    ///
+    /// **`isDrivingRemote`** (2026-09-01 remote environment sharing spec
+    /// §4/§6, the Task 28 carried gap): argv[0] is what the daemon execs
+    /// verbatim, with no re-resolution of its own (`session.rs`'s
+    /// `spawn_session`, for an absolute path). Resolving here with `resolve`
+    /// — this Mac's own `PATH` — and sending the result to a *different*
+    /// machine's daemon names a file on the wrong disk: it works only by
+    /// coincidence when both Macs happen to install the engine at an
+    /// identical path, which an Intel and an Apple Silicon Mac, or two
+    /// different users, usually do not. So while driving, `resolve` is never
+    /// called at all and this returns the bare binary name instead — the
+    /// daemon resolves it against **its own** disk (`resolve_engine_binary`,
+    /// `session.rs`) rather than trusting whatever arrived in argv[0] or the
+    /// request's `env["PATH"]`. This can never return `nil` for that case:
+    /// "not installed" was already answered honestly by `EnginePickerModel`
+    /// reading the host's own `HostState` before the launch was ever
+    /// attempted; a launch attempted anyway fails with the daemon's own
+    /// clear error, not a silent local block.
     static func command(
         for engine: Engine,
         conversationID: String? = nil,
         resuming: Bool = false,
+        isDrivingRemote: Bool = false,
         resolve: (String) -> String? = resolveBinary
     ) -> [String]? {
-        guard let program = resolve(binaryName(for: engine)) else { return nil }
+        let program: String
+        if isDrivingRemote {
+            program = binaryName(for: engine)
+        } else {
+            guard let resolved = resolve(binaryName(for: engine)) else { return nil }
+            program = resolved
+        }
         switch engine {
         case .shell:
             // Login shell, so the user's own rc files and PATH apply inside the
@@ -806,5 +833,54 @@ enum EngineLauncher {
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
         }
         return nil
+    }
+}
+
+/// Whether an engine can be picked right now, and why not (2026-09-01 remote
+/// environment sharing spec §4, Task 26).
+///
+/// While `isDrivingRemote`, "installed" means installed on the **host** —
+/// this machine's own `PATH` answers for the wrong computer, so an engine the
+/// host does not have must show as unavailable even when it sits right here
+/// on this Mac's disk. Every engine picker (`HomeView.presentEngineMenu`,
+/// `WorkspaceWindowController.engineMenu(for:)`) builds one of these instead
+/// of calling `EngineLauncher.isInstalled` directly.
+struct EnginePickerModel {
+    /// The window's own reading of the host, or `nil` before the first
+    /// `HostState` has landed. `isAvailable`/`unavailableReason` fall back to
+    /// the local answer whenever this is `nil`, the same "stale beats blank"
+    /// rule the rest of `HostStateModel` follows — a picker must never grey
+    /// out every engine for the one tick before the first push arrives.
+    let hostState: HostStateModel?
+    let isDrivingRemote: Bool
+    /// Seam for tests — `EngineLauncher.isInstalled` in production.
+    var localAvailability: (Engine) -> Bool = { EngineLauncher.isInstalled($0) }
+
+    /// Whether `engine` can be picked right now.
+    ///
+    /// An engine the host has never reported at all — `.shell`/`.copilot`,
+    /// which `HostStatePublisher.Engines` does not carry — has no host
+    /// reading to contradict the local one, so this falls back to it rather
+    /// than blocking an engine the host was simply never asked about.
+    func isAvailable(_ engine: Engine) -> Bool {
+        guard isDrivingRemote,
+              let available = hostState?.engineAvailability[engine.rawValue]
+        else { return localAvailability(engine) }
+        return available
+    }
+
+    /// Why `engine` is greyed out, or `nil` when it is not. Names the host
+    /// only while this is actually reading the host's own "not available"
+    /// answer; the local fallback (an engine the host never mentioned, or
+    /// not driving at all) gets the plain local wording instead, since there
+    /// is no other machine to name.
+    func unavailableReason(_ engine: Engine) -> String? {
+        guard !isAvailable(engine) else { return nil }
+        if isDrivingRemote,
+           hostState?.engineAvailability[engine.rawValue] == false,
+           let name = hostState?.host?.name {
+            return "Not installed on \(name)"
+        }
+        return "\(engine.badgeTitle) is not installed"
     }
 }

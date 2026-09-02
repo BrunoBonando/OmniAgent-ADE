@@ -1,72 +1,38 @@
 import Foundation
 
-/// The slice of `SessionConnection` the viewer-side model drives: open,
-/// close, read one settings row, and hear about the socket's state. Kept to
-/// these five members on purpose — everything else a remote pane needs
-/// (attach, input, terminal data) is the pane's business, done on the
-/// concrete `SessionConnection` the pane factory is handed. A protocol so a
-/// test can stand in a connection that never dials anything.
-protocol RemoteConnection: AnyObject {
-    var onStateChange: ((ConnectionState) -> Void)? { get set }
-    var onError: ((Error) -> Void)? { get set }
-    func connect()
-    func disconnect()
-    func getSetting(key: String, completion: @escaping (Result<String?, Error>) -> Void)
-}
-
-extension SessionConnection: RemoteConnection {}
-
-/// One machine on this account that the relay reports connected, with the
-/// `remote_control` row it shares — what the sidebar's remote sections and
-/// the spotlight's remote rows are drawn from.
+/// One machine on this account that the relay reports online — what the
+/// sidebar's remote sections, the spotlight's "Connect to ‹machine›" rows and
+/// the picker are drawn from.
+///
+/// **No projection any more** (2026-09-01 remote environment sharing spec §1,
+/// Task 29): the viewer used to read a `remote_control` row through an
+/// eagerly-dialled connection and mirror the host's workspace tree from it.
+/// That model is gone — a viewer now points its whole app at the host's
+/// daemon and reads the host's *real* state over the same RPCs the host
+/// uses, so this type carries nothing but what the relay itself knows.
 struct RemoteMachine: Equatable {
     let deviceID: String
     let name: String
-    let projection: RemoteControlProjection.Payload
 }
 
-/// The viewer side's device list (the remote-session-control spec's §4
-/// "Viewer side", docs/superpowers/specs/2026-08-30-remote-session-control-design.md):
-/// polls `RelayClient.listDevices()` while signed in, keeps exactly one
-/// `SessionConnection` per online machine, and reads each machine's
-/// `remote_control` projection through it.
+/// The viewer side's device list (2026-09-01 remote environment sharing spec
+/// §6/§10): polls `RelayClient.listDevices()` while signed in and turns the
+/// account's registered machines into `machines` (online, connectable) and
+/// `offlineMachineNames` (known but not reachable right now) — nothing else.
 ///
-/// Rules, in the order a poll applies them:
-/// - A device seen online for the first time gets a connection, `connect()`ed
-///   at once, and its projection is read — on the spot (a test double
-///   answers synchronously) and again on every `.connected` transition, since
-///   the real socket is not up yet when the first read goes out.
-/// - A device that is online but whose socket is **down** is `connect()`ed
-///   again by every poll, so this model's promise — "the relay says it is
-///   online, so we are dialling it" — no longer rests on the transport
-///   never giving up on its own. One dial per poll at most; a dial already
-///   in flight is left alone. It is not free: an explicit `connect()` is a
-///   fresh start for the transport, so a machine that stays down ramps its
-///   backoff from the seed again every thirty seconds rather than settling
-///   at the 30 s cap. Noticing a host the moment it registers is worth more
-///   than those dials.
-///   Phase 1 re-dialled only when the bearer had *changed*, which in-session
-///   it does not for fifteen minutes, so the relay's 403 for "that device's
-///   control channel is not registered yet" (the race a viewer loses the
-///   moment the host enables sharing) stranded that Mac until the app was
-///   relaunched: with no live connection the projection read can never
-///   succeed, and a machine with no projection is not in `machines` at all.
-///   Only a refused *token* still parks a connection, keyed on the bearer.
-/// - A device that goes offline is `disconnect()`ed and leaves `machines`,
-///   but its connection object is **retained**: panes opened on it keep
-///   routing through that object (`retainedConnection(for:)`), so when the
-///   machine is back the same object is `connect()`ed again and those panes
-///   resume through the connection's own reattach, rather than being
-///   stranded on a twin. Only `stop()` and signing out release them.
-/// - A relay outage never surfaces: `listDevices()` failures are swallowed
-///   and the last answer stands (spec §6, "Relay restart / Core deploy").
-/// - Signed out: everything is disconnected and cleared without asking the
-///   relay.
+/// **Opens no connection of its own** (Task 29 — "stop the eager dialing").
+/// Earlier phases kept one `SessionConnection` per online machine so a
+/// pane could be opened directly against it; that per-pane picker is gone,
+/// and with it the reason to dial anything before the user actually asks to
+/// connect. The daemon allows exactly one remote connection per machine, so
+/// polling every online device used to take each one's lease for no reason —
+/// two real Macs would fight over it. `sessionConnection(for:)` is the only
+/// thing that ever builds a socket, and it does so once, on demand, for
+/// `WorkspaceWindowController.connectRemote(to:)` to dial.
 ///
 /// Main-thread only for its state, `RelayClient`'s rule: `refresh()` awaits
 /// the relay wherever it is called from and applies the answer on the main
-/// actor, which is also where every connection callback lands
-/// (`SessionConnection`'s default `callbackQueue`).
+/// actor.
 final class RemoteMachinesModel {
     /// Online machines with a decoded projection, sorted by name.
     private(set) var machines: [RemoteMachine] = [] {
@@ -75,65 +41,32 @@ final class RemoteMachinesModel {
             onChange?()
         }
     }
+    /// Machines the relay reports as registered to this account but not
+    /// currently online — the picker's "‹name› is offline" row (spec's
+    /// phase 2 §4 empty states, reworded for machines by Task 29). Sorted by
+    /// name, same as `machines`.
+    private(set) var offlineMachineNames: [String] = []
     var onChange: (() -> Void)?
-    /// A connection was just created for a device. The window controller
-    /// installs its pane-side handlers (`onTerminalData`, `onStatus`,
-    /// `onExit`, …) here, once per object. `onStateChange` and `onError` are
-    /// this model's — it needs both — and are forwarded through the two
-    /// hooks below instead.
-    var onConnectionCreated: ((String, RemoteConnection) -> Void)?
-    var onConnectionStateChange: ((String, ConnectionState) -> Void)?
-    var onConnectionError: ((String, Error) -> Void)?
 
     private(set) var isRunning = false
-    /// Whether a socket-side token refusal has asked for a fresh session
-    /// since the last sign-in — the observable half of "a 401 on the
-    /// upgrade refreshes the token at once rather than waiting for
-    /// `listDevices()` to meet the same 401 a quarter of an hour later".
-    private(set) var didRequestTokenRefresh = false
 
     /// This Mac's own relay device id — the one device on the account this
-    /// viewer must never list or dial: it would be a WebSocket to its own
-    /// daemon by way of Cloudflare, showing the sessions already on screen.
-    /// Set by the window from the `relay_device_token` row (and straight
-    /// after a registration); a device already connected when the id
-    /// arrives is dropped on the spot.
+    /// viewer must never list: it would be a WebSocket to its own daemon by
+    /// way of Cloudflare, showing the sessions already on screen. Set by the
+    /// window from the `relay_device_token` row (and straight after a
+    /// registration).
     var localDeviceID: String? {
         didSet {
-            guard localDeviceID != oldValue, let deviceID = localDeviceID else { return }
-            drop(deviceID)
+            guard localDeviceID != oldValue else { return }
+            apply(lastDevices)
         }
     }
 
     private let relay: RelayClient
     private let pollInterval: TimeInterval
-    private let makeConnection: (URL) -> RemoteConnection
+    private let makeConnection: (URL) -> SessionConnection
     private let isSignedIn: () -> Bool
     private let refreshSession: () async -> Void
-    private let projectionReader: ProjectionReader
-    private let currentBearer: () -> String?
-    /// Every connection ever made, online or not — see the type comment.
-    private var connections: [String: RemoteConnection] = [:]
-    /// Devices the relay's last successful answer listed as online.
-    private var onlineIDs: Set<String> = []
-    private var names: [String: String] = [:]
-    private var projections: [String: RemoteControlProjection.Payload] = [:]
-    /// Devices whose connection reported `.unauthorized` and stopped
-    /// retrying, with the bearer the relay refused. Re-dialled only once the
-    /// bearer has *changed* — a REST call succeeding proves nothing about a
-    /// WebSocket upgrade the same relay just refused, and re-dialling on it
-    /// would be the four-times-a-second loop `.unauthorized` exists to end.
-    /// A 401 is the *only* refusal that parks a device this way: everything
-    /// else keeps retrying (`SessionConnection.isTokenRefusal`) and is
-    /// re-dialled by the next poll.
-    private var unauthorized: [String: String?] = [:]
-    /// The last state each connection reported. A device the relay lists as
-    /// online whose socket last said `.disconnected` is dialled again;
-    /// `.connecting` is a dial already in flight and a device that has said
-    /// nothing yet was dialled moments ago by this very poll — neither is
-    /// worth a second `connect()`, which would only reset the backoff of an
-    /// attempt already under way.
-    private var connectionStates: [String: ConnectionState] = [:]
     private var timer: Timer?
     private var refreshInFlight = false
     /// A poke that arrived while a poll was in flight. Honoured once that
@@ -142,11 +75,13 @@ final class RemoteMachinesModel {
     private var refreshRequested = false
     /// Bumped by every `clearAll()`. A poll captures it on the way out and
     /// applies its answer only if nothing cleared the model meanwhile —
-    /// otherwise a log-out that raced a poll would have its sockets rebuilt
-    /// and dialled, with a bearer that is very likely still valid, by a
-    /// model nobody will ever `stop()` again.
+    /// otherwise a log-out that raced a poll would repopulate `machines` for
+    /// a model nobody will ever `stop()` again.
     private var generation = 0
     private var lastSessionRefreshAt: Date?
+    /// The relay's last successful answer, so `localDeviceID` arriving late
+    /// can be applied without a fresh round trip.
+    private var lastDevices: [RelayClient.Device] = []
     /// Two polls that both meet a 401 inside this window share one session
     /// refresh: the refresh cookie rotates on every use, and two concurrent
     /// refreshes would spend the same cookie twice.
@@ -155,32 +90,18 @@ final class RemoteMachinesModel {
     init(
         relay: RelayClient = .shared,
         pollInterval: TimeInterval = 30,
-        makeConnection: @escaping (URL) -> RemoteConnection = { url in
-            // Read on the connection's `ioQueue`: a plain stored property,
-            // read directly, and never anything that touches UI state.
+        makeConnection: @escaping (URL) -> SessionConnection = { url in
             SessionConnection(transport: .webSocket(url, bearer: { AuthClient.shared.accessToken }))
         },
         isSignedIn: @escaping () -> Bool = { AuthClient.shared.accessToken != nil },
-        refreshSession: @escaping () async -> Void = { _ = try? await AuthClient.shared.restoreSession() },
-        projectionReader: @escaping ProjectionReader = { connection, completion in
-            connection.getSetting(key: SettingsKey.remoteControl, completion: completion)
-        },
-        currentBearer: @escaping () -> String? = { AuthClient.shared.accessToken }
+        refreshSession: @escaping () async -> Void = { _ = try? await AuthClient.shared.restoreSession() }
     ) {
         self.relay = relay
         self.pollInterval = pollInterval
         self.makeConnection = makeConnection
         self.isSignedIn = isSignedIn
         self.refreshSession = refreshSession
-        self.projectionReader = projectionReader
-        self.currentBearer = currentBearer
     }
-
-    /// How a machine's `remote_control` row is read through its connection.
-    /// The default is the row read itself; a window-level test that needs
-    /// real `SessionConnection`s (the pane factory's type) but no socket
-    /// answers it directly.
-    typealias ProjectionReader = (RemoteConnection, @escaping (Result<String?, Error>) -> Void) -> Void
 
     deinit {
         timer?.invalidate()
@@ -210,7 +131,7 @@ final class RemoteMachinesModel {
         refreshSoon()
     }
 
-    /// Stops polling and drops every connection — sign-out's path.
+    /// Stops polling and clears the list — sign-out's path.
     func stop() {
         timer?.invalidate()
         timer = nil
@@ -239,8 +160,7 @@ final class RemoteMachinesModel {
 
     // MARK: - Polling
 
-    /// One poll: list → connect new online devices → re-read every online
-    /// projection → drop offline ones.
+    /// One poll: list the account's devices, apply the answer.
     func refresh() async {
         let (signedIn, captured) = await MainActor.run { (isSignedIn(), generation) }
         guard signedIn else {
@@ -287,135 +207,26 @@ final class RemoteMachinesModel {
         await refreshSession()
     }
 
-    private func apply(_ devices: [RelayClient.Device]) {
-        let online = devices.filter { $0.online && $0.deviceID != localDeviceID }
-        let nowOnline = Set(online.map(\.deviceID))
-        for device in online {
-            names[device.deviceID] = device.name
-        }
-        // Gone offline: the socket is closed but the object stays, for the
-        // panes still holding it.
-        for deviceID in onlineIDs.subtracting(nowOnline) {
-            connections[deviceID]?.disconnect()
-            projections.removeValue(forKey: deviceID)
-            unauthorized.removeValue(forKey: deviceID)
-            connectionStates.removeValue(forKey: deviceID)
-        }
-        for device in online {
-            let deviceID = device.deviceID
-            if let existing = connections[deviceID] {
-                if !onlineIDs.contains(deviceID) {
-                    // Back online: `connect()` starts over with the bearer
-                    // as it is now.
-                    unauthorized.removeValue(forKey: deviceID)
-                    existing.connect()
-                } else if let refused = unauthorized[deviceID] {
-                    // A refused token is the one failure another dial cannot
-                    // mend: the same bearer would only be refused again. Wait
-                    // for a different one — the 401 asked for it already.
-                    if refused != currentBearer() {
-                        unauthorized.removeValue(forKey: deviceID)
-                        existing.connect()
-                    }
-                } else if connectionStates[deviceID] == .disconnected {
-                    // Online to the relay, down to us: dial it again. Every
-                    // refusal but a 401 is transient — the 403 while the
-                    // host's control channel registers, a relay restart, an
-                    // outage — and leaving those to the bearer changing was
-                    // what stranded a machine until the app was relaunched.
-                    // The transport retries these itself; this is the poll
-                    // saying so anyway, so no future path that quietly stops
-                    // retrying can blind the viewer again.
-                    existing.connect()
-                }
-            } else {
-                let connection = makeConnection(relay.viewerSocketURL(deviceID: deviceID))
-                connections[deviceID] = connection
-                install(connection, for: deviceID)
-                onConnectionCreated?(deviceID, connection)
-                connection.connect()
-            }
-        }
-        onlineIDs = nowOnline
-        for deviceID in nowOnline {
-            readProjection(for: deviceID)
-        }
-        rebuildMachines()
-    }
-
-    private func install(_ connection: RemoteConnection, for deviceID: String) {
-        connection.onStateChange = { [weak self] state in
-            guard let self else { return }
-            connectionStates[deviceID] = state
-            // A fresh socket — first connect or a reconnect after an outage —
-            // is when the projection is actually readable.
-            if state == .connected { readProjection(for: deviceID) }
-            onConnectionStateChange?(deviceID, state)
-        }
-        connection.onError = { [weak self] error in
-            guard let self else { return }
-            if case SessionConnectionError.unauthorized = error {
-                unauthorized[deviceID] = currentBearer()
-                // The relay refused this bearer on the upgrade, so it is
-                // stale *now* — asking here rather than waiting for
-                // `listDevices()` to meet the same 401 saves the viewer the
-                // rest of the token's fifteen minutes blind to this machine.
-                // Coalesced with the REST path's refresh, whose cookie it
-                // shares; the next poll dials on whatever it produces.
-                didRequestTokenRefresh = true
-                Task { [weak self] in await self?.refreshSessionIfStale() }
-            }
-            onConnectionError?(deviceID, error)
-        }
-    }
-
-    private func readProjection(for deviceID: String) {
-        guard let connection = connections[deviceID] else { return }
-        projectionReader(connection) { [weak self] result in
-            guard let self, case let .success(raw) = result else { return }
-            // The device may have gone offline (or the viewer signed out)
-            // while the read was in flight.
-            guard onlineIDs.contains(deviceID) else { return }
-            projections[deviceID] = RemoteControlProjection.decode(raw)
-            rebuildMachines()
-        }
-    }
-
-    private func rebuildMachines() {
-        machines = onlineIDs
-            .compactMap { deviceID in
-                projections[deviceID].map {
-                    RemoteMachine(deviceID: deviceID, name: names[deviceID] ?? deviceID, projection: $0)
-                }
-            }
+    /// One poll's answer, applied. Not `private` — tests call it directly to
+    /// pin `machines`/`offlineMachineNames` without standing up a relay stub.
+    func apply(_ devices: [RelayClient.Device]) {
+        lastDevices = devices
+        let others = devices.filter { $0.deviceID != localDeviceID }
+        machines = others
+            .filter(\.online)
+            .map { RemoteMachine(deviceID: $0.deviceID, name: $0.name) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        offlineMachineNames = others
+            .filter { !$0.online }
+            .map(\.name)
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     private func clearAll() {
         generation += 1
-        for connection in connections.values {
-            connection.disconnect()
-        }
-        connections.removeAll()
-        onlineIDs.removeAll()
-        projections.removeAll()
-        unauthorized.removeAll()
-        connectionStates.removeAll()
-        didRequestTokenRefresh = false
-        rebuildMachines()
-    }
-
-    /// Forgets one device entirely — `localDeviceID` arriving for a device
-    /// this model had already dialled.
-    private func drop(_ deviceID: String) {
-        guard connections[deviceID] != nil || onlineIDs.contains(deviceID) else { return }
-        connections[deviceID]?.disconnect()
-        connections.removeValue(forKey: deviceID)
-        onlineIDs.remove(deviceID)
-        projections.removeValue(forKey: deviceID)
-        unauthorized.removeValue(forKey: deviceID)
-        connectionStates.removeValue(forKey: deviceID)
-        rebuildMachines()
+        lastDevices = []
+        machines = []
+        offlineMachineNames = []
     }
 
     /// The `device_id` inside a `relay_device_token` row
@@ -431,28 +242,33 @@ final class RemoteMachinesModel {
         return deviceID
     }
 
+    /// The `name` inside a `relay_device_token` row — `deviceID(inTokenRow:)`'s
+    /// sibling, for Settings › Remote's read-only "This machine" identity
+    /// (2026-09-01 remote environment sharing spec §2).
+    static func name(inTokenRow raw: String?) -> String? {
+        guard
+            let raw, !raw.isEmpty,
+            let data = raw.data(using: .utf8),
+            let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let name = row["name"] as? String, !name.isEmpty
+        else { return nil }
+        return name
+    }
+
     // MARK: - Lookup
-
-    /// The connection for an **online** device, `nil` otherwise — what
-    /// "open a remote session" checks before adding a pane.
-    func connection(for deviceID: String) -> RemoteConnection? {
-        guard onlineIDs.contains(deviceID) else { return nil }
-        return connections[deviceID]
-    }
-
-    /// The connection object for a device whether or not it is online now —
-    /// how a pane opened before an outage keeps routing to the object that
-    /// will be reconnected when the machine is back.
-    func retainedConnection(for deviceID: String) -> RemoteConnection? {
-        connections[deviceID]
-    }
-
-    /// `connection(for:)` as the concrete type the pane factory needs.
-    func sessionConnection(for deviceID: String) -> SessionConnection? {
-        connection(for: deviceID) as? SessionConnection
-    }
 
     func machine(for deviceID: String) -> RemoteMachine? {
         machines.first { $0.deviceID == deviceID }
+    }
+
+    /// Builds a fresh, unconnected connection to an online device — a socket
+    /// is opened only when the user actually connects
+    /// (`WorkspaceWindowController.connectRemote(to:)` dials it via
+    /// `SessionConnection.connect()`, through `swapConnection`). `nil` when
+    /// the device is not on the relay's last-known online list, matching
+    /// `connectRemote`'s "machine offline" refusal.
+    func sessionConnection(for deviceID: String) -> SessionConnection? {
+        guard machines.contains(where: { $0.deviceID == deviceID }) else { return nil }
+        return makeConnection(relay.viewerSocketURL(deviceID: deviceID))
     }
 }

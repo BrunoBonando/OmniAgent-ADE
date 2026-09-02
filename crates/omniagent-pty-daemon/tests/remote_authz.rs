@@ -1,40 +1,46 @@
-//! The remote trust boundary (`docs/superpowers/specs/2026-08-30-remote-session-control-design.md`
-//! §2 "What a remote connection may do"): the daemon's per-frame authorizer
-//! confines a `ClientTrust::Remote` client to an allowlist of message kinds
-//! and to the session ids listed in the `remote_control` projection row.
-//! These tests run the real `serve_client` handler over an in-memory
-//! `tokio::io::duplex` pipe — no unix socket, no peer-UID path.
+//! The remote trust boundary (`docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`
+//! §3, §12): the daemon's per-frame authorizer.
+//!
+//! Phase 3 widened it from "a viewer may attach to a few shared panes" to "a
+//! lease holder drives the whole machine". Two things did **not** change, and
+//! they are what this file is for:
+//!
+//! 1. [`authorize_remote`] is an **explicit allowlist**, never a denylist. A
+//!    message kind added to the dispatch next month is unreachable remotely
+//!    until someone deliberately lists it, and
+//!    `every_message_kind_is_deliberately_classified` will not *compile* until
+//!    someone writes down which it is.
+//! 2. The protected settings rows are unreachable on **both** get and set: a
+//!    remote client may not grant itself access, unblock itself, or read the
+//!    host's credentials.
+//!
+//! The end-to-end cases run the real `serve_client` handler over an in-memory
+//! `tokio::io::duplex` pipe — no unix socket, no peer-UID path — with the
+//! machine arranged to be sharing at all (spec §2: the switch on, a device
+//! token, and the host's own app attached), since without that every remote
+//! `Hello` here would be refused before any of this file's subject came up.
+
+mod support;
 
 use omniagent_pty_daemon::protocol::{
-    read_frame, write_frame, Frame, MessageKind, SessionListPayload, SessionSizePayload, SettingKey,
+    read_frame, write_frame, Frame, MessageKind, SessionListPayload,
 };
-use omniagent_pty_daemon::{serve_client, ClientContext, ClientTrust, CreateSession, DaemonServer};
+use omniagent_pty_daemon::{
+    authorize_remote, protected_setting_key, serve_client, ClientContext, CreateSession,
+    DaemonServer,
+};
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::time::Duration;
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
 
-/// A `remote_control` projection sharing workspace `w1` with only session `s1`.
+/// A phase-1 `remote_control` projection naming only session `s1`. Task 29
+/// deletes the reader (`remote_session_ids`) and the sidebar that used to
+/// render this row, but a stale row like this one can still sit on a user's
+/// disk from before that deletion — the end-to-end cases below write it for
+/// exactly that reason: reaching `s2` *through* a projection that names only
+/// `s1` is the proof that a leftover row cannot narrow access.
 const PROJECTION: &str = r#"{"workspaces":[{"id":"w1","name":"w1","sessions":[{"id":"s1","title":"one","engine":"shell","group":null}]}]}"#;
-/// The same machine after `w1` is toggled off while `w2` (session `s2`)
-/// stays shared — a non-empty projection, so the relay keeps every
-/// connection open and only `serve_client` can cut `s1` off.
-const PROJECTION_ONLY_S2: &str = r#"{"workspaces":[{"id":"w2","name":"w2","sessions":[{"id":"s2","title":"two","engine":"shell","group":null}]}]}"#;
-/// The phase-2 shape (spec §2 "Projection schema v2"): the host's real tree,
-/// where the attachable id is the **pane** id, not the session-group id.
-const PROJECTION_V2: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
-"sessions":[{"id":"g1","label":"Session 1","order":0,
-"panes":[{"id":"s1","title":"claude","engine":"claude","kind":"terminal","order":0},
-         {"id":"s3","title":"shell","engine":"shell","kind":"terminal","order":1}]}]}]}"#;
-/// A v2 projection whose session group also holds a **non-terminal** pane.
-/// Editor and browser panes carry ids in the projection just like terminals
-/// do, so the allowlist is a list of pane ids and not a promise that each one
-/// is a PTY — the registry is what makes that second claim.
-const PROJECTION_V2_WITH_EDITOR: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
-"sessions":[{"id":"g1","label":"Session 1","order":0,
-"panes":[{"id":"s1","title":"claude","engine":"claude","kind":"terminal","order":0},
-         {"id":"e1","title":"README.md","engine":null,"kind":"editor","order":1}]}]}]}"#;
 
 fn command_session(id: &str, script: &str) -> CreateSession {
     CreateSession {
@@ -47,6 +53,242 @@ fn command_session(id: &str, script: &str) -> CreateSession {
         transcript_path: None,
     }
 }
+
+fn frame(kind: MessageKind, payload: &[u8]) -> Frame {
+    Frame::new(kind, 1, payload.to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// The authorizer itself
+// ---------------------------------------------------------------------------
+
+/// Phase 3 §3: the lease holder is driving the whole machine, so the allowlist
+/// grew to the length of the environment. Session-id confinement went with the
+/// projection — confining someone who may create and kill sessions to a list
+/// of sessions is confining them to nothing.
+#[test]
+fn a_lease_holder_may_drive_the_whole_environment() {
+    for kind in [
+        MessageKind::Hello,
+        MessageKind::ListSessions,
+        MessageKind::Attach,
+        MessageKind::Detach,
+        MessageKind::Input,
+        MessageKind::Resize,
+        MessageKind::Interrupt,
+        MessageKind::CreateSession,
+        MessageKind::Kill,
+        MessageKind::ListDirectory,
+        MessageKind::RootsStartIngest,
+        MessageKind::RootsIngestionStatus,
+        MessageKind::RootsList,
+        MessageKind::RootsBiggestProject,
+        MessageKind::RootsAddProject,
+        MessageKind::RootsRenameProject,
+        MessageKind::RootsPausedProjects,
+        MessageKind::RootsSetPaused,
+        MessageKind::RootsStaleness,
+        MessageKind::RootsReingestProject,
+        MessageKind::RootsRebuild,
+        MessageKind::BrainListProjects,
+        MessageKind::BrainGetContext,
+        MessageKind::BrainSearch,
+    ] {
+        assert!(
+            authorize_remote(&frame(kind, b"{}")).is_ok(),
+            "{kind:?} must be allowed"
+        );
+    }
+}
+
+/// §12 invariant 3. Presence is the host's view of who is watching *it*, and
+/// the kick is the host's power over them; neither is a viewer's to reach.
+/// `PublishHostState` (Task 21, spec §4) joins them: a viewer must never be
+/// able to overwrite what the host says about itself.
+#[test]
+fn the_local_only_kinds_stay_local() {
+    for kind in [
+        MessageKind::ListViewers,
+        MessageKind::DisconnectViewer,
+        MessageKind::PublishHostState,
+    ] {
+        assert!(
+            authorize_remote(&frame(kind, b"{}")).is_err(),
+            "{kind:?} must be denied"
+        );
+    }
+}
+
+/// §12 invariant 2, at the authorizer. **Both** arms consult the protected
+/// set: a read-only leak of a device token is as bad as a write, and a token
+/// that only leaks is a machine anyone can go on reaching.
+#[test]
+fn protected_rows_are_refused_on_both_get_and_set() {
+    for key in [
+        "remote_sharing",
+        "relay_device_token",
+        "remote_control_blocked",
+        "auth_account_email",
+        "engine_search_path",
+    ] {
+        let get = frame(
+            MessageKind::GetSetting,
+            format!(r#"{{"key":"{key}"}}"#).as_bytes(),
+        );
+        let set = frame(
+            MessageKind::SetSetting,
+            format!(r#"{{"key":"{key}","value":"x"}}"#).as_bytes(),
+        );
+        assert!(authorize_remote(&get).is_err(), "get {key}");
+        assert!(authorize_remote(&set).is_err(), "set {key}");
+    }
+    // Everything else about the environment is the lease holder's to drive.
+    assert!(authorize_remote(&frame(
+        MessageKind::SetSetting,
+        br#"{"key":"layout","value":"{}"}"#
+    ))
+    .is_ok());
+    assert!(authorize_remote(&frame(MessageKind::GetSetting, br#"{"key":"layout"}"#)).is_ok());
+}
+
+/// The protected settings rows (phase 3 spec §3 and §12 invariant 2). This is
+/// the whole security argument in six keys: a remote client that could write
+/// `remote_sharing` or `relay_device_token` would be granting itself access,
+/// one that could write `remote_control_blocked` would be unblocking itself,
+/// one that could *read* `auth_*` would be walking off with the host's
+/// credentials, and one that could read or write `engine_search_path`
+/// (Task 28 fix round 1) would learn the host's directory layout or plant an
+/// attacker binary path ahead of the real one. The `auth_` case is a prefix
+/// on purpose — the seventh key below does not exist today, and is
+/// protected anyway.
+#[test]
+fn protected_keys_are_the_ones_that_would_grant_more_access() {
+    for key in [
+        "remote_sharing",
+        "relay_device_token",
+        "remote_control_blocked",
+        "auth_signed_in",
+        "auth_account_email",
+        "auth_anything_added_later",
+        // Fix round 1: a remote client that could read this Mac's own
+        // login-shell PATH would learn its directory layout for free, and
+        // one that could write it would plant an attacker path ahead of
+        // the real engine binaries for every future session on this
+        // machine — local and remote alike.
+        "engine_search_path",
+    ] {
+        assert!(protected_setting_key(key), "{key} must be protected");
+    }
+    for key in ["layout", "editor_panes_native", "roots", "persona"] {
+        assert!(!protected_setting_key(key), "{key} must stay reachable");
+    }
+}
+
+/// The standing rule, pinned: **nothing becomes remote-reachable merely by
+/// being added to the dispatch.**
+///
+/// The guarantee is the `match` below being **exhaustive with no wildcard
+/// arm**. That is what makes the rule enforceable rather than aspirational: a
+/// new `MessageKind` does not compile until someone writes down, here, whether
+/// a remote client may send it — and writing `true` next to it is a visible,
+/// reviewable act in a file about the trust boundary. A wildcard arm would
+/// quietly classify every future kind as denied and pass whatever
+/// `authorize_remote` happened to do, which is the same test failing to say
+/// anything at all.
+///
+/// The sweep over the byte space is the other half: `TryFrom<u8>` is the
+/// complete set of assigned discriminants, since a kind that is not there
+/// cannot arrive on the wire, so every wire-reachable variant is checked
+/// against the decision recorded for it.
+#[test]
+fn every_message_kind_is_deliberately_classified() {
+    for byte in 0..=u8::MAX {
+        let Ok(kind) = MessageKind::try_from(byte) else {
+            continue;
+        };
+        let may_a_remote_client_send_it = match kind {
+            // Allowed: the lease holder drives the whole environment (§3).
+            MessageKind::Hello
+            | MessageKind::ListSessions
+            | MessageKind::Attach
+            | MessageKind::Detach
+            | MessageKind::Input
+            | MessageKind::Resize
+            | MessageKind::Interrupt
+            | MessageKind::CreateSession
+            | MessageKind::Kill
+            | MessageKind::ListDirectory
+            | MessageKind::RootsStartIngest
+            | MessageKind::RootsIngestionStatus
+            | MessageKind::RootsList
+            | MessageKind::RootsBiggestProject
+            | MessageKind::RootsAddProject
+            | MessageKind::RootsRenameProject
+            | MessageKind::RootsPausedProjects
+            | MessageKind::RootsSetPaused
+            | MessageKind::RootsStaleness
+            | MessageKind::RootsReingestProject
+            | MessageKind::RootsRebuild
+            | MessageKind::BrainListProjects
+            | MessageKind::BrainGetContext
+            | MessageKind::BrainSearch => true,
+
+            // Conditional on the key, so the answer depends on the payload.
+            // With no `key` in `{}` there is nothing to check against the
+            // protected set and it is refused; the real decision is pinned by
+            // `protected_rows_are_refused_on_both_get_and_set`.
+            MessageKind::GetSetting | MessageKind::SetSetting => false,
+
+            // Local-only (§12 invariant 3): the host's view of who is watching
+            // it, and the host's power to throw them off. `PublishHostState`
+            // (Task 21, spec §4) joins them for the same reason: a viewer
+            // must never be able to overwrite what the host says about
+            // itself.
+            MessageKind::ListViewers
+            | MessageKind::DisconnectViewer
+            | MessageKind::PublishHostState => false,
+
+            // Server → client. A client may never send one at all, remote or
+            // local; the dispatch answers "clients cannot send server message
+            // kinds" and the authorizer refuses them first.
+            MessageKind::HelloAck
+            | MessageKind::SessionList
+            | MessageKind::SessionCreated
+            | MessageKind::Snapshot
+            | MessageKind::Output
+            | MessageKind::SessionStatus
+            | MessageKind::Attention
+            | MessageKind::SessionExited
+            | MessageKind::Response
+            | MessageKind::ResyncRequired
+            | MessageKind::Error
+            | MessageKind::RemoteViewers
+            // `RemoteActivity` (Task 19, spec §8/§12 invariant 3): a push to
+            // local connections only. A remote viewer must never learn what
+            // the log says about it, so this is deliberately absent from
+            // `authorize_remote`'s allowlist rather than merely unreachable
+            // by convention — the same treatment `RemoteViewers` gets.
+            | MessageKind::RemoteActivity
+            // `HostState` (Task 21, spec §4): a push to the lease holder
+            // only. It is never sent *to* the daemon by any client, remote or
+            // local — `authorize_remote` refusing it is belt-and-suspenders
+            // for a frame a real client never emits, since the dispatch's own
+            // catch-all already answers "clients cannot send server message
+            // kinds" for it.
+            | MessageKind::HostState => false,
+        };
+        assert_eq!(
+            authorize_remote(&frame(kind, b"{}")).is_ok(),
+            may_a_remote_client_send_it,
+            "{kind:?} (0x{byte:02x}) is classified differently by `authorize_remote` \
+             than by this test; whichever one is wrong, they must agree deliberately"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Through the real handler
+// ---------------------------------------------------------------------------
 
 struct Duplex {
     stream: DuplexStream,
@@ -72,22 +314,23 @@ impl Duplex {
     }
 
     async fn read(&mut self) -> Frame {
-        self.try_read(Duration::from_secs(4)).await.unwrap()
+        tokio::time::timeout(Duration::from_secs(4), read_frame(&mut self.stream))
+            .await
+            .expect("the daemon answered nothing")
+            .unwrap()
     }
 
-    /// `None` when nothing arrives within `wait`; a closed stream panics,
-    /// because no test here expects the daemon to hang up.
-    async fn try_read(&mut self, wait: Duration) -> Option<Frame> {
-        tokio::time::timeout(wait, read_frame(&mut self.stream))
-            .await
-            .ok()
-            .map(|frame| frame.unwrap())
+    /// Sends one frame and returns the reply — the shape almost every case
+    /// below wants.
+    async fn round_trip(&mut self, kind: MessageKind, payload: impl serde::Serialize) -> Frame {
+        self.send(kind, payload).await;
+        self.read().await
     }
 }
 
-/// Boots a daemon with sessions `s1` (running `s1_script`) and `s2`, shares
-/// only `s1` through the projection, and hands back a `Remote`-trust client
-/// already past `Hello`, plus the context the test drives the store with.
+/// Boots a daemon with sessions `s1` (running `s1_script`) and `s2`, writes
+/// the projection row, and hands back a `Remote`-trust client already past
+/// `Hello`, plus the context the test drives the store with.
 async fn remote_client(
     root: &std::path::Path,
     s1_script: &str,
@@ -95,16 +338,17 @@ async fn remote_client(
     remote_client_sharing(root, s1_script, PROJECTION).await
 }
 
-/// [`remote_client`] with the projection row spelled out — the phase-2 tests
-/// below need the v2 shape, where the attachable ids sit a level deeper.
+/// [`remote_client`] with the projection row spelled out.
 async fn remote_client_sharing(
     root: &std::path::Path,
     s1_script: &str,
     projection: &str,
 ) -> (Duplex, ClientContext, oneshot::Sender<()>) {
+    // Signed in, so the viewer below gets past the account check (spec §9)
+    // to reach the trust boundary this file is about.
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
-        root.join("brain-data"),
+        support::account_data_dir(&root.join("brain-data"), support::HOST_ACCOUNT_EMAIL),
     )
     .await
     .unwrap();
@@ -127,8 +371,17 @@ async fn remote_client_sharing(
         .unwrap()
         .set_setting("auth_signed_in", "true")
         .unwrap();
+    // Spec §2: a machine that is not sharing refuses every remote `Hello`
+    // before the trust boundary this file tests is ever reached.
+    support::enable_sharing(&ctx);
+    support::sign_in_as(&ctx, support::HOST_ACCOUNT_EMAIL);
+    support::hold_local_client(&ctx).await;
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(serve_client(server_side, ctx.clone(), ClientTrust::Remote));
+    tokio::spawn(serve_client(
+        server_side,
+        ctx.clone(),
+        support::remote_trust_for(support::HOST_ACCOUNT_EMAIL),
+    ));
     (
         Duplex {
             stream: client_side,
@@ -141,344 +394,154 @@ async fn remote_client_sharing(
     )
 }
 
+/// The widening, end to end. The projection row names `s1` alone; the lease
+/// holder sees both sessions and attaches to the one it never mentioned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_clients_only_list_and_attach_projected_sessions() {
+async fn a_lease_holder_sees_every_session_not_a_projection_of_them() {
     let root = tempfile::tempdir().unwrap();
     let (mut client, _ctx, _stop) = remote_client(root.path(), "cat").await;
 
-    client
-        .send(MessageKind::ListSessions, serde_json::json!({}))
+    let list = client
+        .round_trip(MessageKind::ListSessions, serde_json::json!({}))
         .await;
-    let list = client.read().await;
     assert_eq!(list.header.message_kind, MessageKind::SessionList);
-    let list: SessionListPayload = serde_json::from_slice(&list.payload).unwrap();
-    assert_eq!(list.sessions, vec!["s1".to_string()]);
+    let mut list: SessionListPayload = serde_json::from_slice(&list.payload).unwrap();
+    list.sessions.sort();
+    assert_eq!(list.sessions, vec!["s1".to_string(), "s2".to_string()]);
 
-    client
-        .send(
+    let reply = client
+        .round_trip(
             MessageKind::Attach,
             serde_json::json!({"id": "s2", "after_sequence": null}),
         )
         .await;
-    assert_eq!(client.read().await.header.message_kind, MessageKind::Error);
-
-    client
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    // An accepted attach opens with the host's grid, then the screen on it.
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::SessionResized
-    );
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
+    // No `SessionResized` push ahead of it any more (2026-09-01 remote
+    // environment sharing spec §5): the lease holder owns the grid, so an
+    // accepted attach opens straight onto the screen.
+    assert_eq!(reply.header.message_kind, MessageKind::Snapshot);
 }
 
+/// The kinds phase 2 refused and phase 3 grants, through the handler rather
+/// than the authorizer alone — the widening has to mean the daemon actually
+/// does the thing, not merely that it does not answer `Error`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_clients_cannot_kill_create_or_read_other_settings() {
+async fn a_lease_holder_may_create_resize_and_kill() {
     let root = tempfile::tempdir().unwrap();
-    let (mut client, _ctx, _stop) = remote_client(root.path(), "cat").await;
-    for (kind, payload) in [
-        (MessageKind::Kill, serde_json::json!({"id": "s1"})),
-        (
+    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
+
+    let created = client
+        .round_trip(
             MessageKind::CreateSession,
             serde_json::json!(command_session("s3", "cat")),
-        ),
-        (
-            MessageKind::SetSetting,
-            serde_json::json!({"key": "remote_control", "value": "{}"}),
-        ),
-        (
-            MessageKind::GetSetting,
-            serde_json::json!(SettingKey {
-                key: "auth_signed_in".into()
-            }),
-        ),
-        (MessageKind::BrainListProjects, serde_json::json!({})),
-    ] {
-        client.send(kind, payload).await;
-        let reply = client.read().await;
-        assert_eq!(
-            reply.header.message_kind,
-            MessageKind::Error,
-            "{kind:?} must be refused remotely"
-        );
-    }
-    client
-        .send(
-            MessageKind::GetSetting,
-            serde_json::json!(SettingKey {
-                key: "remote_control".into()
-            }),
         )
         .await;
-    let reply = client.read().await;
-    assert_eq!(reply.header.message_kind, MessageKind::Response);
-    let reply: serde_json::Value = serde_json::from_slice(&reply.payload).unwrap();
-    assert_eq!(reply["value"].as_str(), Some(PROJECTION));
+    assert_eq!(created.header.message_kind, MessageKind::SessionCreated);
+    assert!(ctx.registry.get("s3").is_some());
+
+    // Phase 3 §5 inverts phase 2's rule: whoever drives owns the grid, so
+    // `Resize` is back in the allowlist and it must move the real PTY.
+    let resized = client
+        .round_trip(
+            MessageKind::Resize,
+            serde_json::json!({"id": "s3", "cols": 132, "rows": 43}),
+        )
+        .await;
+    assert_eq!(resized.header.message_kind, MessageKind::Response);
+    assert_eq!(ctx.registry.get("s3").unwrap().size(), (132, 43));
+
+    let killed = client
+        .round_trip(MessageKind::Kill, serde_json::json!({"id": "s3"}))
+        .await;
+    assert_eq!(killed.header.message_kind, MessageKind::Response);
 }
 
-/// Un-sharing a session while a remote viewer is attached to it must cut
-/// its output at once — even though the viewer sends nothing, and even
-/// though the projection stays non-empty (so the relay's close-everything
-/// rule does not fire). Before the fix the per-frame authorizer blocked new
-/// `Input`/`Resize`/`Interrupt`, but the forwarding task spawned by the
-/// earlier `Attach` kept streaming until `Detach` or disconnect.
+/// §12 invariant 2, through the handler. The `auth_signed_in` row really is
+/// in the store (`remote_client_sharing` wrote it), so this is a refusal and
+/// not a miss.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn un_sharing_an_attached_session_stops_its_output_without_a_frame_from_the_viewer() {
+async fn a_lease_holder_can_neither_read_nor_write_a_protected_row() {
     let root = tempfile::tempdir().unwrap();
-    let (mut client, ctx, _stop) =
-        remote_client(root.path(), "while true; do echo tick; sleep 0.05; done").await;
-
-    client
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::SessionResized
-    );
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
-    while client.read().await.header.message_kind != MessageKind::Output {}
-
+    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
     ctx.settings
         .lock()
         .unwrap()
-        .set_setting("remote_control", PROJECTION_ONLY_S2)
+        .set_setting("relay_device_token", r#"{"token":"hunter2"}"#)
         .unwrap();
-    ctx.settings_changed.notify_one();
 
-    // Let the prune land and drain whatever was already in flight ...
-    let settled = tokio::time::Instant::now() + Duration::from_millis(250);
-    while client
-        .try_read(settled.saturating_duration_since(tokio::time::Instant::now()))
-        .await
-        .is_some()
-    {}
-    // ... after which nothing at all may arrive: the ticker would otherwise
-    // deliver about ten more `Output` frames in this window.
-    if let Some(frame) = client.try_read(Duration::from_millis(500)).await {
-        panic!(
-            "{:?} (sequence {}) leaked after s1 was un-shared",
-            frame.header.message_kind, frame.header.request_or_sequence
+    for key in [
+        "remote_sharing",
+        "relay_device_token",
+        "remote_control_blocked",
+        "auth_signed_in",
+        "engine_search_path",
+    ] {
+        let get = client
+            .round_trip(MessageKind::GetSetting, serde_json::json!({"key": key}))
+            .await;
+        assert_eq!(
+            get.header.message_kind,
+            MessageKind::Error,
+            "get {key} must be refused"
+        );
+        let set = client
+            .round_trip(
+                MessageKind::SetSetting,
+                serde_json::json!({"key": key, "value": "{}"}),
+            )
+            .await;
+        assert_eq!(
+            set.header.message_kind,
+            MessageKind::Error,
+            "set {key} must be refused"
+        );
+        assert!(
+            !String::from_utf8_lossy(&get.payload).contains("hunter2"),
+            "the refusal must not quote the row it refused"
         );
     }
 
-    client
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
+    // The refusals left the rows alone, and the connection alive.
+    assert_eq!(
+        ctx.settings
+            .lock()
+            .unwrap()
+            .get_setting("relay_device_token")
+            .unwrap()
+            .as_deref(),
+        Some(r#"{"token":"hunter2"}"#)
+    );
+    let layout = client
+        .round_trip(
+            MessageKind::SetSetting,
+            serde_json::json!({"key": "layout", "value": "{}"}),
         )
         .await;
-    assert_eq!(client.read().await.header.message_kind, MessageKind::Error);
+    assert_eq!(layout.header.message_kind, MessageKind::Response);
 }
 
-/// Phase 2 §1: one grid exists and it belongs to the host. Before this, any
-/// viewer could resize any shared session — which is both the defect that
-/// collapsed the host's terminal and a trust-boundary hole.
+/// With the projection out of the authorizer, the **session registry** is the
+/// only thing standing between a named id and an attachment — so what it does
+/// with an id that names nothing is now load-bearing rather than a backstop.
+/// An editor pane's id is the realistic case: it is a real id in the host's
+/// tree that was never a PTY.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_remote_client_may_not_resize_a_shared_session() {
+async fn an_id_with_no_session_behind_it_cannot_be_attached() {
     let root = tempfile::tempdir().unwrap();
-    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
-    client
-        .send(
-            MessageKind::Resize,
-            serde_json::json!({"id": "s1", "cols": 40, "rows": 10}),
-        )
-        .await;
-    let reply = client.read().await;
-    assert_eq!(
-        reply.header.message_kind,
-        MessageKind::Error,
-        "the host owns the grid: a viewer's window must never resize it"
-    );
-    // The reply is only half the claim. Sessions are created 80×24
-    // (`command_session`), so an unchanged grid is what proves the deny
-    // happened before the registry rather than alongside it.
-    assert_eq!(
-        ctx.registry.get("s1").unwrap().size(),
-        (80, 24),
-        "the deny must mean the grid did not move"
-    );
-}
+    let (mut client, _ctx, _stop) = remote_client(root.path(), "cat").await;
 
-/// A viewer renders the host's grid scaled to fit, so it must be told that
-/// grid before the snapshot it has to lay out.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn attaching_tells_the_client_the_session_size_before_the_snapshot() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
-    ctx.registry
-        .get("s1")
-        .unwrap()
-        .resize(120, 40, 0, 0)
-        .unwrap();
-
-    client
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-
-    let size = client.read().await;
-    assert_eq!(size.header.message_kind, MessageKind::SessionResized);
-    let size: SessionSizePayload = serde_json::from_slice(&size.payload).unwrap();
-    assert_eq!((size.id.as_str(), size.cols, size.rows), ("s1", 120, 40));
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
-}
-
-/// The host resizing its own window must re-pin every attached viewer, with
-/// no request from the viewer.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_resize_reaches_every_attached_client() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
-    client
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::SessionResized
-    );
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
-
-    ctx.registry
-        .get("s1")
-        .unwrap()
-        .resize(100, 30, 0, 0)
-        .unwrap();
-
-    // The attached viewer is told, without asking.
-    let pushed = loop {
-        let frame = client.read().await;
-        if frame.header.message_kind == MessageKind::SessionResized {
-            break frame;
-        }
-        assert_ne!(frame.header.message_kind, MessageKind::Error);
-    };
-    let pushed: SessionSizePayload = serde_json::from_slice(&pushed.payload).unwrap();
-    assert_eq!((pushed.cols, pushed.rows), (100, 30));
-}
-
-/// Phase 2 §2: the reader walks the pane level. Missing these ids denies
-/// every remote attach, so this is the load-bearing assertion of the change —
-/// and a v1 row from a Mac that has not updated yet must still parse.
-#[test]
-fn projection_v2_shares_every_pane_and_v1_still_parses() {
-    let store = brain_core::Store::open_in_memory().unwrap();
-    store.set_setting("remote_control", PROJECTION_V2).unwrap();
-    let ids = omniagent_pty_daemon::remote_session_ids(&store);
-    assert_eq!(
-        ids,
-        ["s1".to_string(), "s3".to_string()].into_iter().collect(),
-        "a pane is what a viewer attaches to"
-    );
-    assert!(omniagent_pty_daemon::remote_control_active(&store));
-
-    // A phase-1 row from a Mac that has not updated yet.
-    store.set_setting("remote_control", PROJECTION).unwrap();
-    assert_eq!(
-        omniagent_pty_daemon::remote_session_ids(&store),
-        ["s1".to_string()].into_iter().collect()
-    );
-}
-
-/// An idle Mac: a workspace is shared, its session has no panes open. Nothing
-/// is attachable, but the machine must stay reachable — that pairing is the
-/// whole reason `remote_control_active` counts workspaces and not sessions.
-#[test]
-fn a_v2_session_with_no_panes_shares_nothing_yet_keeps_the_machine_reachable() {
-    const IDLE: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
-    "sessions":[{"id":"g1","label":"Session 1","order":0,"panes":[]}]}]}"#;
-    let store = brain_core::Store::open_in_memory().unwrap();
-    store.set_setting("remote_control", IDLE).unwrap();
-    assert!(omniagent_pty_daemon::remote_session_ids(&store).is_empty());
-    assert!(omniagent_pty_daemon::remote_control_active(&store));
-}
-
-/// Phase 2 §2, driven through the real handler rather than the reader alone:
-/// with a v2 row active, a **pane** id attaches and the session-**group** id
-/// that contains it does not. `projection_v2_shares_every_pane_and_v1_still_parses`
-/// pins `remote_session_ids`; this pins that `serve_client`/`authorize_remote`
-/// act on what it returns.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_v2_projection_attaches_panes_and_refuses_the_session_group() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut client, _ctx, _stop) = remote_client_sharing(root.path(), "cat", PROJECTION_V2).await;
-
-    client
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "g1", "after_sequence": null}),
-        )
-        .await;
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Error,
-        "a session group is a UI grouping, never an attachable daemon session"
-    );
-
-    client
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::SessionResized
-    );
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
-}
-
-/// The safety net under the projection reader: not every pane id it collects
-/// is a PTY — editor and browser panes carry ids too. They are harmless
-/// because the registry never holds a session under them, and this is what
-/// says so out loud, so a future change that starts registering something
-/// under a non-terminal pane id fails here rather than silently sharing it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_shared_pane_with_no_session_behind_it_cannot_be_attached() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut client, _ctx, _stop) =
-        remote_client_sharing(root.path(), "cat", PROJECTION_V2_WITH_EDITOR).await;
-
-    client
-        .send(
+    let reply = client
+        .round_trip(
             MessageKind::Attach,
             serde_json::json!({"id": "e1", "after_sequence": null}),
         )
         .await;
-    let reply = client.read().await;
     assert_eq!(reply.header.message_kind, MessageKind::Error);
     let reply: serde_json::Value = serde_json::from_slice(&reply.payload).unwrap();
     assert!(
         reply["message"]
             .as_str()
             .is_some_and(|message| message.contains("not found")),
-        "the projection allowed it; the session registry is what refuses it: {reply}"
+        "the session registry is what refuses it: {reply}"
     );
 }
 
@@ -490,21 +553,3 @@ async fn a_shared_pane_with_no_session_behind_it_cannot_be_attached() {
 // listed, so nothing is ever published) and a local connection subscribed to
 // the feed. This file's clients are anonymous, so the same test written here
 // would pass against a daemon that pushed the roster to everybody.
-
-#[test]
-fn authorize_remote_checks_the_raw_input_session_id() {
-    use omniagent_pty_daemon::protocol::encode_raw_payload;
-    let allowed: HashSet<String> = ["s1".to_string()].into_iter().collect();
-    let ok = Frame::new(
-        MessageKind::Input,
-        1,
-        encode_raw_payload("s1", b"x").unwrap(),
-    );
-    let bad = Frame::new(
-        MessageKind::Input,
-        2,
-        encode_raw_payload("s2", b"x").unwrap(),
-    );
-    assert!(omniagent_pty_daemon::authorize_remote(&ok, &allowed).is_ok());
-    assert!(omniagent_pty_daemon::authorize_remote(&bad, &allowed).is_err());
-}

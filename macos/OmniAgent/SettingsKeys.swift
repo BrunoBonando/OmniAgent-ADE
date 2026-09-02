@@ -142,32 +142,28 @@ enum SettingsKey {
     /// — see `ReviewPanelStateCodec`. No TypeScript twin, by design.
     static let reviewPanel = "review_panel_native"
 
-    /// **A contract with the Rust daemon, not with the web build** — the
-    /// remote-session-control spec's §2
-    /// (docs/superpowers/specs/2026-08-30-remote-session-control-design.md).
-    /// What this Mac offers to remote viewers, derived from the layout and
-    /// `remoteControlWorkspaces`:
-    /// `{"workspaces":[{"id","name","sessions":[{"id","title","engine","group"}]}]}`
-    /// — see `RemoteControlProjection`. The daemon deserializes this row on
-    /// every authorization decision for a remote connection, so the key names
-    /// inside it are snake_case-exact and may not be renamed on one side
-    /// alone. No TypeScript twin, by design.
-    static let remoteControl = "remote_control"
-
-    /// Native-only — the workspace ids the user turned Remote Control on
-    /// for, as a JSON array of ids (`ClosedWorkspacesCodec`'s shape). The
-    /// user's *intent*; `remoteControl` above is what that intent projects
-    /// to right now. Kept apart so enabling a workspace with nothing running
-    /// survives until something does.
-    static let remoteControlWorkspaces = "remote_control_workspaces"
+    /// The machine-wide sharing switch (2026-09-01 remote environment
+    /// sharing spec §2): `{"enabled":true|false}`. Replaces
+    /// `remoteControlWorkspaces` (deleted with this change — sharing is one
+    /// switch, not a set of enabled workspaces) and `remoteControl`, the
+    /// per-workspace projection row Task 29 deleted along with the mirrored
+    /// sidebar tree that was its only reader. Read and written by
+    /// `RemoteSharingModel`; the daemon's `remote_control_active` reads this
+    /// exact row and shape.
+    static let remoteSharing = "remote_sharing"
 
     /// **A contract with the Rust daemon** — the spec's §2 "Host
     /// authentication — device tokens". `{"device_id","token","name","relay_url"}`,
-    /// written once by `RelayClient.deviceTokenRow` on the first Enable
-    /// Remote Control. The daemon authenticates to the relay with it; it
-    /// never leaves this Mac otherwise, and the relay itself stores only its
-    /// hash, so this row is the only copy. Deleting the server-side row
-    /// revokes the machine everywhere.
+    /// written by `RelayClient.deviceTokenRow` once `WorkspaceWindowController
+    /// .registerThisMachine` registers this Mac with the relay —
+    /// `toggleRemoteSharing` triggers that (via `ensureRelayRegistration`)
+    /// the first time "Share this environment" is switched on with no token
+    /// yet present, since nothing else does any more (the per-workspace
+    /// "Enable Remote Control" toggle this used to ride on is gone). The
+    /// daemon authenticates to the relay with it; it never leaves this Mac
+    /// otherwise, and the relay itself stores only its hash, so this row is
+    /// the only copy. Deleting the server-side row revokes the machine
+    /// everywhere.
     static let relayDeviceToken = "relay_device_token"
 
     /// **A contract with the Rust daemon, written from both sides** — the
@@ -187,4 +183,22 @@ enum SettingsKey {
     /// no-change suppression, since the app having last written `"[]"` is no
     /// evidence that the row on disk still is.
     static let remoteControlBlocked = "remote_control_blocked"
+
+    /// **A contract with the Rust daemon, written by the app, never sent
+    /// on the wire per-request** — Task 28 fix round 1 (2026-09-01 remote
+    /// environment sharing spec §4/§6). This machine's own login-shell
+    /// `PATH` (`EngineLauncher.searchPath`, resolved once by
+    /// `EngineLauncher.prewarm()` and published here on every prewarm
+    /// completion, local and never through `connection` — see
+    /// `write(_:to:machineLocal:)`'s own reasoning for why a row that
+    /// describes *this* Mac always targets `localConnection`). Read
+    /// directly by `session.rs`'s `resolve_engine_binary` — the same
+    /// login-shell `PATH` `HostState` already reports engine availability
+    /// from, so the two can no longer disagree about what a bare engine
+    /// name resolves to. Protected: the daemon refuses this key to a
+    /// remote `GetSetting`/`SetSetting` outright
+    /// (`protected_setting_key`), so a driving viewer can neither read
+    /// this Mac's directory layout nor plant a path ahead of the real
+    /// engine binaries.
+    static let engineSearchPath = "engine_search_path"
 }

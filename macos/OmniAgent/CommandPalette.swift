@@ -66,6 +66,24 @@ enum PaletteAction: Equatable {
     /// signed in: deleting nothing is a dead end, not an offer — which is
     /// why this one is not half of a pair like the two above.
     case deleteAccount
+    /// Settings › Remote's one control (2026-09-01 remote environment
+    /// sharing spec §10) — a fixed row, unlike the account/GitHub pairs
+    /// above: sharing is a plain on/off switch with one verb, not a mode
+    /// with a different one on each side.
+    case toggleRemoteSharing
+    /// Settings › Remote's blocked list (spec §7, §10) — a place inside a
+    /// section, which the standing rule says is findable by name.
+    case showBlockedMachines
+    /// Settings › Remote's activity history (spec §8, §10, Task 20) — the
+    /// daemon-witnessed log of what a remote viewer did, read back and
+    /// grouped by connection. Findable by name for the same reason
+    /// `showBlockedMachines` is: it is a place inside a section.
+    case showRemoteActivity
+    /// The takeover panel's two verbs (spec §7), reachable by typing rather
+    /// than only by finding the buttons. Present only while somebody is
+    /// actually connected — there is nothing to terminate otherwise.
+    case terminateRemoteConnection
+    case blockRemoteConnection
     /// Self-update, in its three takeable forms. Like the account rows
     /// above, only the one the current state actually allows becomes a row —
     /// offering "Restart to Update" with nothing downloaded is a dead end.
@@ -82,52 +100,23 @@ enum PaletteAction: Equatable {
     /// project, the closest real "go look at this" action available without
     /// a map/graph view.
     case revealProjectContext(project: String)
-    /// One of another machine's shared sessions (the remote-session-control
-    /// spec's §4 "Spotlight"), opened — or re-focused — on this Desk through
-    /// `WorkspaceWindowController.openRemoteSession`.
-    case openRemoteSession(deviceID: String, sessionID: String, title: String)
     /// A Help page — the privacy policy or the third-party notices — opened
     /// in the default browser.
     case openLegal(LegalDocument)
-    /// One of the View menu's three remote-pane zoom items. Zoom is what a
-    /// viewer has *instead* of a resize (the phase 2 spec's §1), so these
-    /// rows exist only while a remote pane has focus — which is also why they
-    /// are here at all: the standing "Spotlight finds everything" rule, over
-    /// a command with no other home than a menu the pane may not have raised.
-    case zoomRemotePane(RemoteZoom)
-    /// The list of machines watching one of this Mac's shared workspaces,
-    /// each with a Disconnect (the phase 2 spec's §5) — the popover the count
-    /// beside the globe opens, reached by name instead. A row only while
-    /// somebody is actually watching, since an empty list is a dead end.
-    case showRemoteViewers(workspaceID: String)
+    /// **Connect to ‹machine›** (2026-09-01 remote environment sharing spec
+    /// §6/§10, Task 24/25) — swaps this window onto that machine's daemon
+    /// through the connect ceremony. Disabled (`PaletteCommand.isEnabled`)
+    /// for the entire time another session is already live
+    /// (`RemoteSessionPicker.canConnect`); see that type's doc comment for
+    /// why this is belt-and-braces over the daemon's own structural refusal
+    /// rather than the guarantee itself.
+    case connectRemoteMachine(deviceID: String)
+    /// **End remote session** — present only while `activeRemoteSession !=
+    /// nil` (spec §10); swaps this window back onto its own daemon.
+    case endRemoteSession
     /// An informational row with nothing to run ("No matches…") — a
     /// no-op rather than reusing an unrelated action for "does nothing".
     case noop
-}
-
-/// The three zoom steps a remote pane has, each one the View menu item of the
-/// same name. Named rather than `in`/`out` because `in` is a keyword and a
-/// backticked case would read worse everywhere it is used.
-enum RemoteZoom: String, CaseIterable, Equatable {
-    case magnify
-    case shrink
-    case fit
-
-    var title: String {
-        switch self {
-        case .magnify: return "Zoom In"
-        case .shrink: return "Zoom Out"
-        case .fit: return "Actual Fit"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .magnify: return "plus.magnifyingglass"
-        case .shrink: return "minus.magnifyingglass"
-        case .fit: return "1.magnifyingglass"
-        }
-    }
 }
 
 /// The heading a row sits under, in the order the sections appear. Spotlight
@@ -253,42 +242,14 @@ struct PaletteWorkspace: Equatable {
     let path: String?
 }
 
-/// One of this Mac's shared workspaces with a machine on it right now (the
-/// phase 2 spec's §5), for the "Viewers of …" row. The names travel with it
-/// so the row can be found by typing the machine's name, which is what a
-/// person reaches for when they want to disconnect one.
-struct PaletteWatchedWorkspace: Equatable {
-    let id: String
-    let label: String
-    let viewerNames: [String]
-}
-
-/// One **pane** another machine shares — a terminal, since that is the only
-/// kind a viewer can attach to. A small struct rather than a tuple because
-/// rows are compared in tests, and tuples are not `Equatable`.
-///
-/// Named for the pane on purpose: `id` is a daemon session id, never the
-/// host's session-*group* id, and a row built from the wrong one attaches to
-/// nothing.
-struct PaletteRemotePane: Equatable {
-    let id: String
-    let title: String
-}
-
-/// One projected workspace on a remote machine.
-struct PaletteRemoteWorkspace: Equatable {
-    let id: String
-    let name: String
-    let panes: [PaletteRemotePane]
-}
-
-/// One online machine from the relay's device list with what it shares —
-/// the spotlight's own copy of `RemoteMachine`, flattened to the names its
-/// rows print and match.
+/// One online machine from the relay's device list — the spotlight's own
+/// copy of `RemoteMachine`. Task 29 collapses the projection this used to
+/// carry (workspaces, sessions, panes) away entirely: a viewer's app now
+/// swaps its whole connection onto the host's daemon, so there is nothing
+/// below the machine for a row to name any more — see `connectRemoteMachine`.
 struct PaletteRemoteMachine: Equatable {
     let deviceID: String
     let name: String
-    let workspaces: [PaletteRemoteWorkspace]
 }
 
 struct PaletteCommand: Equatable {
@@ -309,6 +270,13 @@ struct PaletteCommand: Equatable {
     /// Its own line under the title, as in Spotlight, rather than a suffix
     /// dimmed inside one.
     let subtitle: String?
+    /// Whether Return or a click actually runs `action`. `true` for every
+    /// row that existed before 2026-09-02 — the palette had no disabled rows
+    /// until **Connect to ‹machine›** needed one (spec §3, Task 25): shown
+    /// so it stays findable and explains itself (`subtitle` carries the
+    /// reason), but inert, the same "announced but disabled" shape
+    /// `WorkspacesHeaderMenus.plus` already draws for its own remote item.
+    let isEnabled: Bool
 
     init(
         id: String,
@@ -318,7 +286,8 @@ struct PaletteCommand: Equatable {
         keywords: String? = nil,
         section: PaletteSection = .places,
         subtitle: String? = nil,
-        symbol: String? = nil
+        symbol: String? = nil,
+        isEnabled: Bool = true
     ) {
         self.id = id
         self.title = title
@@ -328,6 +297,7 @@ struct PaletteCommand: Equatable {
         self.section = section
         self.subtitle = subtitle
         self.symbol = symbol
+        self.isEnabled = isEnabled
     }
 
     /// What the row draws: its own icon when it has one, its section's
@@ -421,16 +391,26 @@ struct CommandPaletteModel: Equatable {
         /// of its shared sessions becomes a row (the remote-session-control
         /// spec's §4 "Spotlight").
         remoteMachines: [PaletteRemoteMachine] = [],
-        /// Whether the focused pane is another Mac's terminal, which decides
-        /// whether the View menu's zoom items are rows — the same
-        /// one-row-only-where-it-can-be-taken rule the account rows follow.
-        remotePaneFocused: Bool = false,
-        /// This Mac's shared workspaces that somebody is watching right now,
-        /// for the "Viewers of …" rows.
-        watchedWorkspaces: [PaletteWatchedWorkspace] = [],
         /// What the self-update controller is doing, which decides which of
         /// the three update rows is offered.
-        updateState: UpdateState = .idle
+        updateState: UpdateState = .idle,
+        /// Whether sharing can be switched on at all — an
+        /// `auth_account_email` row exists. Defaults to `false`, fail-closed
+        /// like every other reading of this: a signed-out Mac has no device
+        /// registration to share with, and offering the switch there is
+        /// offering a button whose every outcome is a refusal.
+        canShareEnvironment: Bool = false,
+        /// The machine driving this Mac right now, by name — `nil` when
+        /// nobody is. Decides whether Terminate/Block are rows at all.
+        liveRemoteMachine: String? = nil,
+        /// How many machines are blocked, for the blocked-list row's detail.
+        blockedMachineCount: Int = 0,
+        /// The machine **this** Mac is driving right now (Task 25,
+        /// `RemoteSharingModel.activeRemoteSession`) — the opposite
+        /// direction from `liveRemoteMachine` above. Non-`nil` disables
+        /// every **Connect to ‹machine›** row (`RemoteSessionPicker
+        /// .canConnect`'s reasoning) and adds **End remote session**.
+        activeRemoteSession: RemoteSessionInfo? = nil
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -464,54 +444,44 @@ struct CommandPaletteModel: Equatable {
                 )
             }
         }
-        // Another machine's shared sessions, under the same Sessions heading:
-        // one row per machine, then one per attachable pane, each saying
-        // which machine and workspace it lives on (spec §4 "Spotlight").
+        // Connect to ‹machine› (spec §6/§10, Task 24/25): swaps this window
+        // onto that machine's daemon through the connect ceremony — a
+        // different action from the rows just above, which open one shared
+        // *pane* without disturbing this window's own environment.
+        // Disabled, with the reason as the subtitle, for the entire time a
+        // session is already live — `RemoteSessionPicker`'s own doc comment
+        // explains why this is belt-and-braces rather than the guarantee.
         for machine in remoteMachines {
-            let panes = machine.workspaces.flatMap { workspace in
-                workspace.panes.map { (workspace: workspace, pane: $0) }
-            }
+            let disabledReason = activeRemoteSession.map { "End the session with \($0.machineName) first" }
             commands.append(
                 PaletteCommand(
-                    id: "remote-machine:\(machine.deviceID)",
-                    title: machine.name,
-                    detail: "remote",
-                    // The machine row opens its first attachable pane — the
-                    // closest thing to "go to that Mac" a pane-shaped app
-                    // has. A machine sharing nothing (or sharing only
-                    // editors) is still findable; it just has nowhere to go
-                    // yet.
-                    action: panes.first.map { first in
-                        PaletteAction.openRemoteSession(
-                            deviceID: machine.deviceID,
-                            sessionID: first.pane.id,
-                            title: first.pane.title
-                        )
-                    } ?? PaletteAction.noop,
-                    keywords: "remote \(machine.name)",
-                    section: .sessions,
-                    subtitle: "Remote machine",
-                    symbol: "desktopcomputer.and.arrow.down"
+                    id: "remote-connect:\(machine.deviceID)",
+                    title: "Connect to \(machine.name)",
+                    detail: nil,
+                    action: .connectRemoteMachine(deviceID: machine.deviceID),
+                    keywords: "connect remote takeover drive machine \(machine.name)",
+                    section: .places,
+                    subtitle: disabledReason ?? "Take over \(machine.name)",
+                    symbol: "desktopcomputer.and.arrow.down",
+                    isEnabled: activeRemoteSession == nil
                 )
             )
-            for entry in panes {
-                commands.append(
-                    PaletteCommand(
-                        id: "remote:\(machine.deviceID)/\(entry.pane.id)",
-                        title: entry.pane.title,
-                        detail: "remote",
-                        action: .openRemoteSession(
-                            deviceID: machine.deviceID,
-                            sessionID: entry.pane.id,
-                            title: entry.pane.title
-                        ),
-                        keywords: "remote \(machine.name) \(entry.workspace.name)",
-                        section: .sessions,
-                        subtitle: "\(machine.name) · \(entry.workspace.name)",
-                        symbol: "desktopcomputer.and.arrow.down"
-                    )
+        }
+        // End remote session — present only while this Mac is driving one
+        // (spec §10's own "present only while a session is live").
+        if let activeRemoteSession {
+            commands.append(
+                PaletteCommand(
+                    id: "remote:end-session",
+                    title: "End remote session",
+                    detail: activeRemoteSession.machineName,
+                    action: .endRemoteSession,
+                    keywords: "end remote session disconnect stop driving \(activeRemoteSession.machineName)",
+                    section: .places,
+                    subtitle: "Return to this Mac's own environment",
+                    symbol: "arrow.uturn.backward"
                 )
-            }
+            )
         }
         // Walked once, emitted per kind: the outline's project/session order
         // survives inside each section, and the sections come out in the
@@ -803,6 +773,89 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
+        // Settings › Remote's switch (2026-09-01 remote environment sharing
+        // spec §10). One verb whichever way it is thrown, so unlike the
+        // account pairs above there is one row rather than two — but it is
+        // offered only where it can be taken: a Mac nobody is signed in to
+        // has no account to share with, and the switch itself refuses there
+        // (`RemoteSharingModel.setSharing`).
+        if canShareEnvironment {
+            commands.append(
+                PaletteCommand(
+                    id: "settings:remote:toggle-sharing",
+                    title: "Share this environment",
+                    detail: nil,
+                    action: .toggleRemoteSharing,
+                    keywords: "remote share sharing screen access connect environment",
+                    section: .places,
+                    subtitle: "Settings › Remote",
+                    symbol: "antenna.radiowaves.left.and.right"
+                )
+            )
+        }
+        // The blocked list, which is a place inside that section — always a
+        // row, empty or not: "nothing is blocked" is an answer somebody types
+        // this to get.
+        commands.append(
+            PaletteCommand(
+                id: "settings:remote:blocked",
+                title: "Blocked machines",
+                detail: blockedMachineCount == 0
+                    ? nil
+                    : (blockedMachineCount == 1 ? "1 machine" : "\(blockedMachineCount) machines"),
+                action: .showBlockedMachines,
+                keywords: "blocked block unblock remote machines banned refused allow",
+                section: .places,
+                subtitle: "Settings › Remote",
+                symbol: "hand.raised"
+            )
+        )
+        // Activity (spec §8, §10, Task 20) — a place inside the section,
+        // `showBlockedMachines`'s own reasoning: always a row, so "nothing
+        // has happened here" is still something the section can say.
+        commands.append(
+            PaletteCommand(
+                id: "settings:remote:activity",
+                title: "Remote activity",
+                detail: nil,
+                action: .showRemoteActivity,
+                keywords: "remote activity history log connections viewers audit",
+                section: .places,
+                subtitle: "Settings › Remote",
+                symbol: "list.bullet.rectangle"
+            )
+        )
+        // Terminate and Block, while there is a connection to end (spec §7,
+        // §10) — the takeover panel's two buttons, typeable. Absent
+        // otherwise, the same one-row-only-where-it-can-be-taken rule the
+        // account rows follow.
+        if let liveRemoteMachine {
+            commands.append(
+                PaletteCommand(
+                    id: "remote:terminate",
+                    title: "Terminate connection",
+                    detail: liveRemoteMachine,
+                    action: .terminateRemoteConnection,
+                    keywords: "terminate disconnect kick end remote connection "
+                        + "stop \(liveRemoteMachine)",
+                    section: .places,
+                    subtitle: "\(liveRemoteMachine) may connect again",
+                    symbol: "bolt.horizontal.circle"
+                )
+            )
+            commands.append(
+                PaletteCommand(
+                    id: "remote:block",
+                    title: "Block this machine",
+                    detail: liveRemoteMachine,
+                    action: .blockRemoteConnection,
+                    keywords: "block ban refuse kick remote connection \(liveRemoteMachine)",
+                    section: .places,
+                    subtitle: "Until you unblock it in Settings › Remote",
+                    symbol: "hand.raised.slash"
+                )
+            )
+        }
         // Self-update. One row, whichever one can be taken right now — the
         // same rule the account pair follows. `Spotlight finds everything`
         // (the repo's standing rule) is why these exist at all: the sidebar
@@ -851,52 +904,6 @@ struct CommandPaletteModel: Equatable {
         // Nothing to offer while a check or a download is already running.
         case .checking, .updating:
             break
-        }
-        // The View menu's zoom items, while there is a remote pane to zoom.
-        // A viewer never resizes the host's grid — it draws all of it, scaled
-        // — so these three are the only size control a watched session has,
-        // and the standing rule says every one of them is findable. Absent on
-        // a local pane for the reason `validateMenuItem` greys them there:
-        // there is no scale to change.
-        if remotePaneFocused {
-            for zoom in RemoteZoom.allCases {
-                commands.append(
-                    PaletteCommand(
-                        id: "view:zoom:\(zoom.rawValue)",
-                        title: zoom.title,
-                        detail: nil,
-                        action: .zoomRemotePane(zoom),
-                        keywords: "zoom remote scale magnify fit view pane",
-                        section: .places,
-                        subtitle: "View",
-                        symbol: zoom.symbol
-                    )
-                )
-            }
-        }
-        // Who is watching this Mac, and the Disconnect that goes with it —
-        // the same standing rule: the popover behind the sidebar's count is a
-        // place, so it is findable by name rather than only by knowing which
-        // glyph to click. Only workspaces with somebody on them, since the
-        // popover of an empty list has nothing to show.
-        for watched in watchedWorkspaces where !watched.viewerNames.isEmpty {
-            commands.append(
-                PaletteCommand(
-                    id: "viewers:\(watched.id)",
-                    title: "Viewers of \(watched.label)",
-                    detail: watched.viewerNames.count == 1
-                        ? "1 machine"
-                        : "\(watched.viewerNames.count) machines",
-                    action: .showRemoteViewers(workspaceID: watched.id),
-                    // Found by the machine's own name too: "disconnect Air"
-                    // is what someone types when a Mac has to go.
-                    keywords: "viewers watching remote disconnect "
-                        + watched.viewerNames.joined(separator: " "),
-                    section: .places,
-                    subtitle: "Remote Control",
-                    symbol: "display"
-                )
-            )
         }
         // The Help menu's two pages. Everything navigable is findable, and a
         // privacy policy nobody can locate is the same as not having one.

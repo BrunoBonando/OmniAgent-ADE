@@ -350,6 +350,124 @@ enum MachineStats {
     }
 }
 
+/// The one timer that samples [`MachineStats`] — every consumer of the
+/// gauges reads *this*, rather than calling `cpuFraction()`/`memoryFraction()`/
+/// `gpuFraction()` on its own.
+///
+/// That is not a style preference: `MachineStats.cpuFraction()` computes a
+/// delta against `lastTicks`, one piece of static state shared by every
+/// caller. Two independent samplers — the sidebar's own two-second `Timer`
+/// and a second one added for remote sharing (spec §4, Task 22) — would each
+/// silently overwrite the other's baseline, so *both* readings would be
+/// deltas against whichever caller happened to sample most recently rather
+/// than against their own last sample. `HostMetricsSource` is what makes that
+/// impossible instead of merely unlikely: one timer, one call to each
+/// `MachineStats` function per tick, fanned out to every observer.
+///
+/// Runs only while it has an observer, and stops the moment it has none —
+/// the sidebar's dial while its window is on screen, `HostStatePublisher`
+/// while the remote lease is held. Neither needing it is a machine with no
+/// visible sidebar and no viewer, which must do no work at all.
+final class HostMetricsSource {
+    static let shared = HostMetricsSource()
+
+    struct Snapshot {
+        var cpu: Double?
+        var memory: Double?
+        var gpu: Double?
+    }
+
+    private(set) var latest = Snapshot(cpu: nil, memory: nil, gpu: nil)
+
+    /// One observer's registration: its callback, and the cadence *it*
+    /// needs — fix round 1, IMPORTANT 1. The sidebar's dial has always
+    /// sampled every two seconds; `HostStatePublisher` needs the spec's own
+    /// 1 Hz. Sharing one timer must not mean picking the tighter of the two
+    /// and imposing it on the surface that never asked for it, so each
+    /// observer states its own requirement and the timer runs at whichever
+    /// is currently tightest — reverting the moment the observer that asked
+    /// for that tightness leaves.
+    private struct Observation {
+        let interval: TimeInterval
+        let block: (Snapshot) -> Void
+    }
+
+    private var observers: [ObjectIdentifier: Observation] = [:]
+    private var timer: Timer?
+
+    /// The cadence the running timer is actually using, or `nil` while
+    /// nothing is watching. Not `private`: `HostMetricsSourceCadenceTests`
+    /// asserts on this directly rather than waiting out real timer ticks —
+    /// `@testable import` reaches `internal`, not `private`.
+    private(set) var currentInterval: TimeInterval?
+
+    private init() {}
+
+    /// Registers `owner` for every future sample at `interval`, tightening
+    /// (or relaxing) the shared timer's cadence to the minimum currently
+    /// requested by anyone. Idempotent per owner, like
+    /// `ClaudeUsageLimitsPoller.addObserver`: re-registering replaces that
+    /// owner's interval and block, nobody else's.
+    func addObserver(_ owner: AnyObject, interval: TimeInterval, _ block: @escaping (Snapshot) -> Void) {
+        observers[ObjectIdentifier(owner)] = Observation(interval: interval, block: block)
+        reschedule()
+    }
+
+    /// Unregisters `owner`. The cadence relaxes to whatever the remaining
+    /// observers need, or the timer stops entirely once nobody is left.
+    func removeObserver(_ owner: AnyObject) {
+        observers.removeValue(forKey: ObjectIdentifier(owner))
+        reschedule()
+    }
+
+    /// Re-derives the tightest requested interval and re-arms the timer only
+    /// when that number actually changed — an observer joining or leaving at
+    /// an interval nobody's cadence depends on must not restart the timer
+    /// for no reason.
+    private func reschedule() {
+        guard let tightest = observers.values.map(\.interval).min() else {
+            timer?.invalidate()
+            timer = nil
+            currentInterval = nil
+            return
+        }
+        guard tightest != currentInterval else { return }
+        // A throwaway read establishes `MachineStats`'s delta baseline
+        // before the *first* timer this source ever starts — going from
+        // idle to watched, not merely re-tightening an already-running one,
+        // whose baseline is already recent enough to sample against.
+        if timer == nil {
+            _ = MachineStats.cpuFraction()
+        }
+        timer?.invalidate()
+        let timer = Timer(timeInterval: tightest, repeats: true) { [weak self] _ in self?.sample() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        currentInterval = tightest
+    }
+
+    private func sample() {
+        latest = Snapshot(
+            cpu: MachineStats.cpuFraction(),
+            memory: MachineStats.memoryFraction(),
+            gpu: MachineStats.gpuFraction()
+        )
+        for observation in observers.values { observation.block(latest) }
+    }
+
+    /// Clears every registration and stops the timer — only for the suite,
+    /// `ClaudeUsageLimitsPoller.resetForTesting`'s own pattern: `.shared` is
+    /// one singleton for the whole test process, so a cadence test has to be
+    /// able to start from nothing rather than from whatever an earlier
+    /// test's sidebar view left registered.
+    func resetForTesting() {
+        observers.removeAll()
+        timer?.invalidate()
+        timer = nil
+        currentInterval = nil
+    }
+}
+
 /// One machine stat in the hover card's git-tab language (`HoverGitStatView`):
 /// the big number over a small caption. Except there the colour names the
 /// column and here it *is* the reading — green while comfortable, amber past
@@ -648,16 +766,15 @@ final class SidebarStatGaugeView: NSView {
 
 /// The machine gauges pinned just above the foot's rows: CPU, memory and GPU
 /// side by side in the hover card's three-numbers arrangement — equal-width
-/// columns split by hairlines — resampled every two seconds while the sidebar
-/// is on screen.
+/// columns split by hairlines — resampled every two seconds, through
+/// [`HostMetricsSource`] at this card's own requested cadence, while the
+/// sidebar is on screen.
 final class SidebarSystemStatsView: NSView {
     static let height: CGFloat = 76
 
     let cpuGauge = SidebarStatGaugeView(name: "CPU")
     let memoryGauge = SidebarStatGaugeView(name: "MEM")
     let gpuGauge = SidebarStatGaugeView(name: "GPU")
-
-    private var timer: Timer?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -706,36 +823,83 @@ final class SidebarSystemStatsView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("System stats")
-
-        // A throwaway CPU read, so the first ticking sample has a baseline
-        // and the gauge shows a number two seconds in, not four.
-        _ = MachineStats.cpuFraction()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    /// Samples only while there is a window to show them in.
+    /// This card's own cadence (fix round 1, IMPORTANT 1) — unchanged from
+    /// before `HostMetricsSource` existed. Sharing a timer with
+    /// `HostStatePublisher`'s tighter 1 Hz must never mean this card samples
+    /// twice as often merely because something else is watching too; see
+    /// `HostMetricsSource.reschedule`'s doc for how that is kept true in both
+    /// directions.
+    static let sampleInterval: TimeInterval = 2
+
+    /// Watches [`HostMetricsSource`] only while there is a window to show
+    /// readings in — unregistering, not merely ignoring what arrives, so a
+    /// sidebar with no window is one fewer reason for the shared timer to
+    /// keep running at all.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        timer?.invalidate()
-        timer = nil
+        HostMetricsSource.shared.removeObserver(self)
         guard window != nil else { return }
-        sample()
-        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.sample() }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        HostMetricsSource.shared.addObserver(self, interval: Self.sampleInterval) { [weak self] snapshot in
+            // While driving another Mac (spec §4/§5, Task 26), this Mac's
+            // own kernel readings answer for the wrong machine — the dial
+            // stays on whatever `applyHostState` last put there instead.
+            guard let self, !self.isDrivingRemote else { return }
+            self.apply(cpu: snapshot.cpu, memory: snapshot.memory, gpu: snapshot.gpu)
+        }
     }
 
-    private func sample() {
+    /// Whether this window is currently driving another machine (spec §5,
+    /// Task 26) — set by `WorkspaceWindowController` alongside the takeover
+    /// panel. Flipping it re-applies whatever `applyHostState` last held, so
+    /// the dial catches up the instant a takeover begins or ends rather than
+    /// waiting for the next tick from either source — **instantly**, never
+    /// animated: the local and host readings are two different machines'
+    /// numbers, and travelling a needle between them would read as this
+    /// machine's own load lurching rather than as what it actually is, a
+    /// changed subject.
+    var isDrivingRemote = false {
+        didSet {
+            guard isDrivingRemote != oldValue else { return }
+            if isDrivingRemote {
+                applyHostState(lastHostState, animated: false)
+            } else {
+                // Resumes this Mac's own reading immediately rather than
+                // waiting out `sampleInterval`'s next tick — the same
+                // "no lasting blank" rule `SidebarClaudeLimitsView`'s own
+                // `isDrivingRemote` follows.
+                let snapshot = HostMetricsSource.shared.latest
+                apply(cpu: snapshot.cpu, memory: snapshot.memory, gpu: snapshot.gpu, animated: false)
+            }
+        }
+    }
+
+    private var lastHostState: HostStateModel?
+
+    /// The host's own gauges, read from `HostStateModel` — called on every
+    /// `HostState` push. A no-op while not driving: this only ever *narrows*
+    /// what is shown to what the model holds, so there is nothing to reapply
+    /// once a takeover ends besides the kernel readings already resuming on
+    /// their own next tick. `lastHostState` is still recorded either way, so
+    /// a takeover that begins between two pushes has something to show
+    /// immediately rather than waiting out a whole tick.
+    func applyHostState(_ hostState: HostStateModel?, animated: Bool = true) {
+        lastHostState = hostState
+        guard isDrivingRemote else { return }
         apply(
-            cpu: MachineStats.cpuFraction(),
-            memory: MachineStats.memoryFraction(),
-            gpu: MachineStats.gpuFraction()
+            cpu: hostState?.metrics?.cpu,
+            memory: hostState?.metrics?.mem,
+            gpu: hostState?.metrics?.gpu,
+            animated: animated
         )
     }
 
-    /// Split from `sample` so a test can feed fractions without a kernel.
+    /// Split from the `HostMetricsSource` callback so a test can feed
+    /// fractions without a kernel.
     func apply(cpu: Double?, memory: Double?, gpu: Double?, animated: Bool = true) {
         cpuGauge.apply(cpu, animated: animated)
         memoryGauge.apply(memory, animated: animated)
@@ -791,23 +955,36 @@ final class NavigationSidebarView: NSView {
     /// A session row's right-click, same contract: the pin state, the
     /// installed apps and the delete path all live on the controller.
     var sessionMenuProvider: ((SessionGroupNode) -> NSMenu?)?
-    /// A remote machine's session row was clicked — device id, session id,
-    /// title — forwarded to the controller, which owns the remote panes.
-    var onOpenRemoteSession: ((String, String, String) -> Void)?
     /// The plus menu's "Resume remote session…" — the controller opens the
     /// picker of the other Macs' shared sessions
     /// (`RemoteSessionPickerController`).
     var onResumeRemoteSession: (() -> Void)?
-    /// A workspace row's viewer count was pressed — the controller opens the
-    /// list of machines watching it (the phase 2 spec's §5). Same contract as
-    /// `workspaceMenuProvider`: the roster lives on the controller.
-    var onShowViewers: ((String) -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []
+    /// The remote live-session card (2026-09-01 remote environment sharing
+    /// spec §6, Task 25) — above the self-update card, which is above the
+    /// session/week limits card: remote session → update → limits, one
+    /// stack. Hidden until this window is actually driving another Mac
+    /// (`SidebarRemoteSessionWidget.swift`).
+    let remoteSessionWidget = SidebarRemoteSessionWidgetView()
     /// The self-update card, directly above the session/week limits card —
     /// same glass, same radius, same inset, hidden until there is an update to
     /// talk about (`SidebarUpdateWidget.swift`).
     let updateWidget = SidebarUpdateWidgetView()
+    /// Whether **Resume remote session…** may open the picker right now —
+    /// `false` for the entire time this window is driving another Mac (spec
+    /// §3's no-chaining rule, belt-and-braces over the daemon's own
+    /// structural refusal: `remote_chaining.rs` already refuses a remote
+    /// `Hello` once the local connection is gone past its grace, and this
+    /// Mac has none while it is driving — so leaving the item live here
+    /// costs nothing but a confusing click, never a second connection). Set
+    /// by `WorkspaceWindowController` off `RemoteSharingModel.onChange`.
+    var canResumeRemoteSession = true
+    /// The tooltip on a disabled **Resume remote session…** item — the same
+    /// sentence `RemoteSessionPicker.disabledReason` computes, named
+    /// "‹machine›" so the reason travels with the item rather than requiring
+    /// a second look elsewhere.
+    var remoteSessionDisabledReason: String?
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
     let workspacesTree = WorkspacesTreeView()
     let claudeLimits = SidebarClaudeLimitsView()
@@ -880,23 +1057,19 @@ final class NavigationSidebarView: NSView {
         workspacesTree.sessionMenuProvider = { [weak self] session in
             self?.sessionMenuProvider?(session)
         }
-        workspacesTree.onOpenRemoteSession = { [weak self] deviceID, sessionID, title in
-            self?.onOpenRemoteSession?(deviceID, sessionID, title)
-        }
-        workspacesTree.onShowViewers = { [weak self] id in self?.onShowViewers?(id) }
 
-        // The update card and the limits card are one stack of cards at the
-        // foot of the column, and the stack is what makes hiding the update
-        // one work: NSStackView drops a hidden arranged subview from the
-        // layout, where a pinned view would keep its height constraint and
-        // leave a gap above the gauges.
+        // The remote session, update and limits cards are one stack of cards
+        // at the foot of the column, and the stack is what makes hiding the
+        // first two work: NSStackView drops a hidden arranged subview from
+        // the layout, where a pinned view would keep its height constraint
+        // and leave a gap above the gauges.
         updateWidget.isHidden = true
-        let bottomCards = NSStackView(views: [updateWidget, claudeLimits])
+        let bottomCards = NSStackView(views: [remoteSessionWidget, updateWidget, claudeLimits])
         bottomCards.orientation = .vertical
         bottomCards.alignment = .leading
         bottomCards.spacing = 8
         bottomCards.translatesAutoresizingMaskIntoConstraints = false
-        for card in [updateWidget, claudeLimits] {
+        for card in [remoteSessionWidget, updateWidget, claudeLimits] {
             card.widthAnchor.constraint(equalTo: bottomCards.widthAnchor).isActive = true
         }
 
@@ -973,13 +1146,7 @@ final class NavigationSidebarView: NSView {
         projectLabels: [String: String],
         eventTimes: [String: Double] = [:],
         customizations: [String: WorkspaceCustomization] = [:],
-        sessionMeta: [String: SessionMeta] = [:],
-        remoteControlWorkspaceIDs: Set<String> = [],
-        remoteMachines: [RemoteMachineTreeEntry] = [],
-        /// Which machines are watching each workspace right now, workspace
-        /// id -> machine names (the phase 2 spec's §5). Empty for all but the
-        /// rare shared workspace with a viewer on it.
-        remoteViewerNames: [String: [String]] = [:]
+        sessionMeta: [String: SessionMeta] = [:]
     ) {
         let grouped = SessionOutline.group(panes, focusedPaneID: focusedPaneID)
         var entries: [WorkspaceTreeEntry] = []
@@ -992,9 +1159,7 @@ final class NavigationSidebarView: NSView {
                     id: workspace.id,
                     label: custom?.displayName ?? workspace.label,
                     sessions: grouped.first { $0.project == workspace.id }?.sessions ?? [],
-                    tint: custom?.color?.tint,
-                    remoteControl: remoteControlWorkspaceIDs.contains(workspace.id),
-                    viewerNames: remoteViewerNames[workspace.id] ?? []
+                    tint: custom?.color?.tint
                 )
             )
         }
@@ -1006,9 +1171,7 @@ final class NavigationSidebarView: NSView {
                     label: custom?.displayName
                         ?? SessionOutline.projectLabel(node.project, labels: projectLabels),
                     sessions: node.sessions,
-                    tint: custom?.color?.tint,
-                    remoteControl: remoteControlWorkspaceIDs.contains(node.project),
-                    viewerNames: remoteViewerNames[node.project] ?? []
+                    tint: custom?.color?.tint
                 )
             )
         }
@@ -1018,8 +1181,7 @@ final class NavigationSidebarView: NSView {
             focusedPaneID: focusedPaneID,
             statuses: statuses,
             eventTimes: eventTimes,
-            meta: sessionMeta,
-            remoteMachines: remoteMachines
+            meta: sessionMeta
         )
     }
 
@@ -1035,12 +1197,20 @@ final class NavigationSidebarView: NSView {
     }
 
     /// The plus menu over whatever the tree currently renders.
+    ///
+    /// `resumeRemoteSession` is `nil` — the existing "announced but disabled
+    /// future" shape `WorkspacesHeaderMenus.plus` already draws — for the
+    /// entire time this window is driving another Mac
+    /// (`canResumeRemoteSession`); its tooltip carries the reason (spec §3).
     func makePlusMenu() -> NSMenu {
         WorkspacesHeaderMenus.plus(
             workspaces: workspaceMenuEntries,
             startSession: { [weak self] id in self?.onStartSession?(id) },
             addLocalFolder: { [weak self] in self?.onAddLocalFolder?() },
-            resumeRemoteSession: { [weak self] in self?.onResumeRemoteSession?() }
+            resumeRemoteSession: canResumeRemoteSession
+                ? { [weak self] in self?.onResumeRemoteSession?() }
+                : nil,
+            remoteSessionDisabledReason: remoteSessionDisabledReason
         )
     }
 

@@ -3,10 +3,13 @@
 //! relay. The daemon must dial the control socket with the device token, send
 //! its hello, dial a data socket for every `{"open": id}`, and run the real
 //! `serve_client(…, ClientTrust::Remote)` over that data socket — so a viewer
-//! gets `HelloAck`, an `Attach` on a shared session gets `Snapshot`, and a
-//! `Kill` is refused. Emptying the projection closes the control socket, a
-//! `401` stops the daemon dialling until the token row changes, and a relay
-//! that goes silent is dropped and re-dialled.
+//! gets `HelloAck`, an `Attach` gets `Snapshot`, a `Kill` goes through (phase
+//! 3 §3: the lease holder drives the machine) and a `ListViewers` still does
+//! not. Turning sharing off closes the control socket, a `401`
+//! stops the daemon dialling until the token row changes, and a relay that
+//! goes silent is dropped and re-dialled.
+
+mod support;
 
 use futures_util::{SinkExt, StreamExt};
 use omniagent_pty_daemon::protocol::{Frame, MessageKind};
@@ -34,29 +37,58 @@ fn command_session(id: &str, script: &str) -> CreateSession {
     }
 }
 
-/// Boots a daemon with shared session `s1`, writes the projection and a device
-/// token whose `relay_url` points at `port`, and starts the relay task —
-/// with the production ping interval, or `ping_every` when given.
+/// Boots a daemon with shared session `s1`, writes the projection, turns
+/// `remote_sharing` on, and writes a device token whose `relay_url` points
+/// at `port`, then starts the relay task — with the production ping
+/// interval, or `ping_every` when given.
 async fn start_daemon_with_relay(
     root: &std::path::Path,
     port: u16,
     ping_every: Option<Duration>,
 ) -> (ClientContext, oneshot::Sender<()>) {
-    start_daemon_with_projection(root, port, ping_every, PROJECTION).await
+    start_daemon_with_projection(root, port, ping_every, PROJECTION, true).await
 }
 
-/// [`start_daemon_with_relay`] with the `remote_control` row spelled out — the
-/// seam the "idle workspace" cases need, since what the projection *lists* is
-/// the whole question there.
+/// [`start_daemon_with_relay`] with the stale `remote_control` row and the
+/// `remote_sharing` switch spelled out separately — the seam the "sharing is
+/// decoupled from the projection" cases need. `remote_control` gates nothing
+/// any more (Task 6 removed session-id confinement from `authorize_remote`,
+/// and Task 29 deleted the reader entirely); it is written here only to prove
+/// a leftover row from before that deletion cannot narrow access.
+/// `sharing_enabled` alone gates whether the control socket dials at all.
 async fn start_daemon_with_projection(
     root: &std::path::Path,
     port: u16,
     ping_every: Option<Duration>,
     projection: &str,
+    sharing_enabled: bool,
 ) -> (ClientContext, oneshot::Sender<()>) {
+    let (ctx, stop) = boot_daemon(root, port, projection, sharing_enabled).await;
+    // The host's own app. Spec §2's third condition: the daemon holds no
+    // control channel at all without a local connection, so every test here
+    // that expects a dial has to arrange one — and the two tests that use
+    // [`boot_daemon`] directly are the ones about not having it.
+    support::hold_local_client(&ctx).await;
+    match ping_every {
+        Some(every) => tokio::spawn(run_relay_with(ctx.clone(), every)),
+        None => tokio::spawn(run_relay(ctx.clone())),
+    };
+    (ctx, stop)
+}
+
+/// The daemon, the session, the settings rows — everything except the host's
+/// own app and the relay task, which the local-app tests arrange themselves.
+async fn boot_daemon(
+    root: &std::path::Path,
+    port: u16,
+    projection: &str,
+    sharing_enabled: bool,
+) -> (ClientContext, oneshot::Sender<()>) {
+    // Signed in, so the account check (spec §9) has an account directory to
+    // compare the relay's assertion against — the one [`open`] asserts.
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
-        root.join("brain-data"),
+        support::account_data_dir(&root.join("brain-data"), support::HOST_ACCOUNT_EMAIL),
     )
     .await
     .unwrap();
@@ -71,6 +103,16 @@ async fn start_daemon_with_projection(
         store.set_setting("remote_control", projection).unwrap();
         store
             .set_setting(
+                "remote_sharing",
+                if sharing_enabled {
+                    r#"{"enabled":true}"#
+                } else {
+                    r#"{"enabled":false}"#
+                },
+            )
+            .unwrap();
+        store
+            .set_setting(
                 "relay_device_token",
                 &format!(
                     r#"{{"device_id":"dev1","token":"tok","name":"Test Mac","relay_url":"http://127.0.0.1:{port}"}}"#
@@ -78,12 +120,29 @@ async fn start_daemon_with_projection(
             )
             .unwrap();
     }
+    // Signed in: the account check compares the relay's assertion against the
+    // account directory AND that directory's own `auth_account_email` row.
+    support::sign_in_as(&ctx, support::HOST_ACCOUNT_EMAIL);
     ctx.settings_changed.notify_one();
-    match ping_every {
-        Some(every) => tokio::spawn(run_relay_with(ctx.clone(), every)),
-        None => tokio::spawn(run_relay(ctx.clone())),
-    };
     (ctx, stop)
+}
+
+/// The relay's `open` control message, carrying the identity it asserts for
+/// the viewer on the other end (spec §9). Every `open` the real relay sends
+/// has one; the tests that leave it out are the ones about what happens when
+/// it does not.
+fn open(conn_id: &str) -> String {
+    serde_json::json!({
+        "open": conn_id,
+        "viewer": {
+            "user_sub": "auth0|bruno",
+            "account_email": support::HOST_ACCOUNT_EMAIL,
+            "ip": "203.0.113.7",
+            "country": "DE",
+            "client": "OmniAgent/1.7.22 macOS 27.0",
+        },
+    })
+    .to_string()
 }
 
 /// Accepts one TCP connection from the daemon and refuses the WebSocket
@@ -172,6 +231,28 @@ where
     }
 }
 
+/// Sends one frame and returns the daemon's **reply** to it.
+///
+/// An attached viewer's socket carries pushes too (`SessionStatus`, `Output`,
+/// and — now that a remote `Kill` goes through — `SessionExited`), so the
+/// reply is picked out by kind rather than by skipping a list of pushes that
+/// grows every time the allowlist does: a control frame is answered with
+/// `Response` or `Error`, and nothing else is an answer.
+async fn reply_over_ws(ws: &mut WebSocketStream<TcpStream>, frame: Frame) -> Frame {
+    ws.send(Message::Binary(frame.encode().unwrap().into()))
+        .await
+        .unwrap();
+    loop {
+        let frame = read_frame_from_ws(ws).await;
+        if matches!(
+            frame.header.message_kind,
+            MessageKind::Response | MessageKind::Error
+        ) {
+            return frame;
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
     let root = tempfile::tempdir().unwrap();
@@ -195,7 +276,7 @@ async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
         "hello was {hello_text}"
     );
     control
-        .send(Message::Text(r#"{"open":"c1"}"#.into()))
+        .send(Message::Text(open("c1").into()))
         .await
         .unwrap();
 
@@ -223,40 +304,39 @@ async fn daemon_dials_the_relay_and_serves_a_viewer_over_the_data_socket() {
     data.send(Message::Binary(attach.encode().unwrap().into()))
         .await
         .unwrap();
-    // The host's grid crosses the relay ahead of the screen drawn on it.
-    assert_eq!(
-        read_frame_from_ws(&mut data).await.header.message_kind,
-        MessageKind::SessionResized
-    );
+    // No `SessionResized` push crosses the relay any more (2026-09-01 remote
+    // environment sharing spec §5): the viewer owns the grid it is driving,
+    // so the attach reply is the snapshot itself.
     assert_eq!(
         read_frame_from_ws(&mut data).await.header.message_kind,
         MessageKind::Snapshot
     );
 
-    let kill = Frame::new(
-        MessageKind::Kill,
-        3,
-        serde_json::to_vec(&serde_json::json!({"id": "s1"})).unwrap(),
-    );
-    data.send(Message::Binary(kill.encode().unwrap().into()))
-        .await
-        .unwrap();
-    // The attachment above streams pushes (`SessionStatus`, `Output`) on the
-    // same socket; the first *reply* after `Kill` must be the refusal.
-    let reply = loop {
-        let frame = read_frame_from_ws(&mut data).await;
-        if !matches!(
-            frame.header.message_kind,
-            MessageKind::SessionStatus | MessageKind::Output
-        ) {
-            break frame;
-        }
-    };
-    assert_eq!(reply.header.message_kind, MessageKind::Error);
+    // The boundary still applies over the relay: `ListViewers` is the host's
+    // view of who is watching it, and never a viewer's to ask for.
+    let refused = reply_over_ws(
+        &mut data,
+        Frame::new(MessageKind::ListViewers, 3, b"{}".to_vec()),
+    )
+    .await;
+    assert_eq!(refused.header.message_kind, MessageKind::Error);
+
+    // ... and the phase-3 widening reaches through it too. `Kill` was refused
+    // here in phase 2; a lease holder drives the machine (spec §3).
+    let killed = reply_over_ws(
+        &mut data,
+        Frame::new(
+            MessageKind::Kill,
+            4,
+            serde_json::to_vec(&serde_json::json!({"id": "s1"})).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(killed.header.message_kind, MessageKind::Response);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn relay_disconnects_when_the_projection_empties() {
+async fn relay_disconnects_when_sharing_is_turned_off() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -288,13 +368,13 @@ async fn relay_disconnects_when_the_projection_empties() {
     ctx.settings
         .lock()
         .unwrap()
-        .set_setting("remote_control", r#"{"workspaces":[]}"#)
+        .set_setting("remote_sharing", r#"{"enabled":false}"#)
         .unwrap();
     ctx.settings_changed.notify_one();
 
     let closed = tokio::time::timeout(Duration::from_secs(4), control.next())
         .await
-        .expect("control socket must close within 4 s of the projection emptying");
+        .expect("control socket must close within 4 s of sharing turning off");
     assert!(
         matches!(closed, None | Some(Ok(Message::Close(_))) | Some(Err(_))),
         "expected the control socket to close, got {closed:?}"
@@ -362,46 +442,253 @@ async fn a_silent_relay_is_dropped_and_redialled() {
     drop(control);
 }
 
-/// Spec §2: the control channel is up *iff* the projection lists ≥ 1
-/// **workspace**. An enabled workspace with nothing running in it is emitted
-/// with an empty `sessions` array on purpose — that idle Mac is precisely the
-/// one a viewer wants to reach — so the daemon must dial the relay for it.
+/// Spec §2: the control channel is up *iff* `remote_sharing` is on —
+/// machine-wide, not gated on what `remote_control` lists. An empty
+/// projection (no workspace, nothing running) still reaches the relay once
+/// sharing is on, because that idle Mac is precisely the one a viewer wants
+/// to find.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_enabled_workspace_with_no_sessions_still_dials_the_relay() {
+async fn sharing_enabled_dials_the_relay_even_with_an_empty_projection() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (_ctx, _stop) = start_daemon_with_projection(
-        root.path(),
-        port,
-        None,
-        r#"{"workspaces":[{"id":"/a","name":"Alpha","sessions":[]}]}"#,
-    )
-    .await;
+    let (_ctx, _stop) =
+        start_daemon_with_projection(root.path(), port, None, r#"{"workspaces":[]}"#, true).await;
 
     let (mut control, seen_path, seen_auth) = accept_ws(&listener).await;
     assert_eq!(seen_path, "/v1/device");
     assert_eq!(seen_auth, "Bearer tok");
     let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
         .await
-        .expect("an idle-but-enabled machine must still reach the relay")
+        .expect("an idle-but-shared machine must still reach the relay")
         .unwrap()
         .unwrap();
     assert!(hello.to_text().unwrap().contains("Test Mac"));
 }
 
-/// The other half of the same rule: no enabled workspace, no tunnel.
+/// Spec §2 condition 3 at the tunnel, and with it the no-chaining property of
+/// §3: with the switch on and the token written, a machine whose app is not
+/// attached does not dial the relay at all — and it becomes reachable, with no
+/// settings write of any kind, the moment its app connects.
+///
+/// That second half is the one a `Notify` alone cannot do: a local connection
+/// appearing pokes nothing, so the relay has to be re-testing on a tick or an
+/// app restart would leave the machine dark until the next time anything wrote
+/// a setting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_empty_workspace_list_never_dials_the_relay() {
+async fn no_local_app_means_no_tunnel_until_one_connects() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (_ctx, _stop) =
-        start_daemon_with_projection(root.path(), port, None, r#"{"workspaces":[]}"#).await;
+
+    // Everything `start_daemon_with_relay` does, minus the host's own app.
+    let (ctx, _stop) = boot_daemon(root.path(), port, PROJECTION, true).await;
+    tokio::spawn(run_relay(ctx.clone()));
 
     let dialled = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
     assert!(
         dialled.is_err(),
-        "the daemon dialled the relay with nothing shared"
+        "a Mac with no app attached dialled the relay"
     );
+
+    support::hold_local_client(&ctx).await;
+    let (mut control, path, _) = accept_ws(&listener).await;
+    assert_eq!(path, "/v1/device");
+    let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .expect("the tunnel must come up once the app is attached")
+        .unwrap()
+        .unwrap();
+    assert!(hello.to_text().unwrap().contains("Test Mac"));
+}
+
+/// The grace, at the tunnel: the app going away holds the control channel open
+/// for a few seconds and then closes it.
+///
+/// Real seconds, deliberately — this is the one test that exercises the timer
+/// wiring rather than the condition, and a paused clock cannot be mixed with
+/// the real sockets this file is built on without making every I/O timeout
+/// fire early.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_tunnel_closes_once_the_local_app_has_been_gone_past_the_grace() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ctx, _stop) = boot_daemon(root.path(), port, PROJECTION, true).await;
+    let app = support::hold_local_client(&ctx).await;
+    tokio::spawn(run_relay(ctx.clone()));
+
+    let (mut control, _, _) = accept_ws(&listener).await;
+    let hello = tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(hello.to_text().unwrap().contains("Test Mac"));
+
+    // The app quits — a `rebuild-app.sh` restart, or an app that has gone to
+    // drive another Mac. Aborting the task that owns it drops its end of the
+    // pipe, which is what quitting does.
+    app.abort();
+    let inside_the_grace = tokio::time::timeout(Duration::from_secs(2), control.next()).await;
+    assert!(
+        inside_the_grace.is_err(),
+        "the control socket closed inside the grace: {inside_the_grace:?}"
+    );
+
+    let closed = tokio::time::timeout(Duration::from_secs(8), control.next())
+        .await
+        .expect("the control socket must close once the grace expires");
+    assert!(
+        matches!(closed, None | Some(Ok(Message::Close(_))) | Some(Err(_))),
+        "expected the control socket to close, got {closed:?}"
+    );
+}
+
+/// The other half of the same rule: sharing off, no tunnel — even with a
+/// non-empty projection, because the projection no longer decides this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_disabled_never_dials_the_relay_even_with_a_populated_projection() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (_ctx, _stop) =
+        start_daemon_with_projection(root.path(), port, None, PROJECTION, false).await;
+
+    let dialled = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+    assert!(
+        dialled.is_err(),
+        "the daemon dialled the relay with sharing off"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The relay asserts who is connecting (spec §9)
+// ---------------------------------------------------------------------------
+
+/// The identity travels from the control channel's `open` message onto the
+/// data connection it describes — and it is that identity, not the client's
+/// own `Hello`, that the daemon records.
+///
+/// The viewer here lies in the one message it controls: its `Hello` carries an
+/// `account_email` of its own choosing. `HelloPayload` has no such field, so
+/// serde drops it, and what ends up on the lease is what the relay said. That
+/// is the whole property — the trusted and the self-reported halves arrive by
+/// different routes and only one of them is ever read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_relay_asserted_identity_reaches_the_connection() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ctx, _stop) = start_daemon_with_relay(root.path(), port, None).await;
+
+    let (mut control, _, _) = accept_ws(&listener).await;
+    tokio::time::timeout(Duration::from_secs(4), control.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    control
+        .send(Message::Text(open("c1").into()))
+        .await
+        .unwrap();
+
+    let (mut data, path, _) = accept_ws(&listener).await;
+    assert_eq!(path, "/v1/device/conn/c1");
+    let hello = Frame::new(
+        MessageKind::Hello,
+        1,
+        serde_json::to_vec(&serde_json::json!({
+            "client": "relay-loopback",
+            "viewer_id": "v-air",
+            "machine_name": "Air",
+            // The lie. Nothing reads it; nothing may ever read it.
+            "account_email": "someone@else.com",
+            "user_sub": "auth0|someone-else",
+        }))
+        .unwrap(),
+    );
+    data.send(Message::Binary(hello.encode().unwrap().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_frame_from_ws(&mut data).await.header.message_kind,
+        MessageKind::HelloAck
+    );
+
+    let held = ctx
+        .connections
+        .lease_holder()
+        .expect("the admitted viewer holds the lease");
+    assert_eq!(
+        held.asserted.account_email.as_deref(),
+        Some(support::HOST_ACCOUNT_EMAIL),
+        "the client's own Hello reached the identity the daemon trusts"
+    );
+    assert_eq!(held.asserted.user_sub.as_deref(), Some("auth0|bruno"));
+    assert_eq!(held.asserted.ip.as_deref(), Some("203.0.113.7"));
+    assert_eq!(held.asserted.country.as_deref(), Some("DE"));
+    // …and the self-reported half is still kept, still labelled as such.
+    assert_eq!(held.machine_name, "Air");
+    assert_eq!(held.viewer_id.as_deref(), Some("v-air"));
+}
+
+/// A data connection the relay never described is refused outright: the
+/// account check has nothing to run on, and a check that can be skipped by
+/// leaving a field out is not a check.
+///
+/// Both shapes of "not described" are covered — the key missing, and an
+/// explicit `null` — because they arrive at `serde_json` as the same value and
+/// must leave it as the same decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_data_connection_the_relay_did_not_describe_is_closed_unserved() {
+    for undescribed in [r#"{"open":"c1"}"#, r#"{"open":"c1","viewer":null}"#] {
+        let root = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ctx, _stop) = start_daemon_with_relay(root.path(), port, None).await;
+
+        let (mut control, _, _) = accept_ws(&listener).await;
+        tokio::time::timeout(Duration::from_secs(4), control.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        control
+            .send(Message::Text(undescribed.into()))
+            .await
+            .unwrap();
+
+        let (mut data, path, _) = accept_ws(&listener).await;
+        assert_eq!(path, "/v1/device/conn/c1");
+        let hello = Frame::new(
+            MessageKind::Hello,
+            1,
+            serde_json::to_vec(&serde_json::json!({"client": "relay-loopback"})).unwrap(),
+        );
+        let _ = data
+            .send(Message::Binary(hello.encode().unwrap().into()))
+            .await;
+
+        let closed = tokio::time::timeout(Duration::from_secs(4), async {
+            while let Some(message) = data.next().await {
+                match message {
+                    Ok(Message::Close(_)) | Err(_) => return true,
+                    Ok(Message::Binary(_)) => return false,
+                    Ok(_) => {}
+                }
+            }
+            true
+        })
+        .await;
+        assert_eq!(
+            closed,
+            Ok(true),
+            "an undescribed data connection was served: {undescribed}"
+        );
+        assert!(
+            ctx.connections.lease_holder().is_none(),
+            "an undescribed data connection took the lease: {undescribed}"
+        );
+    }
 }

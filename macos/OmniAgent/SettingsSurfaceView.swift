@@ -24,6 +24,10 @@ import AppKit
 enum SettingsSection: String, CaseIterable {
     case general
     case accounts
+    /// The machine-wide sharing switch (2026-09-01 remote environment
+    /// sharing spec §2, §10) — next to Accounts, not its own group: who else
+    /// can be this account is the same neighbourhood as who this account is.
+    case remote
     case sessions
     case themes
     case accessibility
@@ -35,6 +39,7 @@ enum SettingsSection: String, CaseIterable {
         switch self {
         case .general: return "General"
         case .accounts: return "Accounts"
+        case .remote: return "Remote"
         case .sessions: return "Sessions"
         case .themes: return "Themes"
         case .accessibility: return "Accessibility"
@@ -49,6 +54,7 @@ enum SettingsSection: String, CaseIterable {
         switch self {
         case .general: return "gearshape"
         case .accounts: return "person.2"
+        case .remote: return "antenna.radiowaves.left.and.right"
         case .sessions: return "arrow.triangle.branch"
         case .themes: return "paintpalette"
         case .accessibility: return "accessibility"
@@ -287,6 +293,11 @@ final class SettingsSurfaceView: NSView {
     /// The same, for the GitHub pair: the spotlight offers "Disconnect
     /// GitHub" or "Connect GitHub…" off this one reading.
     private(set) var accountGitHubConnected = false
+    /// The address the account signs in with, `""` while there is none —
+    /// the app's own copy of the `auth_account_email` row the daemon's
+    /// account check runs on. Read by the sharing gate (`canShare`), which
+    /// is why it is stored rather than only rendered into `accountField`.
+    private(set) var accountEmail = ""
     /// The linked handle, without the `@` — `""` when not connected. Home's
     /// branch dropdown reads this to show who is actually connected instead
     /// of repeating the account bool as bare text.
@@ -299,6 +310,83 @@ final class SettingsSurfaceView: NSView {
     var onConnectGitHub: (() -> Void)?
     var onDisconnectGitHub: (() -> Void)?
     var onDeleteAccount: (() -> Void)?
+    /// Remote (2026-09-01 remote environment sharing spec §2, §10): the
+    /// sharing switch, this Mac's own relay registration, the blocked list
+    /// and — since Task 20 — the daemon-witnessed activity history.
+    let shareToggle = NSButton(checkboxWithTitle: "Share this environment", target: nil, action: nil)
+    /// Seeded with the sharing copy and swapped for the sign-in copy by
+    /// `applyRemoteSharing(isSharing:canShare:)`, which init calls — the two
+    /// strings live as statics beside it so this field cannot drift from the
+    /// state that chose it.
+    let shareExplanationField = ShellFont.label(
+        SettingsSurfaceView.shareExplanation,
+        font: ShellFont.ui(12),
+        color: ShellPalette.inkMuted
+    )
+    let thisMachineHeaderField = ShellFont.label("This machine", font: ShellFont.ui(13, .semibold), color: ShellPalette.ink)
+    /// This Mac's own name and device id, from the `relay_device_token` row
+    /// — read-only here; registration itself is a later task's to wire up
+    /// to the sharing switch (see `WorkspaceWindowController.registerThisMachine`).
+    let thisMachineNameField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
+    let thisMachineIDField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkMuted)
+    /// Blocked machines (spec §7): one row per id in the daemon's
+    /// `remote_control_blocked`, each with the **Unblock** that is the only
+    /// way an entry ever leaves that row. The daemon writes the row on every
+    /// Block — a kick has to hold with the app closed — and the app only
+    /// removes from it, which is why this list is read-only apart from those
+    /// buttons.
+    let blockedHeaderField = ShellFont.label(
+        "Blocked machines",
+        font: ShellFont.ui(13, .semibold),
+        color: ShellPalette.ink
+    )
+    /// Shown in place of the list when nothing is blocked. An empty state,
+    /// not an absent section: "no machines are blocked" is an answer, and a
+    /// section that vanishes leaves the host wondering where it went.
+    let blockedEmptyField = ShellFont.label(
+        "No machines are blocked.",
+        font: ShellFont.ui(13),
+        color: ShellPalette.inkMuted
+    )
+    /// The rows themselves, rebuilt whenever the list changes.
+    let blockedList = NSStackView()
+    /// The ids as the model last reported them — one reading, so the list,
+    /// its empty state and the spotlight's row cannot disagree.
+    private(set) var blockedViewerIDs: [String] = []
+    /// Pressed on a row's Unblock; the controller does the write.
+    var onUnblock: ((String) -> Void)?
+    /// Activity (spec §8, Task 20): `remote-activity.jsonl` read back,
+    /// grouped by connection, newest group first, each collapsible — the
+    /// same read-only shape the blocked list above already has.
+    let activityHeaderField = ShellFont.label(
+        "Activity", font: ShellFont.ui(13, .semibold), color: ShellPalette.ink
+    )
+    /// Shown in place of the list when the file holds nothing yet — a fresh
+    /// install, or a Mac that has never been shared.
+    let activityEmptyField = ShellFont.label(
+        "No remote sessions yet.", font: ShellFont.ui(13), color: ShellPalette.inkMuted
+    )
+    /// The connection groups, rebuilt whenever `applyActivityHistory` runs.
+    let activityList = NSStackView()
+    /// The groups as last applied — one reading, so the list and its empty
+    /// state cannot disagree, `blockedViewerIDs`'s own reasoning.
+    private(set) var activityGroups: [RemoteActivityHistoryGroup] = []
+    /// `isSharing` as the model last reported it — the one reading of it, so
+    /// `shareToggle.state` and the spotlight's row (Task 3, §10) can never
+    /// disagree about which way the switch is thrown.
+    private(set) var isSharing = false
+    /// Whether sharing *can* be switched on at all: there is an
+    /// `auth_account_email` row to share with.
+    ///
+    /// Not cosmetic. The daemon refuses every viewer whose relay-asserted
+    /// account does not match that row, and a missing row fails closed there
+    /// like any other mismatch (spec §9) — so a signed-out host could throw
+    /// this switch, watch the menu bar go green, and have every connection
+    /// refused for a reason stated nowhere near the switch. The structural
+    /// half of the answer is in `RemoteSharingModel.setSharing`, which
+    /// refuses the write; this is the half that says so before the click.
+    private(set) var canShare = false
+    var onToggleRemoteSharing: (() -> Void)?
     /// General's update block: which version is running, what the updater is
     /// doing, and the one button that advances it. General rather than a
     /// section of its own -- it is where macOS apps put this, and a whole
@@ -341,6 +429,23 @@ final class SettingsSurfaceView: NSView {
         deleteAccountButton.translatesAutoresizingMaskIntoConstraints = false
         applyAccount(email: nil, signedIn: false)
 
+        shareToggle.font = ShellFont.ui(13)
+        shareToggle.target = self
+        shareToggle.action = #selector(shareTogglePressed)
+        shareToggle.translatesAutoresizingMaskIntoConstraints = false
+        blockedList.orientation = .vertical
+        blockedList.alignment = .leading
+        blockedList.spacing = 6
+        blockedList.translatesAutoresizingMaskIntoConstraints = false
+        activityList.orientation = .vertical
+        activityList.alignment = .leading
+        activityList.spacing = 10
+        activityList.translatesAutoresizingMaskIntoConstraints = false
+        applyRemoteSharing(isSharing: false, canShare: false)
+        applyThisMachine(name: nil, deviceID: nil)
+        applyBlockedMachines([])
+        applyActivityHistory([])
+
         updateButton.bezelStyle = .rounded
         updateButton.controlSize = .regular
         updateButton.font = ShellFont.ui(13)
@@ -353,7 +458,10 @@ final class SettingsSurfaceView: NSView {
 
         let column = NSStackView(views: [
             titleField, subtitleField, accountField, accountButton, githubField, githubButton,
-            deleteAccountButton, updateVersionField, updateStatusField, updateButton,
+            deleteAccountButton, shareToggle, shareExplanationField, thisMachineHeaderField,
+            thisMachineNameField, thisMachineIDField, blockedHeaderField, blockedEmptyField,
+            blockedList, activityHeaderField, activityEmptyField, activityList,
+            updateVersionField, updateStatusField, updateButton,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -366,6 +474,20 @@ final class SettingsSurfaceView: NSView {
         // Its own gap again: deleting the account is not a third line of the
         // GitHub block.
         column.setCustomSpacing(22, after: githubButton)
+        column.setCustomSpacing(8, after: shareToggle)
+        // "This machine" is its own fact about the Mac, not a second line of
+        // the switch's explanation.
+        column.setCustomSpacing(22, after: shareExplanationField)
+        column.setCustomSpacing(8, after: thisMachineHeaderField)
+        // The blocked list is its own fact about the Mac, not a third line
+        // of "This machine".
+        column.setCustomSpacing(22, after: thisMachineIDField)
+        column.setCustomSpacing(8, after: blockedHeaderField)
+        // Activity is its own fact about the Mac, not a fourth line of the
+        // blocked list.
+        column.setCustomSpacing(22, after: blockedList)
+        column.setCustomSpacing(8, after: activityHeaderField)
+        column.setCustomSpacing(22, after: activityList)
         column.setCustomSpacing(14, after: updateStatusField)
         column.translatesAutoresizingMaskIntoConstraints = false
 
@@ -418,10 +540,133 @@ final class SettingsSurfaceView: NSView {
         // General has a screen too now: the update block. Which means General
         // no longer says "Under development" either.
         let isGeneral = section == .general
-        subtitleField.isHidden = isAccounts || isGeneral
+        // Remote has a screen too (Task 3, §2/§10): the sharing switch, this
+        // Mac's own identity, the blocked list, and Activity.
+        let isRemote = section == .remote
+        subtitleField.isHidden = isAccounts || isGeneral || isRemote
         updateVersionField.isHidden = !isGeneral
         updateStatusField.isHidden = !isGeneral
         updateButton.isHidden = !isGeneral
+        shareToggle.isHidden = !isRemote
+        shareExplanationField.isHidden = !isRemote
+        thisMachineHeaderField.isHidden = !isRemote
+        thisMachineNameField.isHidden = !isRemote
+        thisMachineIDField.isHidden = !isRemote
+        blockedHeaderField.isHidden = !isRemote
+        // Exactly one of the two is on screen at a time, and only on Remote.
+        blockedEmptyField.isHidden = !isRemote || !blockedViewerIDs.isEmpty
+        blockedList.isHidden = !isRemote || blockedViewerIDs.isEmpty
+        activityHeaderField.isHidden = !isRemote
+        activityEmptyField.isHidden = !isRemote || !activityGroups.isEmpty
+        activityList.isHidden = !isRemote || activityGroups.isEmpty
+    }
+
+    /// Bound to `RemoteSharingModel.isSharing` by the controller — never
+    /// flipped locally on a click, since writes are non-optimistic (see
+    /// `RemoteSharingModel`'s own doc comment): the switch shows only what
+    /// the controller has confirmed actually landed.
+    ///
+    /// `canShare` is the sign-in gate: with no account there is nothing to
+    /// share *with* — no device registration, and a daemon that refuses every
+    /// viewer — so the switch is disabled and the copy under it says what to
+    /// do about that instead of describing a feature that cannot run.
+    ///
+    /// `isRegistering` (fix round 2, Task 29): a Mac with no device token
+    /// yet registers with the relay before sharing can go live
+    /// (`WorkspaceWindowController.ensureRelayRegistration`), and that round
+    /// trip used to have no visible state at all — the switch just sat
+    /// showing off, and a second press during it was a silent no-op. The
+    /// switch now says so instead of pretending nothing is happening.
+    func applyRemoteSharing(isSharing: Bool, canShare: Bool, isRegistering: Bool = false) {
+        self.isSharing = isSharing
+        self.canShare = canShare
+        shareToggle.state = isSharing ? .on : .off
+        // Never disabled while sharing is *on*: switching it off must always
+        // be possible, whatever the account rows say. Disabled while a
+        // registration is in flight either way — there is nothing a second
+        // press could do but start a duplicate one.
+        shareToggle.isEnabled = (canShare || isSharing) && !isRegistering
+        shareExplanationField.stringValue = isRegistering
+            ? Self.registeringExplanation
+            : (canShare ? Self.shareExplanation : Self.signInFirstExplanation)
+    }
+
+    static let shareExplanation =
+        "Anyone signed in to your account on another Mac can use this computer as if they were "
+            + "sitting at it. You will see who is connected and everything they do."
+    static let signInFirstExplanation =
+        "Sign in to OmniAgent to share this environment. Sharing lets other Macs signed in to "
+            + "your account use this one, so there has to be an account first."
+    static let registeringExplanation = "Registering this Mac with the relay…"
+
+    /// The blocked list, as the model last reported it. Rebuilt rather than
+    /// diffed: the list is a handful of rows a human curates, and a rebuild
+    /// cannot leave a stale Unblock button behind pointing at an id that is
+    /// no longer blocked.
+    func applyBlockedMachines(_ ids: [String]) {
+        blockedViewerIDs = ids
+        for view in blockedList.arrangedSubviews {
+            blockedList.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for id in ids {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 10
+            let label = ShellFont.label(id, font: ShellFont.ui(13), color: ShellPalette.inkSecondary)
+            let button = NSButton(title: "Unblock", target: self, action: #selector(unblockPressed(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = ShellFont.ui(12)
+            // The id travels on the button rather than in a captured closure,
+            // so a rebuilt list can never fire an old row's block.
+            button.identifier = NSUserInterfaceItemIdentifier(id)
+            row.addArrangedSubview(label)
+            row.addArrangedSubview(button)
+            blockedList.addArrangedSubview(row)
+        }
+        // Re-applies the section's visibility with the new emptiness.
+        select(section)
+    }
+
+    @objc private func unblockPressed(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        onUnblock?(id)
+    }
+
+    /// The activity history, as `RemoteActivityLog.history(from:limit:)` last
+    /// read it and `RemoteActivityHistoryGroup.grouped(from:)` grouped —
+    /// rebuilt rather than diffed, `applyBlockedMachines`'s own reasoning: a
+    /// handful of collapsible groups, not a scrolling feed worth diffing.
+    func applyActivityHistory(_ groups: [RemoteActivityHistoryGroup]) {
+        activityGroups = groups
+        for view in activityList.arrangedSubviews {
+            activityList.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for group in groups {
+            let row = RemoteActivityHistoryGroupView(group: group)
+            activityList.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: activityList.widthAnchor).isActive = true
+        }
+        // Re-applies the section's visibility with the new emptiness.
+        select(section)
+    }
+
+    /// This Mac's own relay registration, read-only — `nil` for either
+    /// argument while there is none yet (signed out, or never registered).
+    func applyThisMachine(name: String?, deviceID: String?) {
+        thisMachineNameField.stringValue = "Name: \(name ?? "Not registered")"
+        thisMachineIDField.stringValue = "Device ID: \(deviceID ?? "—")"
+    }
+
+    @objc private func shareTogglePressed() {
+        // The click already moved the checkbox; put it straight back until
+        // the controller confirms the write landed, matching every other
+        // control on this page that only shows a state once it is real.
+        shareToggle.state = isSharing ? .on : .off
+        onToggleRemoteSharing?()
     }
 
     /// The update story, on the Settings page. Same states as the sidebar
@@ -494,6 +739,7 @@ final class SettingsSurfaceView: NSView {
     func applyAccount(email: String?, signedIn: Bool, githubLogin: String? = nil) {
         let address = (email ?? "").trimmingCharacters(in: .whitespaces)
         accountSignedIn = signedIn
+        accountEmail = address
         accountField.stringValue = switch (signedIn, address.isEmpty) {
         case (false, _): "Not signed in"
         case (true, true): "Signed in"
@@ -518,4 +764,165 @@ final class SettingsSurfaceView: NSView {
     }
 
     @objc private func deleteAccountPressed() { onDeleteAccount?() }
+}
+
+// MARK: - Activity history (Task 20, spec §8)
+
+/// One connection's worth of rows out of `remote-activity.jsonl` — a
+/// "connected" row starts a group.
+struct RemoteActivityHistoryGroup: Equatable {
+    /// In the same order `RemoteActivityLog.history(from:limit:)` returns
+    /// its whole list — newest first, so the "connected" row that opened
+    /// this group is the *last* element, not the first.
+    let rows: [RemoteActivityLog.Entry]
+
+    /// Splits `entries` (newest first) into groups, each ending at the
+    /// "connected" row that opened it — reading backwards through history,
+    /// a "connected" row is the oldest fact about the connection it belongs
+    /// to, so it is what *closes* a group being built newest-to-oldest, not
+    /// what opens one. Rows preceding the first "connected" row this build
+    /// ever finds (a file predating the row, or one torn at the tail) still
+    /// form a trailing group rather than being dropped.
+    static func grouped(from entries: [RemoteActivityLog.Entry]) -> [RemoteActivityHistoryGroup] {
+        var groups: [[RemoteActivityLog.Entry]] = []
+        var current: [RemoteActivityLog.Entry] = []
+        for entry in entries {
+            current.append(entry)
+            if entry.kind == "connected" {
+                groups.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty {
+            groups.append(current)
+        }
+        return groups.map(RemoteActivityHistoryGroup.init)
+    }
+
+    /// The row a person recognises this group by — the "connected" row's own
+    /// summary ("Connected from ‹machine› (‹ip›)"), or the most recent row in
+    /// a group with no such row at all.
+    var headline: String {
+        rows.first { $0.kind == "connected" }?.summary ?? rows.first?.summary ?? "Remote session"
+    }
+
+    /// When this connection ended, or — one still mid-session, or a group
+    /// with no "disconnected" row — when it started.
+    var when: Date {
+        (rows.first { $0.kind == "disconnected" } ?? rows.first { $0.kind == "connected" } ?? rows.first)?
+            .ts ?? Date()
+    }
+}
+
+/// One collapsible group in the Activity history: the connection's own
+/// headline, collapsed by default, expanding to its rows — `PaneAppWorkGroupView`'s
+/// shape (`PaneAppMessageRow.swift`) once more, and `RemoteActivityRowView`
+/// (`RemoteTakeoverPanel.swift`) reused for the rows themselves, so the live
+/// panel table and this history read identically.
+final class RemoteActivityHistoryGroupView: NSView {
+    private(set) var isExpanded = false
+    private let chevron: NSTextField
+    private let detail = NSStackView()
+    private let header: NSStackView
+    private var cursorTracking: NSTrackingArea?
+
+    init(group: RemoteActivityHistoryGroup) {
+        chevron = ShellFont.label("⌄", font: ShellFont.ui(11), color: ShellPalette.inkFaint)
+        let title = ShellFont.label(group.headline, font: ShellFont.ui(13, .semibold), color: ShellPalette.ink)
+        let subtitle = ShellFont.label(
+            Self.when.string(from: group.when), font: ShellFont.ui(11), color: ShellPalette.inkFaint
+        )
+        let titles = NSStackView(views: [title, subtitle])
+        titles.orientation = .vertical
+        titles.alignment = .leading
+        titles.spacing = 1
+        header = NSStackView(views: [chevron, titles])
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.disclosureTriangle)
+        setAccessibilityLabel(group.headline)
+        setAccessibilityExpanded(isExpanded)
+
+        header.orientation = .horizontal
+        header.alignment = .firstBaseline
+        header.spacing = 6
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        detail.orientation = .vertical
+        detail.alignment = .leading
+        detail.spacing = 6
+        detail.isHidden = true
+        detail.translatesAutoresizingMaskIntoConstraints = false
+        // Newest first, the same order the group's own rows already carry —
+        // the header above already reads as "this is the newest fact", so
+        // the rows underneath continue in that direction rather than
+        // reversing partway through.
+        let table = RemoteActivityTable(entries: group.rows)
+        for index in table.entries.indices {
+            let entry = table.entries[index]
+            let row = RemoteActivityRowView(
+                entry: entry,
+                timeText: table.timeText(at: index),
+                symbolName: RemoteActivityTable.symbolName(for: entry.kind)
+            )
+            detail.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true
+        }
+
+        let body = NSStackView(views: [header, detail])
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 8
+        body.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(body)
+        NSLayoutConstraint.activate([
+            body.topAnchor.constraint(equalTo: topAnchor),
+            body.leadingAnchor.constraint(equalTo: leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: trailingAnchor),
+            body.bottomAnchor.constraint(equalTo: bottomAnchor),
+            header.widthAnchor.constraint(equalTo: body.widthAnchor),
+            detail.widthAnchor.constraint(equalTo: body.widthAnchor),
+        ])
+
+        let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick))
+        header.addGestureRecognizer(click)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let cursorTracking { removeTrackingArea(cursorTracking) }
+        let area = NSTrackingArea(
+            rect: convert(header.bounds, from: header),
+            options: [.cursorUpdate, .activeInKeyWindow],
+            owner: self
+        )
+        addTrackingArea(area)
+        cursorTracking = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) { NSCursor.pointingHand.set() }
+
+    @objc private func handleClick() { toggle() }
+
+    /// Internal rather than private so a test can drive expansion without
+    /// synthesising a click.
+    func toggle() {
+        isExpanded.toggle()
+        detail.isHidden = !isExpanded
+        chevron.stringValue = isExpanded ? "⌃" : "⌄"
+        setAccessibilityExpanded(isExpanded)
+    }
+
+    private static let when: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }

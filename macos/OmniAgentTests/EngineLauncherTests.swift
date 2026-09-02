@@ -67,6 +67,70 @@ final class EngineLauncherTests: XCTestCase {
         XCTAssertNil(EngineLauncher.command(for: .codex, resolve: { _ in nil }))
     }
 
+    // MARK: - Command (isDrivingRemote, Task 28's carried gap)
+
+    /// While driving, argv[0] is the bare name — this Mac's own resolved
+    /// path names a file on the wrong disk, and the daemon resolves the
+    /// name against its own (the HOST's) instead.
+    func testDrivingRemoteSendsTheBareNameNotAResolvedPath() {
+        let command = EngineLauncher.command(
+            for: .claude,
+            isDrivingRemote: true,
+            resolve: resolver(["claude"])
+        )
+        XCTAssertEqual(command, ["claude"])
+    }
+
+    /// `resolve` is this Mac's own `PATH` lookup — irrelevant to what the
+    /// HOST has, so it is never even consulted while driving. Proven by
+    /// handing it a resolver that always fails: a command still comes back.
+    func testDrivingRemoteNeverConsultsThisMachinesOwnResolver() {
+        var resolveCalls = 0
+        let command = EngineLauncher.command(
+            for: .codex,
+            isDrivingRemote: true,
+            resolve: { _ in
+                resolveCalls += 1
+                return nil
+            }
+        )
+        XCTAssertEqual(command, ["codex"])
+        XCTAssertEqual(resolveCalls, 0)
+    }
+
+    /// The conversation flags still land on the bare name exactly as they do
+    /// on a resolved one — only *how* argv[0] was produced changes.
+    func testDrivingRemoteStillCarriesTheConversationFlags() {
+        XCTAssertEqual(
+            EngineLauncher.command(
+                for: .claude,
+                conversationID: "abc",
+                isDrivingRemote: true,
+                resolve: { _ in nil }
+            ),
+            ["claude", "--session-id", "abc"]
+        )
+        XCTAssertEqual(
+            EngineLauncher.command(
+                for: .claude,
+                conversationID: "abc",
+                resuming: true,
+                isDrivingRemote: true,
+                resolve: { _ in nil }
+            ),
+            ["claude", "--resume", "abc"]
+        )
+    }
+
+    /// The default (`isDrivingRemote: false`, every pre-existing call and
+    /// test) is untouched: still a resolved path, still `nil` when this
+    /// machine does not have the binary. The local case is proven and
+    /// shipped; this is the regression guard that it stays that way.
+    func testNotDrivingRemoteIsUnchanged() {
+        XCTAssertEqual(EngineLauncher.command(for: .claude, resolve: resolver(["claude"])), ["/usr/local/bin/claude"])
+        XCTAssertNil(EngineLauncher.command(for: .claude, isDrivingRemote: false, resolve: { _ in nil }))
+    }
+
     // MARK: - Environment
 
     func testEnvironmentCarriesTerminalAndPath() {

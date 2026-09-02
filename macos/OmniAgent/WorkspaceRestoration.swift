@@ -209,13 +209,25 @@ enum WorkspaceRestoration {
     /// shell, home directory and ungrouped session the Task 4/5 bootstrap
     /// pane already used, expressed as a plan so there is exactly one code
     /// path from "a list of `RestoredPane`" to "panes on screen".
-    static func bootstrapPane(sessionID: String = UUID().uuidString) -> RestoredPane {
+    ///
+    /// **`isDrivingRemote`** (Task 28 fix round 2, item 1): this Mac's own
+    /// home directory baked in as `cwd` is a *carried* value once the pane
+    /// exists — `WorkspaceWindowController.startingDirectory(for:)` returns
+    /// a non-empty `carried` cwd unchanged, before it ever reaches the
+    /// `isDrivingRemote` guard that answers `nil` for "nothing known".
+    /// Reached while driving a host whose `layout` row is empty (the grid
+    /// is empty too, straight after `resetForAccountSwitch` — a first
+    /// connection to that host, or one with nothing saved). `cwd` is left
+    /// empty instead, so `startingDirectory` decides honestly the moment a
+    /// session is actually created for this pane, exactly as it already
+    /// does for every other empty-carried-cwd case.
+    static func bootstrapPane(sessionID: String = UUID().uuidString, isDrivingRemote: Bool = false) -> RestoredPane {
         RestoredPane(
             sessionID: sessionID,
             reattaches: false,
             project: "",
             engine: .shell,
-            cwd: FileManager.default.homeDirectoryForCurrentUser.path,
+            cwd: isDrivingRemote ? "" : FileManager.default.homeDirectoryForCurrentUser.path,
             label: nil,
             themeId: nil,
             group: ungroupedSessionID,

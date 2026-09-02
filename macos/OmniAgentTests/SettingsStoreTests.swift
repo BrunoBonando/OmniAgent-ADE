@@ -8,12 +8,31 @@ final class FakeSettingsClient: SettingsClient {
     private(set) var rows: [String: String]
     private(set) var setCalls: [(key: String, value: String)] = []
     var failing: Set<String> = []
+    /// Keys whose *write* fails — `failing`'s counterpart for `setSetting`.
+    /// Separate from `failing` on purpose: a row can be readable and still
+    /// refuse a write (a socket that drops mid-request), and
+    /// `RemoteSharingModelTests` needs exactly that to pin "a failed write
+    /// leaves the in-memory value unchanged" without also faking a read
+    /// failure.
+    var failingWrites: Set<String> = []
+    /// Every key read, in order — how a test asks whether a read happened at
+    /// all (`RemoteSharingModelTests`' "a reconnect re-reads nothing").
+    private(set) var getCalls: [String] = []
 
     init(rows: [String: String] = [:]) {
         self.rows = rows
     }
 
+    /// Writes a row **behind the app's back**, the way the daemon does: it
+    /// owns `remote_control_blocked` and appends to it on every Block, with
+    /// no `setSetting` from this side. Recorded in neither `setCalls` nor
+    /// `rows`' history for exactly that reason.
+    func seedRow(_ key: String, _ value: String?) {
+        rows[key] = value
+    }
+
     func getSetting(key: String, completion: @escaping (Result<String?, Error>) -> Void) {
+        getCalls.append(key)
         if failing.contains(key) {
             completion(.failure(SessionConnectionError.disconnected))
             return
@@ -22,6 +41,10 @@ final class FakeSettingsClient: SettingsClient {
     }
 
     func setSetting(key: String, value: String, completion: ((Result<Void, Error>) -> Void)?) {
+        if failingWrites.contains(key) {
+            completion?(.failure(SessionConnectionError.disconnected))
+            return
+        }
         rows[key] = value
         setCalls.append((key, value))
         completion?(.success(()))

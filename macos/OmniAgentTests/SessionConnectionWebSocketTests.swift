@@ -99,7 +99,7 @@ final class SessionConnectionWebSocketTests: XCTestCase {
             _ = ready.wait(timeout: .now() + 5)
         }
         /// Sends one server frame down the live WebSocket — how a daemon
-        /// push (`SessionResized`, `RemoteViewers`) is simulated.
+        /// push (`HostState`, `RemoteViewers`) is simulated.
         func push(kind: MessageKind, json: [String: Any], sequence: UInt64 = 0) {
             let deadline = Date().addingTimeInterval(5)
             var conn: NWConnection?
@@ -248,10 +248,12 @@ final class SessionConnectionWebSocketTests: XCTestCase {
         XCTAssertLessThanOrEqual(dials, 8, "a fixed 50 ms delay would have dialed ~20 times")
     }
 
-    /// The host owns the grid (phase 2 §1): the daemon pushes
-    /// `SessionResized` on attach and on every accepted resize, and the
-    /// viewer re-pins its scaled render to whatever it says.
-    func testASessionResizedPushIsDeliveredAsASizeCallback() throws {
+    /// The host's own gauges, limits and engines (2026-09-01 remote
+    /// environment sharing spec §4, Task 26): the daemon pushes `HostState`
+    /// on attach and on every publish, verbatim — this connection hands the
+    /// raw bytes to `onHostState` without parsing them itself, exactly like
+    /// `publishHostState` sends them without re-encoding.
+    func testAHostStatePushIsDeliveredAsRawBytes() throws {
         let relay = try FakeRelay()
         addTeardownBlock { relay.listener.cancel() }
         relay.start()
@@ -265,13 +267,14 @@ final class SessionConnectionWebSocketTests: XCTestCase {
         connection.connect()
         wait(for: [connected], timeout: 5)
 
-        let sized = expectation(description: "size")
-        connection.onSessionSize = { id, cols, rows in
-            XCTAssertEqual([id, String(cols), String(rows)], ["s1", "120", "40"])
-            sized.fulfill()
+        let received = expectation(description: "host state")
+        connection.onHostState = { payload in
+            let host = try? JSONDecoder().decode([String: [String: Double]].self, from: payload)
+            XCTAssertEqual(host?["metrics"]?["cpu"], 0.5)
+            received.fulfill()
         }
-        relay.push(kind: .sessionResized, json: ["id": "s1", "cols": 120, "rows": 40])
-        wait(for: [sized], timeout: 5)
+        relay.push(kind: .hostState, json: ["metrics": ["cpu": 0.5]])
+        wait(for: [received], timeout: 5)
         connection.disconnect()
     }
 

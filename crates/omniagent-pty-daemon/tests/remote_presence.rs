@@ -5,7 +5,12 @@
 //! it and there is no way to end the connection. These tests drive the real
 //! `serve_client` handler over in-memory `tokio::io::duplex` pipes — one
 //! `Local` connection standing in for the host app, one `Remote` connection
-//! standing in for the viewer relayed from the other Mac.
+//! standing in for the viewer relayed from the other Mac. The host's app is
+//! attached first, which since Task 10 is a precondition of the viewer being
+//! admitted at all (spec §2 condition 3) rather than only the arrangement
+//! these tests want.
+
+mod support;
 
 use omniagent_pty_daemon::protocol::{
     read_frame, write_frame, Frame, MessageKind, RemoteViewersPayload,
@@ -17,12 +22,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
-
-/// A phase-2 (v2) projection sharing workspace `/a`, whose one session group
-/// holds the single attachable pane `s1`.
-const PROJECTION: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
-"sessions":[{"id":"g1","label":"Session 1","order":0,
-"panes":[{"id":"s1","title":"shell","engine":"shell","kind":"terminal","order":0}]}]}]}"#;
 
 fn command_session(id: &str, script: &str) -> CreateSession {
     CreateSession {
@@ -138,9 +137,22 @@ fn connect(ctx: &ClientContext, trust: ClientTrust) -> Duplex {
 async fn local_and_remote_clients(
     root: &std::path::Path,
 ) -> (Duplex, Duplex, ClientContext, oneshot::Sender<()>) {
+    local_and_remote_clients_asserting(root, support::remote_trust_for(support::HOST_ACCOUNT_EMAIL))
+        .await
+}
+
+/// [`local_and_remote_clients`], with the relay's assertion about the viewer
+/// chosen by the caller — the seam a test about *what the relay said* needs,
+/// since the assertion arrives with the connection and never in a frame.
+async fn local_and_remote_clients_asserting(
+    root: &std::path::Path,
+    viewer_trust: ClientTrust,
+) -> (Duplex, Duplex, ClientContext, oneshot::Sender<()>) {
+    // Signed in, so the viewer below gets past the account check (spec §9)
+    // to reach the presence behaviour this file is about.
     let server = DaemonServer::bind_with_data_dir(
         root.join("runtime").join("daemon.sock"),
-        root.join("brain-data"),
+        support::account_data_dir(&root.join("brain-data"), support::HOST_ACCOUNT_EMAIL),
     )
     .await
     .unwrap();
@@ -150,16 +162,15 @@ async fn local_and_remote_clients(
     ctx.registry
         .create_session(command_session("s1", "cat"))
         .unwrap();
-    ctx.settings
-        .lock()
-        .unwrap()
-        .set_setting("remote_control", PROJECTION)
-        .unwrap();
+    // The switch and the token: the other two thirds of spec §2's condition,
+    // without which the viewer below is refused before it can be seen.
+    support::enable_sharing(&ctx);
+    support::sign_in_as(&ctx, support::HOST_ACCOUNT_EMAIL);
 
     let host = connect(&ctx, ClientTrust::Local)
         .hello(serde_json::json!({"client": "omniagent-native-macos"}))
         .await;
-    let viewer = connect(&ctx, ClientTrust::Remote)
+    let viewer = connect(&ctx, viewer_trust)
         .hello(serde_json::json!({
             "client": "omniagent-native-macos", "viewer_id": "v-air", "machine_name": "Air"}))
         .await;
@@ -239,7 +250,11 @@ async fn a_blocked_viewer_cannot_say_hello() {
         .unwrap();
 
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(serve_client(server_side, ctx.clone(), ClientTrust::Remote));
+    tokio::spawn(serve_client(
+        server_side,
+        ctx.clone(),
+        support::remote_trust_for(support::HOST_ACCOUNT_EMAIL),
+    ));
     let mut blocked = Duplex {
         stream: client_side,
         request: 0,
@@ -255,15 +270,21 @@ async fn a_blocked_viewer_cannot_say_hello() {
 }
 
 /// Spec §7 invariant 3: `RemoteViewers` reaches **local** connections only —
-/// a viewer never learns that another viewer exists.
+/// a viewer never learns who else is watching, itself included.
 ///
 /// The whole test is arranged so that real roster frames are written while the
-/// viewers' streams are watched, because otherwise it proves nothing: an
+/// viewer's stream is watched, because otherwise it proves nothing: an
 /// anonymous remote connection is never listed, so no roster is ever
 /// published, and a "no `RemoteViewers` arrived" assertion would hold against
-/// a daemon that pushed the roster to every writer it had. So both viewers
-/// name themselves and attach, and the host's stream is checked first to
-/// confirm the pushes really happened.
+/// a daemon that pushed the roster to every writer it had. So the viewer names
+/// itself and attaches, and the host's stream is checked first to confirm the
+/// pushes really happened.
+///
+/// Phase 3 note: this used to connect a **second** machine, so there was
+/// another viewer to be told about. The lease (spec §3) makes that
+/// arrangement impossible — the second `Hello` is refused — and the invariant
+/// is unchanged by that: the roster is the host's view of who is on its
+/// machine, and it is not a viewer's to read at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_viewer_is_never_told_about_other_viewers() {
     let root = tempfile::tempdir().unwrap();
@@ -276,54 +297,57 @@ async fn a_viewer_is_never_told_about_other_viewers() {
     .await;
     drain_until(&mut air, MessageKind::Snapshot).await;
 
-    // A second machine, so there is another viewer to be told about at all.
-    let mut studio = connect(&ctx, ClientTrust::Remote)
-        .hello(serde_json::json!({
-            "client": "omniagent-native-macos",
-            "viewer_id": "v-studio",
-            "machine_name": "Studio"}))
-        .await;
-    studio
-        .send(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    drain_until(&mut studio, MessageKind::Snapshot).await;
-
     // The host really is being pushed rosters — without this the assertions
     // below would pass on a daemon that never published anything at all.
-    let mut both_machines = false;
+    //
+    // `RemoteActivity` (Task 19, spec §8) is expected here too, and skipped
+    // rather than asserted against: Air's own `Attach` above is exactly the
+    // kind of frame that produces an activity row, and it is pushed to this
+    // same host connection alongside the roster. This test is about the
+    // roster, not the activity log, so it only checks the frames that claim
+    // to be one.
+    let mut named_the_viewer = false;
     while let Some(frame) = host.try_read(Duration::from_millis(500)).await {
+        if frame.header.message_kind == MessageKind::RemoteActivity {
+            continue;
+        }
         assert_eq!(frame.header.message_kind, MessageKind::RemoteViewers);
         let roster: RemoteViewersPayload = serde_json::from_slice(&frame.payload).unwrap();
-        both_machines |= roster.viewers.len() == 2;
+        named_the_viewer |= roster
+            .viewers
+            .iter()
+            .any(|viewer| viewer.machine_name == "Air");
     }
     assert!(
-        both_machines,
-        "the host must have been pushed a roster naming both machines"
+        named_the_viewer,
+        "the host must have been pushed a roster naming the machine watching it"
     );
 
-    // A local resize is the positive control: server pushes really are
-    // reaching these two connections while the roster is not.
+    // Writing to the session is the positive control: server pushes really
+    // are reaching the viewer's connection while the roster is not. `s1`
+    // runs `cat`, so this comes straight back as `Output`.
+    //
+    // A resize used to serve this purpose (`SessionResized`), before the
+    // 2026-09-01 remote environment sharing spec §5 deleted that push:
+    // whoever drives owns the grid now, and the driver already knows the
+    // size it just sent, so there is nothing left for a resize to prove
+    // here.
     ctx.registry
         .get("s1")
         .unwrap()
-        .resize(90, 20, 0, 0)
+        .write_input(b"ping\n")
         .unwrap();
 
-    for (name, viewer) in [("Air", &mut air), ("Studio", &mut studio)] {
-        let mut saw_the_resize = false;
-        while let Some(frame) = viewer.try_read(Duration::from_millis(500)).await {
-            assert_ne!(
-                frame.header.message_kind,
-                MessageKind::RemoteViewers,
-                "{name} was told about another viewer"
-            );
-            saw_the_resize |= frame.header.message_kind == MessageKind::SessionResized;
-        }
-        assert!(saw_the_resize, "{name}'s connection was live throughout");
+    let mut saw_output = false;
+    while let Some(frame) = air.try_read(Duration::from_millis(500)).await {
+        assert_ne!(
+            frame.header.message_kind,
+            MessageKind::RemoteViewers,
+            "Air was told who is watching this machine"
+        );
+        saw_output |= frame.header.message_kind == MessageKind::Output;
     }
+    assert!(saw_output, "Air's connection was live throughout");
 }
 
 /// One local client that stops draining its socket must wedge only itself.
@@ -407,4 +431,71 @@ async fn presence_is_local_only() {
             "{kind:?} must never be reachable from a viewer"
         );
     }
+}
+
+/// Spec §7/§9 (Task 15): the roster carries the **relay-asserted** identity
+/// beside the self-reported one, so the host's takeover panel can mark the
+/// two apart. The daemon has held the assertion on `ConnectionEntry.trust`
+/// since Task 12; before this it never left the process, and the panel had
+/// nothing to draw its verified rows from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_roster_carries_what_the_relay_asserted_beside_what_the_viewer_claimed() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut host, _viewer, _ctx, _stop) = local_and_remote_clients(root.path()).await;
+
+    let request = host
+        .send(MessageKind::ListViewers, serde_json::json!({}))
+        .await;
+    let reply = host.read_reply(request).await;
+    let roster: RemoteViewersPayload = serde_json::from_slice(&reply.payload).unwrap();
+    let row = &roster.viewers[0];
+
+    // Self-reported: what the viewer app put in its own `Hello`.
+    assert_eq!(row.viewer_id, "v-air");
+    assert_eq!(row.machine_name, "Air");
+    // Relay-asserted: what `support::asserted_as` builds, exactly as
+    // `relay.rs` builds it from the control channel's `open` message.
+    assert_eq!(
+        row.account_email.as_deref(),
+        Some(support::HOST_ACCOUNT_EMAIL)
+    );
+    assert_eq!(row.ip.as_deref(), Some("203.0.113.7"));
+    assert_eq!(row.country.as_deref(), Some("DE"));
+    assert_eq!(row.client.as_deref(), Some("OmniAgent/1.7.22 macOS 27.0"));
+}
+
+/// A relay that described the connection only partially leaves those fields
+/// **absent**, not empty — the host's panel omits a row it has no value for,
+/// and cannot be made to draw a blank one by a relay that knows less than
+/// this build expects. `account_email` is the one field that must be there:
+/// the account check refuses the connection without it, so it is never
+/// missing on an admitted viewer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_viewer_the_relay_described_partially_leaves_those_fields_absent() {
+    let root = tempfile::tempdir().unwrap();
+    let partial = ClientTrust::Remote(Box::new(omniagent_pty_daemon::AssertedIdentity {
+        account_email: Some(support::HOST_ACCOUNT_EMAIL.into()),
+        ..Default::default()
+    }));
+    let (mut host, _viewer, _ctx, _stop) =
+        local_and_remote_clients_asserting(root.path(), partial).await;
+
+    let request = host
+        .send(MessageKind::ListViewers, serde_json::json!({}))
+        .await;
+    let reply = host.read_reply(request).await;
+    let roster: RemoteViewersPayload = serde_json::from_slice(&reply.payload).unwrap();
+    let row = &roster.viewers[0];
+    assert_eq!(
+        row.account_email.as_deref(),
+        Some(support::HOST_ACCOUNT_EMAIL)
+    );
+    assert_eq!(row.ip, None);
+    assert_eq!(row.country, None);
+    assert_eq!(row.client, None);
+    let raw = serde_json::to_value(row).unwrap();
+    assert!(
+        raw.get("ip").is_none() && raw.get("country").is_none() && raw.get("client").is_none(),
+        "absent, not null: {raw}"
+    );
 }

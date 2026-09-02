@@ -383,7 +383,12 @@ pub fn start_ingest(
     }
 
     add_root(store, path)?;
-    ingest_roots_in_background(data_dir, vec![path.to_string()], Vec::new(), ingestion.clone());
+    ingest_roots_in_background(
+        data_dir,
+        vec![path.to_string()],
+        Vec::new(),
+        ingestion.clone(),
+    );
     Ok(())
 }
 
@@ -698,7 +703,12 @@ pub fn rebuild_and_reingest(
         rebuild(data_dir, &mut guard)?
     };
 
-    ingest_roots_in_background(data_dir.to_path_buf(), roots, extra_projects, ingestion.clone());
+    ingest_roots_in_background(
+        data_dir.to_path_buf(),
+        roots,
+        extra_projects,
+        ingestion.clone(),
+    );
     Ok(())
 }
 

@@ -33,6 +33,16 @@ struct MenuBarSummary: Equatable {
     var recentWorkspaces: [RecentWorkspace] = []
 }
 
+/// The status icon's states: template when sharing is off, **green** when
+/// this Mac is reachable and idle, **blue** for exactly as long as somebody
+/// is driving it (2026-09-01 remote environment sharing spec §2 — the same
+/// span the takeover panel is up for, since both are one reading of
+/// `RemoteSharingModel.liveConnection`), and **purple** for exactly as long
+/// as *this* Mac is driving somebody else (Task 25's carried item — see
+/// `MenuBarController.shareState`'s doc comment for why this had to become a
+/// fourth state rather than falling out of the first three).
+enum MenuBarShareState { case off, sharing, connected, driving }
+
 /// Pure menu construction, `SessionContextMenu.build`'s pattern: no AppKit
 /// state, no target/action — just data in and closures for what each item
 /// does, so it is testable without a real `NSStatusItem`.
@@ -41,9 +51,11 @@ enum MenuBarMenu {
         into menu: NSMenu,
         summary: MenuBarSummary,
         accountLabel: String,
+        shareState: MenuBarShareState,
         revealSession: @escaping (String) -> Void,
         createInWorkspace: @escaping (String) -> Void,
         chooseFolder: @escaping () -> Void,
+        toggleSharing: @escaping () -> Void,
         showSettings: @escaping () -> Void,
         quit: @escaping () -> Void
     ) {
@@ -79,9 +91,53 @@ enum MenuBarMenu {
         menu.addItem(createItem)
 
         menu.addItem(.separator())
+        // The sharing switch (§2, §10) — above Settings…, checkmarked
+        // exactly like `WorkspacesHeaderMenus.groupBy`'s current-mode rows.
+        let shareItem = ShellMenuItem("Share this environment", handler: toggleSharing)
+        shareItem.state = shareState == .off ? .off : .on
+        menu.addItem(shareItem)
+        menu.addItem(.separator())
         menu.addItem(ShellMenuItem("Settings…", handler: showSettings))
         menu.addItem(.separator())
         menu.addItem(ShellMenuItem("Quit", handler: quit))
+    }
+
+    /// The status icon for each of the three sharing states. Green means the
+    /// machine is reachable; blue means someone is on it right now. Tinting
+    /// requires `isTemplate = false`, so the icon stops adapting to the menu
+    /// bar's appearance — deliberate: the whole point is that it stops
+    /// looking ordinary.
+    static func shareIcon(_ state: MenuBarShareState) -> NSImage {
+        let base = NSImage(named: "OmniAgentMark") ?? NSImage()
+        let size = NSSize(width: 18, height: 18)
+        guard let tint: NSColor = {
+            switch state {
+            case .off: return nil
+            case .sharing: return .systemGreen
+            case .connected: return .systemBlue
+            // Purple deliberately, not template and not any of the other
+            // three: template would read as "sharing is off", which is
+            // false — this Mac's own daemon has, correctly, dropped its
+            // control channel for the duration (spec §2 condition 3), but
+            // the user is actively mid-feature, just pointed the other way.
+            // Green or blue would each claim a fact about *this* Mac's
+            // reachability that is not true while it is driving.
+            case .driving: return .systemPurple
+            }
+        }() else {
+            let image = base.copy() as! NSImage
+            image.size = size
+            image.isTemplate = true
+            return image
+        }
+        let image = NSImage(size: size, flipped: false) { rect in
+            base.draw(in: rect)
+            tint.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     /// "2 sessions · 3 terminals · 1 working agent" — the three counts the
@@ -116,26 +172,22 @@ enum MenuBarMenu {
 /// so a weak reference to it is all the icon needs — `AppDelegate` keeps it
 /// alive for as long as the app runs.
 final class MenuBarController: NSObject, NSMenuDelegate {
-    private let statusItem: NSStatusItem
+    /// Not `private`: `refreshShareIcon`'s test reads `statusItem.button
+    /// .image` back to confirm what actually got drawn.
+    let statusItem: NSStatusItem
     private weak var workspace: WorkspaceWindowController?
 
     init(workspace: WorkspaceWindowController) {
         self.workspace = workspace
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
-        if let button = statusItem.button {
-            let image = NSImage(named: "OmniAgentMark")
-            // The asset is 256pt; a status button draws it at natural size,
-            // which at menu bar height is an invisible smear. 18pt is the
-            // standard status-icon size, and template rendering is what makes
-            // it white on a dark menu bar.
-            image?.size = NSSize(width: 18, height: 18)
-            image?.isTemplate = true
-            button.image = image
-        }
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        // Seeds the real state at construction (sharing may already be on
+        // from a previous launch) rather than the flat template `shareIcon`
+        // would otherwise sit under until the menu is first opened.
+        refreshShareIcon()
     }
 
     /// Released by `AppDelegate` on log-out: the item leaves the menu bar
@@ -153,6 +205,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             into: menu,
             summary: workspace.menuBarSummary(),
             accountLabel: workspace.accountDisplayLabel,
+            shareState: shareState,
             revealSession: { [weak workspace] paneID in workspace?.revealPane(paneID) },
             createInWorkspace: { [weak workspace] projectID in
                 guard let workspace else { return }
@@ -162,8 +215,55 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 )
             },
             chooseFolder: { [weak workspace] in workspace?.openWorkspaceFolder(nil) },
+            toggleSharing: { [weak workspace] in workspace?.toggleRemoteSharing() },
             showSettings: { [weak workspace] in workspace?.showSettings(nil) },
             quit: { NSApp.terminate(nil) }
         )
+    }
+
+    /// This controller's own reading of the sharing state.
+    ///
+    /// `.driving` is checked **first**, ahead of `.connected` — the bug this
+    /// ordering exists to fix (Task 23's own concern, carried into Task 25):
+    /// `RemoteSharingModel.liveConnection` is a roster the *local* daemon
+    /// pushes, and that daemon is disconnected for the whole of a takeover
+    /// (`WorkspaceWindowController.localConnection`'s doc comment), so it
+    /// simply keeps whatever it last held — stale, not merely quiet. Asking
+    /// `.connected` first would show the icon "someone is driving *this*
+    /// Mac" from a roster nobody has updated since before the takeover
+    /// began, while the truth is closer to the opposite: this Mac's own
+    /// sharing is off for the duration (§2 condition 3 fails with no local
+    /// connection), and it is *this* Mac doing the driving. `isDrivingRemote`
+    /// is asked directly of the connection the window actually holds right
+    /// now, so it cannot go stale the way a push-based roster can.
+    ///
+    /// Below that, `.connected` wins over `.sharing` the same way it always
+    /// has: a live connection is only possible while sharing is on, and it
+    /// is the more urgent of the two facts. Asked of the workspace rather
+    /// than of `RemoteSharingModel` directly — `isSharingEnvironment`'s
+    /// reasoning — one seam, so nothing outside the controller has to know
+    /// the model exists.
+    private var shareState: MenuBarShareState {
+        guard let workspace else { return .off }
+        if workspace.isDrivingRemote { return .driving }
+        if workspace.liveRemoteConnection != nil { return .connected }
+        return workspace.isSharingEnvironment ? .sharing : .off
+    }
+
+    /// Redraws the status item's icon from the current sharing state —
+    /// called once at construction and again on every `RemoteSharingModel
+    /// .onChange`, by way of `WorkspaceWindowController.onRemoteSharingChanged`
+    /// (`AppDelegate` wires the two together). Unlike `menuNeedsUpdate`, this
+    /// has to be push: the icon must show green the instant sharing is
+    /// switched on from Settings, not only the next time someone opens the
+    /// menu.
+    func refreshShareIcon() {
+        guard let button = statusItem.button else { return }
+        // The asset is 256pt; a status button draws it at natural size,
+        // which at menu bar height is an invisible smear — `shareIcon`
+        // scales every state to the standard 18pt status-icon size, and
+        // `.off`'s template rendering is what makes it white on a dark menu
+        // bar.
+        button.image = MenuBarMenu.shareIcon(shareState)
     }
 }

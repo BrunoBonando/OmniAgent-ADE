@@ -1,12 +1,14 @@
 use omniagent_pty_daemon::protocol::{
     decode_raw_payload, encode_raw_payload, AttentionPayload, BrainGetContextPayload,
-    BrainSearchPayload, DisconnectViewerPayload, ErrorPayload, Frame, FrameError, Header,
-    HelloPayload, MessageKind, RemoteViewersPayload, ResizePayload, ResponsePayload,
-    ResyncRequiredPayload, RootsAddProjectPayload, RootsReingestProjectPayload,
-    RootsRenameProjectPayload, RootsSetPausedPayload, RootsStartIngestPayload,
-    SessionExitedPayload, SessionSizePayload, SessionStatus, SessionStatusPayload, SettingKey,
-    SettingValue, ViewerSummaryPayload, MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
+    BrainSearchPayload, DirectoryEntryPayload, DirectoryListingPayload, DisconnectViewerPayload,
+    ErrorPayload, Frame, FrameError, Header, HelloPayload, ListDirectoryPayload, MessageKind,
+    RefusalCode, RemoteViewersPayload, ResizePayload, ResponsePayload, ResyncRequiredPayload,
+    RootsAddProjectPayload, RootsReingestProjectPayload, RootsRenameProjectPayload,
+    RootsSetPausedPayload, RootsStartIngestPayload, SessionExitedPayload, SessionStatus,
+    SessionStatusPayload, SettingKey, SettingValue, ViewerSummaryPayload, MAX_PAYLOAD_LEN,
+    PROTOCOL_VERSION,
 };
+use omniagent_pty_daemon::{ActivityEntry, RemoteActivityPayload};
 
 #[test]
 fn envelope_is_exactly_sixteen_big_endian_bytes() {
@@ -214,9 +216,7 @@ fn roots_message_kind_discriminants_are_appended_after_brain_get_context_never_r
             MessageKind::RootsRebuild as u8,
             MessageKind::BrainSearch as u8,
         ],
-        [
-            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19
-        ]
+        [0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19]
     );
     assert_eq!(
         MessageKind::try_from(0x0e).unwrap(),
@@ -229,19 +229,23 @@ fn roots_message_kind_discriminants_are_appended_after_brain_get_context_never_r
 }
 
 /// Phase 2's kinds, appended after `BrainSearch` and after `Error` rather
-/// than slotted in among the frozen ones. These four discriminants are also
+/// than slotted in among the frozen ones. These discriminants are also
 /// spelled out in `macos/OmniAgent/SessionProtocol.swift`; the two enums are
 /// one wire contract, so a change here without a change there is a bug.
+///
+/// `0x8c` (`SessionResized`) is deliberately absent: the 2026-09-01 remote
+/// environment sharing spec §5/§1 deleted it, and this test never asserted
+/// that byte was *taken* — only what the ones that remain mean — so its
+/// absence needs no assertion of its own, and the byte stays retired.
 #[test]
 fn phase_2_message_kind_discriminants_are_appended_never_renumbering_v1() {
     assert_eq!(
         [
             MessageKind::ListViewers as u8,
             MessageKind::DisconnectViewer as u8,
-            MessageKind::SessionResized as u8,
             MessageKind::RemoteViewers as u8,
         ],
-        [0x1a, 0x1b, 0x8c, 0x8d]
+        [0x1a, 0x1b, 0x8d]
     );
     assert_eq!(
         MessageKind::try_from(0x1a).unwrap(),
@@ -257,17 +261,97 @@ fn phase_2_message_kind_discriminants_are_appended_never_renumbering_v1() {
     );
 }
 
+/// `0x8c` is retired, not reused — `SessionResized` was deleted (2026-09-01
+/// remote environment sharing spec §5/§1) and nothing has taken its byte.
 #[test]
-fn phase_2_payload_shapes_match_the_swift_client() {
+fn the_retired_session_resized_byte_names_nothing() {
+    assert!(MessageKind::try_from(0x8c).is_err());
+}
+
+/// Phase 3's `ListDirectory`, appended after `DisconnectViewer` at 0x1d —
+/// leaving 0x1c as the hole Task 21's `PublishHostState` fills below.
+/// Discriminants are appended and never renumbered: a hole costs nothing next
+/// to two Macs disagreeing about what a byte means.
+#[test]
+fn list_directory_is_appended_at_0x1d() {
+    assert_eq!(MessageKind::ListDirectory as u8, 0x1d);
     assert_eq!(
-        serde_json::to_value(SessionSizePayload {
-            id: "sess-1".into(),
-            cols: 120,
-            rows: 40,
+        MessageKind::try_from(0x1d).unwrap(),
+        MessageKind::ListDirectory
+    );
+}
+
+/// Task 21's `PublishHostState` (spec §4), filling the 0x1c hole
+/// `list_directory_is_appended_at_0x1d`'s own doc describes rather than
+/// claiming a new discriminant — appended and never renumbered, like every
+/// other kind in this enum.
+#[test]
+fn publish_host_state_fills_the_0x1c_hole() {
+    assert_eq!(MessageKind::PublishHostState as u8, 0x1c);
+    assert_eq!(
+        MessageKind::try_from(0x1c).unwrap(),
+        MessageKind::PublishHostState
+    );
+}
+
+/// The `ListDirectory` request and its reply, which travels on the ordinary
+/// `Response`. The entry shape is the security boundary of §4 as much as it
+/// is a wire format: a name and an is-directory flag, and nothing that could
+/// amount to reading a file.
+#[test]
+fn list_directory_payload_shapes_carry_names_and_kinds_and_nothing_else() {
+    assert_eq!(
+        serde_json::to_value(ListDirectoryPayload {
+            path: "/Users/bonando".into(),
+            show_hidden: false,
         })
         .unwrap(),
-        serde_json::json!({"id": "sess-1", "cols": 120, "rows": 40})
+        serde_json::json!({"path": "/Users/bonando", "show_hidden": false})
     );
+    // A client that predates the flag omits it, and gets the picker's list.
+    assert!(
+        !serde_json::from_value::<ListDirectoryPayload>(
+            serde_json::json!({"path": "/Users/bonando"})
+        )
+        .unwrap()
+        .show_hidden
+    );
+    assert_eq!(
+        serde_json::to_value(DirectoryListingPayload {
+            entries: vec![
+                DirectoryEntryPayload {
+                    name: "Documents".into(),
+                    is_dir: true,
+                },
+                DirectoryEntryPayload {
+                    name: "notes.md".into(),
+                    is_dir: false,
+                },
+            ],
+            truncated: false,
+        })
+        .unwrap(),
+        serde_json::json!({"entries": [
+            {"name": "Documents", "is_dir": true},
+            {"name": "notes.md", "is_dir": false}
+        ], "truncated": false})
+    );
+}
+
+// The cap's arithmetic — that `LIST_DIRECTORY_MAX_ENTRIES` worst-case entries
+// fit inside `MAX_PAYLOAD_LEN` — is asserted at the constant's definition in
+// `protocol.rs` as a `const _: () = assert!(…)`, so raising the cap too far
+// fails the *build* rather than a connection. Nothing to re-check at runtime
+// here; the behaviour it protects is covered end to end by `list_directory.rs`'s
+// `a_directory_of_worst_case_names_still_fits_in_one_frame`, which measures the
+// real encoded payload instead of the estimate.
+
+#[test]
+fn phase_2_payload_shapes_match_the_swift_client() {
+    // The roster row an unrelayed or unasserted viewer produces: the four
+    // asserted fields are *absent keys*, not nulls and not empty strings, so
+    // "the relay said nothing" and "the relay said ''" stay different facts
+    // all the way to the host's panel, where the first omits the row.
     assert_eq!(
         serde_json::to_value(RemoteViewersPayload {
             viewers: vec![ViewerSummaryPayload {
@@ -275,6 +359,10 @@ fn phase_2_payload_shapes_match_the_swift_client() {
                 machine_name: "Air".into(),
                 sessions: vec!["pane-1".into()],
                 since: "2026-08-31T09:00:00+00:00".into(),
+                account_email: None,
+                ip: None,
+                country: None,
+                client: None,
             }],
         })
         .unwrap(),
@@ -285,12 +373,53 @@ fn phase_2_payload_shapes_match_the_swift_client() {
             "since": "2026-08-31T09:00:00+00:00"
         }]})
     );
+    // And the same row once the relay has described the connection (spec §9):
+    // four more keys, snake_case, beside the two self-reported ones.
+    assert_eq!(
+        serde_json::to_value(RemoteViewersPayload {
+            viewers: vec![ViewerSummaryPayload {
+                viewer_id: "v-air".into(),
+                machine_name: "Air".into(),
+                sessions: vec![],
+                since: "2026-08-31T09:00:00+00:00".into(),
+                account_email: Some("bruno@bonando.com".into()),
+                ip: Some("203.0.113.7".into()),
+                country: Some("DE".into()),
+                client: Some("OmniAgent/1.7.22 macOS 27.0".into()),
+            }],
+        })
+        .unwrap(),
+        serde_json::json!({"viewers": [{
+            "viewer_id": "v-air",
+            "machine_name": "Air",
+            "sessions": [],
+            "since": "2026-08-31T09:00:00+00:00",
+            "account_email": "bruno@bonando.com",
+            "ip": "203.0.113.7",
+            "country": "DE",
+            "client": "OmniAgent/1.7.22 macOS 27.0"
+        }]})
+    );
     assert_eq!(
         serde_json::to_value(DisconnectViewerPayload {
             viewer_id: "v-air".into(),
+            block: false,
         })
         .unwrap(),
-        serde_json::json!({"viewer_id": "v-air"})
+        serde_json::json!({"viewer_id": "v-air", "block": false})
+    );
+    // A caller built before Task 14 sends no `block` at all, and must go on
+    // getting `DisconnectViewer`'s original meaning — kick and block — rather
+    // than silently falling to Terminate underneath it.
+    assert_eq!(
+        serde_json::from_value::<DisconnectViewerPayload>(
+            serde_json::json!({"viewer_id": "v-air"})
+        )
+        .unwrap(),
+        DisconnectViewerPayload {
+            viewer_id: "v-air".into(),
+            block: true,
+        }
     );
     // A client older than phase 2 sends `{"client": …}` alone and must still
     // parse — the viewer identity is additive, and self-reported.
@@ -307,6 +436,92 @@ fn phase_2_payload_shapes_match_the_swift_client() {
         (named.viewer_id.as_deref(), named.machine_name.as_deref()),
         (Some("v-air"), Some("Air"))
     );
+}
+
+/// Task 19's `RemoteActivity`, appended after `RemoteViewers` at 0x8f —
+/// leaving 0x8e as the hole Task 21's `HostState` fills below, the same
+/// reasoning `ListDirectory`/`PublishHostState` share at 0x1d/0x1c:
+/// discriminants are appended and never renumbered.
+#[test]
+fn remote_activity_is_appended_at_0x8f() {
+    assert_eq!(MessageKind::RemoteActivity as u8, 0x8f);
+    assert_eq!(
+        MessageKind::try_from(0x8f).unwrap(),
+        MessageKind::RemoteActivity
+    );
+}
+
+/// Task 21's `HostState` push (spec §4), filling the 0x8e hole
+/// `remote_activity_is_appended_at_0x8f`'s own doc describes.
+#[test]
+fn host_state_fills_the_0x8e_hole() {
+    assert_eq!(MessageKind::HostState as u8, 0x8e);
+    assert_eq!(MessageKind::try_from(0x8e).unwrap(), MessageKind::HostState);
+}
+
+/// The `RemoteActivity` push payload round-trips. Unlike
+/// `ViewerSummaryPayload`'s optional fields, `ActivityEntry.detail` has no
+/// `skip_serializing_if`: a row with nothing to expand sends an explicit
+/// `"detail": null` rather than omitting the key, matching the interface Task
+/// 19's brief and Task 20's Swift-side reader both spell out literally.
+#[test]
+fn remote_activity_payload_round_trips_with_an_explicit_null_detail() {
+    let ts = "2026-09-01T10:00:00+00:00";
+    let payload = RemoteActivityPayload {
+        entries: vec![
+            ActivityEntry {
+                ts: chrono::DateTime::parse_from_rfc3339(ts)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+                    .into(),
+                kind: "attach".into(),
+                summary: "Opened Terminal 1".into(),
+                detail: None,
+            },
+            ActivityEntry {
+                ts: chrono::DateTime::parse_from_rfc3339(ts)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+                    .into(),
+                kind: "input".into(),
+                summary: "Sent a prompt to Terminal 1".into(),
+                detail: Some("hello".into()),
+            },
+        ],
+        dropped: 0,
+    };
+    let value = serde_json::to_value(&payload).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"entries": [
+            {"ts": ts, "kind": "attach", "summary": "Opened Terminal 1", "detail": null},
+            {"ts": ts, "kind": "input", "summary": "Sent a prompt to Terminal 1", "detail": "hello"}
+        ], "dropped": 0})
+    );
+    let round_tripped: RemoteActivityPayload = serde_json::from_value(value).unwrap();
+    assert_eq!(round_tripped, payload);
+}
+
+/// Fix round 1, IMPORTANT 2: `dropped` carries how many rows a push is not
+/// delivering because a slow feed fell behind the capped history — visible
+/// on the wire rather than a feed silently jumping ahead. `#[serde(default)]`
+/// so a payload built before this field existed (there is none in practice,
+/// but the same discipline every other additive field in this file gets)
+/// still decodes.
+#[test]
+fn remote_activity_payload_dropped_count_round_trips_and_defaults_to_zero() {
+    let payload = RemoteActivityPayload {
+        entries: vec![],
+        dropped: 37,
+    };
+    let value = serde_json::to_value(&payload).unwrap();
+    assert_eq!(value, serde_json::json!({"entries": [], "dropped": 37}));
+    let round_tripped: RemoteActivityPayload = serde_json::from_value(value).unwrap();
+    assert_eq!(round_tripped, payload);
+
+    let without_the_field: RemoteActivityPayload =
+        serde_json::from_value(serde_json::json!({"entries": []})).unwrap();
+    assert_eq!(without_the_field.dropped, 0);
 }
 
 #[test]
@@ -444,9 +659,53 @@ fn deferred_domain_messages_have_frozen_json_payload_shapes() {
     );
     assert_eq!(
         serde_json::to_value(ErrorPayload {
-            message: "no backend".into()
+            message: "no backend".into(),
+            code: None,
         })
         .unwrap(),
-        serde_json::json!({"message":"no backend"})
+        serde_json::json!({"message":"no backend"}),
+        "an ErrorPayload with no code must not put a `code` key on the wire at all"
     );
+}
+
+/// The wire strings [`RefusalCode`] sends — the half of the contract a Swift
+/// enum next to `SessionConnection.isTerminalRefusal` has to keep matching by
+/// hand, since nothing generates one side from the other (Task 14 item 2).
+#[test]
+fn refusal_code_wire_values_are_frozen() {
+    assert_eq!(
+        serde_json::to_value(RefusalCode::VersionSkew).unwrap(),
+        serde_json::json!("version_skew")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::LeaseHeld).unwrap(),
+        serde_json::json!("lease_held")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::MachineUnavailable).unwrap(),
+        serde_json::json!("machine_unavailable")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::HostSignedOut).unwrap(),
+        serde_json::json!("host_signed_out")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::WrongAccount).unwrap(),
+        serde_json::json!("wrong_account")
+    );
+    assert_eq!(
+        serde_json::to_value(RefusalCode::Blocked).unwrap(),
+        serde_json::json!("blocked")
+    );
+}
+
+/// An `Error` an older peer sent, before this field existed, has no `code`
+/// key at all — and must still decode, with `code` landing as `None` rather
+/// than the payload being rejected outright.
+#[test]
+fn error_payload_with_no_code_key_still_decodes() {
+    let payload: ErrorPayload =
+        serde_json::from_value(serde_json::json!({"message": "in use by Mac mini"})).unwrap();
+    assert_eq!(payload.message, "in use by Mac mini");
+    assert_eq!(payload.code, None);
 }

@@ -632,7 +632,11 @@ async fn brain_list_projects_and_get_context_round_trip_through_the_daemon() {
             })
             .unwrap();
         store
-            .upsert_node(&memory_node("demo:decision-1", "demo", "Decision: Use SQLite"))
+            .upsert_node(&memory_node(
+                "demo:decision-1",
+                "demo",
+                "Decision: Use SQLite",
+            ))
             .unwrap();
         store
             .upsert_node(&memory_node("demo:note-1", "demo", "Note: remember this"))
@@ -711,7 +715,9 @@ async fn malformed_brain_get_context_payload_errors_without_closing_the_connecti
     let error = client.read_kind(MessageKind::Error).await;
     assert_eq!(error.header.request_or_sequence, request);
 
-    let alive = client.send_json(MessageKind::ListSessions, &serde_json::json!({})).await;
+    let alive = client
+        .send_json(MessageKind::ListSessions, &serde_json::json!({}))
+        .await;
     let listed = client.read_kind(MessageKind::SessionList).await;
     assert_eq!(listed.header.request_or_sequence, alive);
 
@@ -1018,7 +1024,11 @@ async fn malformed_roots_and_search_payloads_error_without_closing_the_connectio
         .send_json(MessageKind::ListSessions, &serde_json::json!({}))
         .await;
     assert_eq!(
-        client.read_kind(MessageKind::SessionList).await.header.request_or_sequence,
+        client
+            .read_kind(MessageKind::SessionList)
+            .await
+            .header
+            .request_or_sequence,
         alive,
         "six malformed payloads in a row must leave the connection usable"
     );
@@ -1084,7 +1094,11 @@ async fn no_argument_kinds_accept_an_empty_payload_and_error_on_invalid_json() {
         .await
         .unwrap();
         assert_eq!(
-            client.read_kind(MessageKind::Error).await.header.request_or_sequence,
+            client
+                .read_kind(MessageKind::Error)
+                .await
+                .header
+                .request_or_sequence,
             request,
             "{kind:?} did not answer invalid JSON with an Error on its own request"
         );
@@ -1094,7 +1108,11 @@ async fn no_argument_kinds_accept_an_empty_payload_and_error_on_invalid_json() {
         .send_json(MessageKind::ListSessions, &serde_json::json!({}))
         .await;
     assert_eq!(
-        client.read_kind(MessageKind::SessionList).await.header.request_or_sequence,
+        client
+            .read_kind(MessageKind::SessionList)
+            .await
+            .header
+            .request_or_sequence,
         alive,
         "the connection must survive every one of them"
     );

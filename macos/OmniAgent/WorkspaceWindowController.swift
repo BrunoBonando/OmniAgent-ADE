@@ -110,11 +110,110 @@ final class WorkspaceWindow: NSWindow {
     }
 }
 
+/// The one connection the window drives, behind a reference so that the
+/// objects built in `WorkspaceWindowController.init` — before `self` exists,
+/// and therefore unable to ask the controller anything — resolve it *live*
+/// instead of capturing whichever connection happened to be current at
+/// construction.
+///
+/// This exists because of the no-chaining property (2026-09-01 remote
+/// environment sharing spec §3): a stale capture is precisely how a "local"
+/// connection survives a takeover unnoticed, which would leave this Mac
+/// shareable while it is driving another one.
+final class ActiveConnectionRef {
+    fileprivate(set) var current: SessionConnection
+
+    init(_ connection: SessionConnection) {
+        current = connection
+    }
+}
+
+/// `SessionConnection`'s injectable client protocols, forwarded to whichever
+/// daemon the window is driving right now. Everything handed one of these at
+/// `init` — the inspector, Settings' brain administration — therefore follows
+/// a swap rather than staying pointed at the connection it was born with.
+///
+/// Only the surfaces that are about *the environment* get one. The surfaces
+/// that are about *this Mac* (the auth rows, the sharing switch, the viewer
+/// roster, `HostState`) are deliberately bound to the local connection
+/// instead — see `WorkspaceWindowController.localConnection`.
+final class ResolvingDaemonClient: BrainAdminClient, BrainSearchClient {
+    private let active: ActiveConnectionRef
+
+    init(_ active: ActiveConnectionRef) {
+        self.active = active
+    }
+
+    private var connection: SessionConnection { active.current }
+
+    func listProjects(completion: @escaping (Result<[BrainProjectSummary], Error>) -> Void) {
+        connection.listProjects(completion: completion)
+    }
+
+    func getContext(project: String, completion: @escaping (Result<BrainContext, Error>) -> Void) {
+        connection.getContext(project: project, completion: completion)
+    }
+
+    func staleness(completion: @escaping (Result<[ProjectStaleness], Error>) -> Void) {
+        connection.staleness(completion: completion)
+    }
+
+    func pausedProjects(completion: @escaping (Result<[String], Error>) -> Void) {
+        connection.pausedProjects(completion: completion)
+    }
+
+    func setPaused(project: String, paused: Bool, completion: ((Result<Void, Error>) -> Void)?) {
+        connection.setPaused(project: project, paused: paused, completion: completion)
+    }
+
+    func reingestProject(project: String, completion: ((Result<Void, Error>) -> Void)?) {
+        connection.reingestProject(project: project, completion: completion)
+    }
+
+    func renameProject(id: String, newLabel: String, completion: ((Result<Void, Error>) -> Void)?) {
+        connection.renameProject(id: id, newLabel: newLabel, completion: completion)
+    }
+
+    func rebuildBrain(completion: ((Result<Void, Error>) -> Void)?) {
+        connection.rebuildBrain(completion: completion)
+    }
+
+    func search(query: String, scope: String?, completion: @escaping (Result<[BrainNodeView], Error>) -> Void) {
+        connection.search(query: query, scope: scope, completion: completion)
+    }
+}
+
 /// Owns the window, the connection, and the session lifecycle of every pane in
 /// the workspace. Layout, pane identity and focus belong to `PaneWorkspaceView`;
 /// creating, attaching and killing sessions belongs here.
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
-    let connection: SessionConnection
+    /// The daemon this window is driving — the local socket normally, another
+    /// Mac's while `isDrivingRemote`. Everything below that says `connection`
+    /// resolves through here on every call, so re-pointing the window is one
+    /// assignment rather than a hunt through call sites.
+    private let active: ActiveConnectionRef
+    /// This Mac's own daemon, for as long as this window lives. Kept apart
+    /// from `connection` because a handful of things are about *this machine*
+    /// and never about the one being driven: the `auth_*` rows, the sharing
+    /// switch and its blocked list, the viewer roster and the takeover panel,
+    /// `PublishHostState`, and the daemon pid a restart signals. All of those
+    /// are in the daemon's protected/local-only set anyway (spec §3, §12) —
+    /// addressing them here says so at the call site rather than relying on
+    /// the far end to refuse.
+    ///
+    /// **It is disconnected for the whole of a takeover**, and that is not an
+    /// oversight to be tidied up later: a Mac that is driving another Mac has
+    /// no local app connection, so its own daemon fails condition 3 of spec
+    /// §2 and refuses everyone inbound. No hops, no chains — enforced by
+    /// construction. Keeping both attached would silently undo it.
+    let localConnection: SessionConnection
+    var connection: SessionConnection { active.current }
+    /// Whether this window is pointed at another Mac's daemon.
+    var isDrivingRemote: Bool { active.current !== localConnection }
+    /// The brain/search surface handed to the objects built in `init`, which
+    /// cannot ask this controller for `connection` because `self` does not
+    /// exist yet.
+    private let daemonClient: ResolvingDaemonClient
     private let workspace: PaneWorkspaceView
     /// The pane rectangle. Reachable because the window's content view is now
     /// a split view — the workspace is one half of it, not the whole thing.
@@ -230,6 +329,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// than made per click so a second click on the menu item cannot stack
     /// two sheets of glass over the window.
     let remoteSessionPicker = RemoteSessionPickerController()
+    /// "Add local folder…"'s remote path (Task 28): one at a time, same
+    /// reasoning as `remoteSessionPicker` above.
+    let remoteFolderBrowser = RemoteFolderBrowserController()
     private var readySessions: Set<String> = []
     /// The `layout` read has been sent — a later reconnect must re-attach the
     /// panes that already exist rather than reading the row again and
@@ -378,23 +480,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     // MARK: - Remote Control (2026-08-30 remote-session-control spec §2)
 
-    /// The `remote_control_workspaces` row: the workspaces the user turned
-    /// Remote Control on for. The user's intent; what it currently projects
-    /// to is `remote_control`, rewritten from this and the live layout by
-    /// `persistRemoteControlProjection`.
-    private(set) var remoteControlWorkspaceIDs: Set<String> = []
     private var remoteControlReadDispatched = false
-    /// Whether Remote Control has ever been on for this Mac — the restore
-    /// read found enabled ids, or the user has toggled since launch.
-    ///
-    /// `lastPersisted` cannot answer this and must not be asked to: it is a
-    /// write-only cache of what *this window has written*, never seeded from
-    /// a read, so on a launch that has written nothing yet it says "no row"
-    /// about a `remote_control` row that is sitting on disk sharing
-    /// workspaces. Guarding the projection write on it meant a disable could
-    /// return early and leave that stale row in place — the checkmark off
-    /// and the daemon still authorizing `Attach`/`Input` on the old ids.
-    private var remoteControlEverEnabled = false
     /// What is known about `relay_device_token`. Three states, not a bool,
     /// because "we have not looked yet" and "there is none" are different
     /// answers and only one of them may register: guessing `absent` while
@@ -402,11 +488,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// row and a token row overwritten by whichever registration lands last.
     /// `registering` is the same guard against two enables inside one
     /// network round trip.
+    ///
+    /// Driven by `ensureRelayRegistration` (fix round 1, Task 29): the
+    /// per-workspace toggle that used to drive this state machine is deleted
+    /// with per-workspace sharing (2026-09-01 remote environment sharing
+    /// spec §1/§2), and `toggleRemoteSharing` is what rewires it to the
+    /// single `remote_sharing` switch — the one thing left that can turn
+    /// sharing on at all.
     enum RelayTokenState { case unknown, absent, present, registering }
     private(set) var relayTokenState: RelayTokenState = .unknown
     /// The registration call. `nil` means the real `RelayClient`; a test
     /// substitutes an answer — `workspaceRemovalConfirmer`'s pattern, and
-    /// what lets the first-enable path be asserted without a network.
+    /// what lets registration be asserted without a network.
     var relayDeviceRegistrar: ((String) async throws -> RelayClient.Registration)?
     /// The panel view and its split item — the third `NSSplitViewItem`, on
     /// the right of the session content.
@@ -532,11 +625,53 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     let daemonPersistence: DaemonPersistenceController
 
     /// The viewer side of remote session control: the other machines on this
-    /// account and one `SessionConnection` per online one. Remote panes
-    /// route through it (`connection(forPane:)`); its polling follows the
-    /// account — started when the gate resolves signed in, stopped on log
-    /// out (`syncRemoteMachines`).
+    /// account, from the relay's device list alone — no connection is opened
+    /// until the user actually connects (`connectRemote(to:)`). Its polling
+    /// follows the account — started when the gate resolves signed in,
+    /// stopped on log out (`syncRemoteMachines`).
     let remoteMachines: RemoteMachinesModel
+
+    /// The machine-wide sharing switch (2026-09-01 remote environment
+    /// sharing spec §2) — `.shared` in production, a fresh `init(store:)`
+    /// instance in tests, `remoteMachines`' own injection pattern. Bound to
+    /// exactly once, here in `init`: the sole subscriber to its
+    /// `onChange`/`onWriteFailed`, fanning out to `settingsView` and (through
+    /// `onRemoteSharingChanged`) the menu bar icon — `updateController
+    /// .onStateChange`'s exact shape, for the same reason: the model's own
+    /// doc comment promises "the menu bar icon and Settings › Remote both
+    /// redraw off this", and a `(() -> Void)?` property can only ever answer
+    /// to one caller, so one place has to be that caller and fan out.
+    private let remoteSharing: RemoteSharingModel
+    /// Fires whenever `remoteSharing`'s state actually changed and this
+    /// controller has finished applying it to `settingsView` — `AppDelegate`
+    /// is the only thing that sets this, to refresh the menu bar icon, which
+    /// this controller has no reference to.
+    var onRemoteSharingChanged: (() -> Void)?
+
+    /// Publishes this machine's own gauges/limits/engines to the lease
+    /// holder (spec §4, Task 22). `start()`/`stop()` are called from nowhere
+    /// but `syncTakeoverPanel()`, on the same `remoteSharing.liveConnection`
+    /// transition that puts up and takes down the takeover panel — a machine
+    /// with no viewer never starts it.
+    private let hostStatePublisher: HostStatePublisher
+
+    /// The **viewer** half of spec §4 (Task 26): this window's read of
+    /// whichever machine it is driving, fed by `connection.onHostState` and
+    /// read by the sidebar's gauges/limits and every engine picker while
+    /// `isDrivingRemote`. Reset on every `swapConnection` so a fresh takeover
+    /// of a *different* machine never shows the previous host's readings.
+    let hostStateModel = HostStateModel()
+
+    /// `connection.onHostState`'s handler: merges the push into
+    /// `hostStateModel` and tells everything that reads it to catch up, then
+    /// counts toward the ceremony's "Loading environment…" step (Task 26's
+    /// carried item, spec §6) — see `connectCeremonyReadiness`.
+    private func applyHostState(_ payload: Data) {
+        hostStateModel.apply(payload)
+        shellSidebar.statsRow.applyHostState(hostStateModel)
+        shellSidebar.claudeLimits.applyHostState(hostStateModel)
+        markConnectCeremonyHostStateLoaded()
+    }
 
     /// `panes` may be empty: the app delegate opens the window before the
     /// socket is up, and `start()` fills it from the `layout` row once the
@@ -553,15 +688,35 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         notifier: SessionNotifier = SessionNotifier(delivery: UserNotificationDelivery()),
         daemonPersistence: DaemonPersistenceController = DaemonPersistenceController(),
         remoteMachines: RemoteMachinesModel = RemoteMachinesModel(),
+        remoteSharing: RemoteSharingModel = .shared,
+        hostStateSources: HostStateSources = LiveHostStateSources(),
         settingsClient: SettingsClient? = nil,
         authDefaults: UserDefaults = .standard
     ) {
-        self.connection = connection
+        self.localConnection = connection
+        let active = ActiveConnectionRef(connection)
+        self.active = active
+        let daemonClient = ResolvingDaemonClient(active)
+        self.daemonClient = daemonClient
         self.notifier = notifier
         self.daemonPersistence = daemonPersistence
         self.remoteMachines = remoteMachines
+        self.remoteSharing = remoteSharing
+        let hostStatePublisher = HostStatePublisher(sources: hostStateSources)
+        // The **local** connection, not the active one: `PublishHostState` is
+        // this Mac telling its own daemon what only this Mac knows, and it is
+        // local-only in the daemon's allowlist (spec §12.3). It also never
+        // runs during a takeover — see `syncTakeoverPanel`.
+        hostStatePublisher.publish = { [connection] payload in
+            connection.publishHostState(payload)
+        }
+        self.hostStatePublisher = hostStatePublisher
         accountRoot = daemonPersistence.paths.dataDir
         currentAccountID = AccountDirectory.readCurrentAccount(root: daemonPersistence.paths.dataDir)
+        // The **local** connection again: every key this store reads or
+        // writes is an `auth_*` row, which names who is signed in to *this*
+        // Mac and which the daemon refuses to a remote client outright
+        // (spec §3, the protected set).
         let settingsStore = SettingsStore(client: settingsClient ?? connection)
         self.settingsStore = settingsStore
         // `authDefaults` is where the signed-in mirror lives — the real
@@ -575,31 +730,42 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         self.authGateCoordinator = authGateCoordinator
         let authGateWindow = AuthGateWindowController(coordinator: authGateCoordinator)
         self.authGateWindow = authGateWindow
+        // Onboarding is about *this* install's brain, so it keeps the local
+        // connection; `presentOnboardingIfNeeded` also declines to run at all
+        // while another Mac is being driven.
         firstRunWindow = FirstRunWindowController(ingestion: connection)
-        inspector = InspectorWindowController(client: connection)
+        // These two are about the environment on screen, so they follow the
+        // swap: the inspector shows the brain of whichever daemon owns the
+        // project the sidebar is listing, and Settings' brain administration
+        // acts on the same one. `Brain*` is in the remote allowlist (spec §3).
+        inspector = InspectorWindowController(client: daemonClient)
         settingsWindowController = SettingsWindowController(
             settings: settingsStore,
             authGate: authGateCoordinator,
             authGateWindow: authGateWindow,
-            brainAdmin: connection,
+            brainAdmin: daemonClient,
             notifier: notifier,
             daemonStatus: daemonPersistence
         )
-        workspace = PaneWorkspaceView { descriptor in
+        workspace = PaneWorkspaceView { [active] descriptor in
             switch descriptor.kind {
             case .terminal:
-                // A remote pane talks to its machine's connection; the local
-                // daemon's is for everything else. The lookup tolerates an
-                // offline machine so a pane is never silently rebound to the
-                // wrong daemon.
-                let target = descriptor.remoteDeviceID
-                    .flatMap { remoteMachines.retainedConnection(for: $0) as? SessionConnection }
-                    ?? connection
+                // `active`, not a captured `connection`: a pane built after a
+                // takeover must reach the machine being driven, whether it is
+                // this Mac's own daemon or another Mac's — the window has one
+                // connection, wherever it currently points.
+                let target = active.current
                 let surface = TerminalSurfaceView(connection: target, sessionID: descriptor.sessionID)
                 // Mosh-style local echo earns its keep only across a relay
                 // round trip; on the local socket it would draw glyphs the
                 // daemon confirms a millisecond later.
                 surface.predictiveEchoEnabled = target.isRemote
+                // Whoever drives owns the grid (spec §5, Task 27): a pane
+                // built *while* a viewer is already driving this Mac must
+                // start suppressed — `syncTakeoverPanel` only sets this on
+                // the panes that exist at the moment sharing goes live, and
+                // a pane opened mid-share is not one of them.
+                surface.sharingIsLive = remoteSharing.liveConnection != nil
                 return surface
             case .browser:
                 return BrowserPaneView(initialURL: descriptor.browserURL)
@@ -781,36 +947,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // renames it — and a session going away empties it.
             self?.refreshTitle()
         }
-        remoteMachines.onConnectionCreated = { [weak self] deviceID, remote in
-            guard let self, let remote = remote as? SessionConnection else { return }
-            wireRemoteConnection(remote, deviceID: deviceID)
-        }
-        remoteMachines.onConnectionStateChange = { [weak self] deviceID, state in
-            guard let self else { return }
-            // Spec §6: a machine that goes away leaves its panes saying so,
-            // and the connection keeps trying on its own.
-            let status: String?
-            switch state {
-            case .connected: status = nil
-            case .connecting: status = "Connecting"
-            case .disconnected: status = "Offline — reconnecting"
-            }
-            for paneID in remotePaneIDs(for: deviceID) {
-                applySessionStatus(status, for: paneID)
-            }
-        }
-        remoteMachines.onConnectionError = { [weak self] deviceID, error in
-            guard let self else { return }
-            // Transport failures are already the state line's "Offline —
-            // reconnecting" above, and the socket retries on its own. The
-            // one error worth its own words is the relay refusing the
-            // bearer: that stops the retries until the next poll brings a
-            // fresh token, and the pane should say why it is waiting.
-            guard case SessionConnectionError.unauthorized = error else { return }
-            for paneID in remotePaneIDs(for: deviceID) {
-                applySessionStatus(error.localizedDescription, for: paneID)
-            }
-        }
         remoteMachines.onChange = { [weak self] in self?.reloadOutline() }
         reviewPanel.onTabsChanged = { [weak self] in self?.reviewPanelUIChanged() }
         reviewPanel.onToggleExpand = { [weak self] in self?.toggleReviewPanelExpansion() }
@@ -878,6 +1014,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
         // And its Help row drops the app's own Help menu on itself.
         shellSidebar.onHelp = { [weak self] in self?.showHelpMenu() }
+        // The remote live-session widget's one button (spec §6, Task 25) —
+        // the widget does not end the session itself, only asks.
+        shellSidebar.remoteSessionWidget.onEndSession = { [weak self] in self?.disconnectRemote() }
         // Self-update: the widget is the only thing the updater talks through,
         // and the controller is the only thing that knows the state.
         shellSidebar.updateWidget.onDownload = { [weak self] in
@@ -899,6 +1038,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         updateController.daemonStopper = { [weak self] proceed in
             guard let self else { return proceed() }
             stopDaemonForUpdate(then: proceed)
+        }
+        // The sharing switch (2026-09-01 remote environment sharing spec
+        // §2) — the sole subscriber to `remoteSharing`'s single-slot
+        // `onChange`/`onWriteFailed`, matching `updateController
+        // .onStateChange` just above. Seeded once immediately after: a
+        // `remoteSharing` handed in already configured (every test's
+        // `init(store:)` path) resolved before this closure existed to hear
+        // about it.
+        remoteSharing.onChange = { [weak self] in self?.applyRemoteSharingChange() }
+        remoteSharing.onWriteFailed = { [weak self] error in self?.applyRemoteSharingWriteFailed(error) }
+        applyRemoteSharingChange()
+        // Home's own engine picker (spec §4, Task 26): read live rather than
+        // captured once, so a takeover beginning or ending mid-session
+        // changes what the very next menu press shows.
+        homeView.enginePicker = { [weak self] in
+            guard let self else { return EnginePickerModel(hostState: nil, isDrivingRemote: false) }
+            return EnginePickerModel(hostState: hostStateModel, isDrivingRemote: isDrivingRemote)
         }
         // Home's pill and the Settings page's button reach the same three
         // actions the widget does.
@@ -1096,30 +1252,61 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.sessionMenuProvider = { [weak self] session in
             self?.sessionContextMenu(for: session)
         }
-        // A remote machine's session row — opened through the same path the
-        // spotlight's remote rows run.
-        shellSidebar.onOpenRemoteSession = { [weak self] deviceID, sessionID, title in
-            self?.openRemoteSession(deviceID: deviceID, sessionID: sessionID, title: title)
-        }
         // The plus menu's "Resume remote session…": the picker of the other
         // Macs' shared sessions (phase 2 spec §4). The spotlight's `remote`
         // rows stay as they were — they are the fast path.
         shellSidebar.onResumeRemoteSession = { [weak self] in
             self?.presentRemoteSessionPicker()
         }
-        // The viewer count beside a shared workspace's globe: the list of
-        // machines watching it, each with a Disconnect (phase 2 spec §5).
-        shellSidebar.onShowViewers = { [weak self] id in
-            self?.showRemoteViewers(forWorkspace: id)
-        }
         // Asking the login shell for its PATH spawns a shell; do it now, off
-        // the main thread, so the first terminal does not wait for it.
-        EngineLauncher.prewarm()
+        // the main thread, so the first terminal does not wait for it. Once
+        // resolved, published to this Mac's own daemon
+        // (`SettingsKey.engineSearchPath`, Task 28 fix round 1) so a remote
+        // viewer's driven session can find an nvm/asdf-installed engine the
+        // daemon's own fixed lookup list cannot name —
+        // `resolve_engine_binary` (session.rs) reads this exact row.
+        //
+        // **Fix round 2, item 2:** this alone published the row once, with
+        // no retry. A write that lands before the socket is up, or a
+        // reconnect into a fresh account database with no row at all
+        // (`commitAccountSwitch`), silently reverted resolution to the
+        // fixed-list gap fix round 1 exists to close — and the failure was
+        // no longer visible even then, because `write(_:to:machineLocal:)`
+        // caches the value as sent *before* knowing whether the send
+        // actually reached the daemon, which would then suppress a real
+        // resend of the same value later. `runWhenConnected` is the fix: it
+        // holds the write until `localConnection` is genuinely up rather
+        // than attempting it early and losing it. It does not by itself
+        // cover a *later* reconnect once this specific connection is
+        // already up — the `.connected` handler below republishes on every
+        // one of those, catching the account-switch case (the daemon
+        // restarts into the new account's database, and this Mac's own
+        // `localConnection` reconnects into it) along with an ordinary
+        // drop-and-reconnect.
+        EngineLauncher.prewarm { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                self?.runWhenConnected { [weak self] in
+                    self?.write(EngineLauncher.searchPath, to: SettingsKey.engineSearchPath, machineLocal: true)
+                }
+            }
+        }
         for pane in panes { addPane(pane, startSession: false) }
         selectInitialWorkspaceIfNeeded(animated: false)
         reloadOutline()
         window.initialFirstResponder = workspace.focusedPaneID
             .flatMap { workspace.surface(for: $0)?.primaryResponderView }
+    }
+
+    /// The safety net `syncTakeoverPanel()` alone cannot be (fix round 1):
+    /// that function stops `hostStatePublisher` on the *normal* path, a
+    /// `remoteSharing.liveConnection` roster push saying nobody is driving
+    /// this Mac any more. A window torn down while a share is still live —
+    /// the app quitting, an account switch — never runs that path at all, so
+    /// without this the publisher's `HostMetricsSource` registration would
+    /// outlive the controller that owns it, sampling and publishing to a
+    /// `connection` this object no longer has any other reason to hold.
+    deinit {
+        hostStatePublisher.stop()
     }
 
     // MARK: - Window frame
@@ -1213,6 +1400,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsView.onConnectGitHub = { [weak self] in self?.connectGitHub() }
         settingsView.onDisconnectGitHub = { [weak self] in self?.disconnectGitHub() }
         settingsView.onDeleteAccount = { [weak self] in self?.deleteAccount() }
+        settingsView.onToggleRemoteSharing = { [weak self] in self?.toggleRemoteSharing() }
+        settingsView.onUnblock = { [weak self] id in self?.remoteSharing.unblock(id) }
         seedAccountFromMirror()
         settingsPanel.onHeightChange = { [weak self] in
             guard let self, settingsPanelPlace != .hidden else { return }
@@ -1563,11 +1752,39 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Sparkle's own cycle: a check shortly after launch, then daily. The
         // widget stays hidden until one of them finds something.
         updateController.start()
+        installConnectionHandlers()
+        connection.connect()
+    }
+
+    /// Every push this window listens for, installed on whichever connection
+    /// is active. Split out of `start()` so a takeover can re-establish the
+    /// whole set against the new daemon (`swapConnection`) rather than leaving
+    /// closures behind on the old one — a subscriber that outlives a swap is
+    /// still holding a connection this app is supposed to have let go of.
+    private func installConnectionHandlers() {
         connection.onStateChange = { [weak self] state in
             guard let self else { return }
             switch state {
             case .connected:
                 applyConnectionStatus(nil)
+                // Carries the connect ceremony from `.securing` straight to
+                // `.loading` (spec §6) — `helloAcknowledged()`'s own doc
+                // comment explains why that is two real steps landing
+                // together rather than one. `.connected` is only ever
+                // reached on a real `HelloAck` — see `SessionConnection
+                // .handle(_:)`'s own `.helloAck` branch — so both the secure
+                // line and the credential check are genuinely true by the
+                // time this runs. The loaded-handler is armed *before*
+                // `restoreAccountStateIfNeeded()` below, so it is in place
+                // before the `getSetting(layout)` round trip it is waiting
+                // on can possibly complete.
+                if connectCeremony != nil, isDrivingRemote {
+                    connectCeremony?.helloAcknowledged()
+                    connectCeremonyReadiness = (layoutLoaded: false, hostStateLoaded: false)
+                    connectCeremonyLoadedHandler = { [weak self] in
+                        self?.markConnectCeremonyLayoutLoaded()
+                    }
+                }
                 // Nothing is restored while the login window is up: that
                 // daemon serves the empty root, and restoring "nothing" there
                 // would bootstrap a pane and write a layout row for the next
@@ -1577,23 +1794,94 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     restoreAccountStateIfNeeded()
                 }
                 refreshProjectLabels()
-                // The roster is pushed on every change, but a daemon with
-                // nobody attached pushes nothing at all — so a freshly opened
-                // app has to ask once to learn that "nothing" is the answer
-                // rather than "not yet".
-                refreshRemoteViewers()
-                // The launch read ran before the daemon was up and failed;
-                // this is the first time the rows can actually be read.
-                refreshAccountSection()
+                // Everything from here to `didConnect` is about *this* Mac,
+                // so a remote daemon coming up is not the event it answers to:
+                // the roster and the sharing rows are local-only or protected
+                // (spec §3, §12.3) and would be refused, and the account rows
+                // describe who is signed in here. During a takeover the local
+                // connection is down and there is nothing to ask; the swap
+                // back re-runs all of it on the local `.connected`.
+                if !isDrivingRemote {
+                    // The roster is pushed on every change, but a daemon with
+                    // nobody attached pushes nothing at all — so a freshly
+                    // opened app has to ask once to learn that "nothing" is
+                    // the answer rather than "not yet".
+                    refreshRemoteViewers()
+                    // The launch read ran before the daemon was up and failed;
+                    // this is the first time the rows can actually be read.
+                    refreshAccountSection()
+                    // And the sharing model's own restore, if its first attempt
+                    // failed: `configure(store:)` runs once, off
+                    // `runWhenConnected`, so without this a single failed read
+                    // left `RemoteSharingModel.shared` at its fail-closed
+                    // defaults for the life of the process. A no-op once a
+                    // restore has actually completed.
+                    remoteSharing.connectionDidComeUp()
+                    // The `engine_search_path` row, republished on every
+                    // genuine local connect rather than only once off
+                    // `EngineLauncher.prewarm()`'s own completion (fix
+                    // round 2, item 2 — that doc comment has the full
+                    // reasoning). Covers a cold launch (whatever
+                    // `EngineLauncher.searchPath` currently holds — the
+                    // fallback if `prewarm()` has not resolved yet, updated
+                    // again once it does), an ordinary reconnect, and the
+                    // reconnect after an account switch into a database
+                    // with no row at all.
+                    write(EngineLauncher.searchPath, to: SettingsKey.engineSearchPath, machineLocal: true)
+                }
                 didConnect = true
                 presentOnboardingIfNeeded()
-                let work = pendingConnectedWork
-                pendingConnectedWork.removeAll()
-                for body in work {
-                    body()
+                // Gated on `!isDrivingRemote` (Task 23/25's carried item
+                // C.2): every real caller of `runWhenConnected` queues work
+                // that is about *this* Mac's own local connection coming up
+                // (`RemoteSharingModel.configure`, the app's launch-time
+                // readiness signal) — draining it on the *remote* `.connected`
+                // as well would run that work a second time, against the
+                // wrong daemon, for no caller that ever asked for it. The
+                // local `.connected` this queue is actually for still fires,
+                // untouched, the moment `disconnectRemote()` swaps back.
+                if !isDrivingRemote {
+                    let work = pendingConnectedWork
+                    pendingConnectedWork.removeAll()
+                    for body in work {
+                        body()
+                    }
                 }
             case .connecting:
                 applyConnectionStatus("Connecting")
+                // Step 1 → 2 of the connect ceremony, **and only that far**.
+                // `.connecting` fires at the very top of `SessionConnection
+                // .openConnection()`, before the socket exists — it proves
+                // the dial has *started*, nothing more. Fix round 1 found
+                // this calling `dataChannelOpened()` here too, in the same
+                // synchronous breath as `webSocketOpened()`: that checked
+                // "Establishing a secure line…" off before any secure line
+                // existed, at the instant the attempt began, with
+                // "Confirming credentials…" then spinning for the entire
+                // real wait — a milestone marked done ahead of its fact,
+                // exactly the failure this file's one rule forbids. Today's
+                // transport gives the app no signal between this one and
+                // `HelloAck`, so `.securing` is left **active**, covering
+                // that whole real span, until `helloAcknowledged()` (below)
+                // carries it — and `.confirming` with it — to done together
+                // on the one signal that actually proves both are true. See
+                // `RemoteConnectCeremony.webSocketOpened()`'s doc comment for
+                // the full reasoning and what protocol work would let this
+                // split into two real steps.
+                //
+                // A `.connecting` that is not the *first* one for this
+                // ceremony is a fresh dial `SessionConnection`'s own backoff
+                // started on its own, with no button pressed — the
+                // reconnect-retry carried item (spec §6): a non-terminal
+                // refusal ("in use by ‹machine›") leaves `shouldReconnect`
+                // true, so the transport keeps redialling by itself, and
+                // `retry()` here is what puts the ceremony's own steps back
+                // in step with it rather than leaving a stale failure card up
+                // through a redial that is quietly succeeding.
+                if let ceremony = connectCeremony, isDrivingRemote {
+                    if ceremony.step != .dialling { ceremony.retry() }
+                    ceremony.webSocketOpened()
+                }
             case .disconnected:
                 applyConnectionStatus("Reconnecting")
                 // Every "this session is up" belief died with the socket. If
@@ -1674,7 +1962,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             usageRecorder.recordExit(sessionID: event.id, at: Date().timeIntervalSince1970 * 1000)
         }
         connection.onError = { [weak self] error in
-            self?.applyConnectionStatus(error.localizedDescription)
+            guard let self else { return }
+            applyConnectionStatus(error.localizedDescription)
+            // The failing step of the connect ceremony (spec §6): shown
+            // with the daemon's own message, never a generic one. A `Hello`
+            // refusal carries its machine-readable code too
+            // (`SessionConnectionError.helloRefused`) — passed straight
+            // through so the overlay can tell "in use by ‹machine›" (keeps
+            // dialling on its own) from "update OmniAgent on ‹machine›"
+            // (does not) without re-parsing the sentence a daemon is free to
+            // reword.
+            if let ceremony = connectCeremony, isDrivingRemote {
+                if case let .helloRefused(code, message) = error as? SessionConnectionError {
+                    ceremony.failed(.init(message: message, code: code))
+                } else {
+                    ceremony.failed(.init(message: error.localizedDescription))
+                }
+            }
         }
         // Task 6c restart-loss reporting: a reconnect's automatic reattach
         // came back "session not found" — the daemon restarted and forgot
@@ -1684,20 +1988,78 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.onReattachFailed = { [weak self] sessionID in
             self?.handleReattachFailure(sessionID)
         }
-        // Who is watching this Mac (phase 2 §5). `onSessionSize` is
-        // deliberately not assigned anywhere near here: `TerminalSurfaceView`
-        // registers for it through a shared registry, and one assignment
-        // would silently unpin every remote pane from the host's grid. This
-        // callback has no such owner.
+        // Who is watching this Mac (phase 2 §5).
         connection.onRemoteViewers = { [weak self] viewers in
             self?.applyRemoteViewers(viewers)
         }
-        connection.connect()
+        // The activity log (Task 19/20, spec §8): local-only, and only ever
+        // meaningful while the takeover panel is up — a push that arrives
+        // with no panel yet built (a race with the roster that creates one)
+        // is simply not shown live; the durable file is unaffected either
+        // way, and Settings › Remote › Activity reads that back.
+        //
+        // `onRemoteViewers`/`onRemoteActivity` are HOST-side pushes, but
+        // this closure is installed on **whichever connection is active** —
+        // including, for the whole span of a takeover, the machine being
+        // driven. Only the daemon's own local-only rule for these two kinds
+        // (spec §12.3) prevents that remote daemon from ever actually
+        // sending one — which is exactly the kind of guarantee this
+        // codebase's own standing principle says not to rely on alone (a
+        // remote-reachable message becomes remote-reachable "deliberately,
+        // with a test", never merely by not being refused). So this Mac's
+        // own roster and activity feed must not update from whatever a
+        // remote daemon says, even if it should never say it: guarded here,
+        // defensively, rather than trusted to the far end saying no.
+        connection.onRemoteActivity = { [weak self] entries in
+            guard let self, !isDrivingRemote else { return }
+            takeoverPanel?.appendActivity(entries)
+        }
+        // The host's gauges, Claude limits and engine availability (spec §4,
+        // Task 26) — the viewer half of `HostStatePublisher`. Applying it
+        // unconditionally, the same reasoning as `onRemoteActivity` just
+        // above: the daemon only ever sends this to the lease holder, but
+        // this Mac must not trust that alone, and while `isDrivingRemote` is
+        // false the payload simply never arrives, so there is nothing to
+        // guard against.
+        connection.onHostState = { [weak self] payload in
+            self?.applyHostState(payload)
+        }
+    }
+
+    /// The exact inverse of `installConnectionHandlers`, applied to the
+    /// connection being left behind.
+    ///
+    /// Nothing subtler than nilling every closure will do: these are the only
+    /// strong references from a connection back into this window, and the
+    /// no-chaining property (spec §3) is the claim that *none* of them
+    /// survives a takeover. `SessionConnection.hasSubscribers` is the same
+    /// list read back, and `ConnectionSwapTests` asserts it is false for the
+    /// local connection while another Mac is being driven.
+    ///
+    private func clearConnectionHandlers(on connection: SessionConnection) {
+        connection.onStateChange = nil
+        connection.onTerminalData = nil
+        connection.onStatus = nil
+        connection.onAttention = nil
+        connection.onExit = nil
+        connection.onError = nil
+        connection.onReattachFailed = nil
+        connection.onRemoteViewers = nil
+        connection.onRemoteActivity = nil
+        connection.onHostState = nil
     }
 
     func stop() {
         connection.disconnect()
+        // Both, when a takeover is live: the window closing ends the remote
+        // session, and the local connection is sitting idle rather than gone.
+        localConnection.disconnect()
         daemonPersistence.stop()
+        // The panel outlives nothing: quitting ends sharing (spec §7), and a
+        // borderless screen-covering window left ordered in after its owner
+        // has gone is a window nobody can close.
+        takeoverPanel?.dismiss()
+        takeoverPanel = nil
     }
 
     /// Everything the daemon's data dir holds for this account, read once
@@ -1946,8 +2308,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // the *project* — and that fallback is "the first pane in this
         // project", so the outline's per-session "+" opened its new terminal in
         // whichever sibling session happened to come first.
+        // `startingDirectory` is `nil` only while driving with nothing
+        // recorded — `""` here, not a guess, for the same reason
+        // `newSession` passes it through unresolved: `createSession`
+        // re-derives it identically and refuses visibly once this pane
+        // exists to report it on (Task 28 fix round 2).
         let cwd = inherited.isEmpty
-            ? startingDirectory(for: workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) })
+            ? (startingDirectory(for: workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }) ?? "")
             : inherited
         return addPane(
             RestoredPane(
@@ -2101,15 +2468,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @objc func newSession(_ sender: Any?) {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        // `workspaceRoot()` is `nil` only while driving with nothing
+        // recorded (Task 28 fix round 2) — passed through as `""` rather
+        // than guessed here: `createSession` re-derives the same way and
+        // refuses visibly once the pane exists to report it on, the same
+        // path an uninstalled engine already fails through.
         startSession(
-            inDirectory: workspaceRoot(),
+            inDirectory: workspaceRoot() ?? "",
             project: current?.project ?? selectedProjectID ?? ""
         )
     }
 
     /// The folder a new session starts in: the open workspace's own directory,
     /// falling back to the focused pane's when no workspace is selected.
-    func workspaceRoot() -> String {
+    /// `nil` only while driving with nothing recorded — see
+    /// `startingDirectory(for:)`'s own doc.
+    func workspaceRoot() -> String? {
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         if let folder = workspaceDirectory(for: current?.project ?? selectedProjectID) {
             return folder
@@ -2122,7 +2496,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// been told about yet.
     @objc func openWorkspaceFolder(_ sender: Any?) {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
-        chooseSessionDirectory(startingAt: workspaceRoot()) { [weak self] chosen in
+        // Only a *starting point* for browsing, never a session's cwd — the
+        // sheet's own explicit choice is what actually gets added, so "/"
+        // when nothing else is known is a navigable seed, not a guess
+        // anyone acts on unseen (`chooseSessionDirectory`'s own fallback
+        // handles this identically for the case that reaches it as a
+        // literal path rather than `nil`).
+        chooseSessionDirectory(startingAt: workspaceRoot() ?? "/") { [weak self] chosen in
             guard let self, let chosen else { return }
             // The chosen folder *is* the workspace. This used to hand the new
             // session `current?.project` — the focused pane's workspace — so
@@ -2489,12 +2869,44 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// run without blocking on a modal.
     var directoryChooser: ((String, @escaping (String?) -> Void) -> Void)?
 
+    /// Whether a folder pick should use `NSOpenPanel` — this Mac's own
+    /// disk — or the remote folder browser backed by `ListDirectory`
+    /// (2026-09-01 remote environment sharing spec §4/§6, Task 28).
+    /// `NSOpenPanel` has no notion of "the other Mac's disk": while driving,
+    /// showing it at all would let someone pick a folder off the wrong
+    /// machine's filesystem and hand it to the host as if it were real.
+    /// Pure and static so every caller — and this type's own test — asks the
+    /// same question rather than each guessing at `isDrivingRemote` inline.
+    static func usesNativeOpenPanel(isDrivingRemote: Bool) -> Bool { !isDrivingRemote }
+
     private func chooseSessionDirectory(
         startingAt path: String,
         completion: @escaping (String?) -> Void
     ) {
         if let directoryChooser {
             directoryChooser(path, completion)
+            return
+        }
+        guard Self.usesNativeOpenPanel(isDrivingRemote: isDrivingRemote) else {
+            // `path` is usually already a HOST path — while driving, the
+            // whole window (including `workspaces`) reloaded from the
+            // host's own answers (spec §6) — except its one fallback,
+            // `startingDirectory(for:)`'s last resort
+            // (`FileManager...homeDirectoryForCurrentUser`), which is
+            // *this* Mac's home and would otherwise leak into the sheet as
+            // a starting point that may not even exist on the host. A
+            // workspace the host already reported is always real there;
+            // absent one, "/" always is.
+            let hostPath = path == FileManager.default.homeDirectoryForCurrentUser.path
+                ? (workspaces.first?.path ?? "/")
+                : path
+            remoteFolderBrowser.present(
+                over: window,
+                browser: RemoteFolderBrowser(connection: connection),
+                machineName: remoteSharing.activeRemoteSession?.machineName,
+                startingAt: hostPath,
+                onAdd: completion
+            )
             return
         }
         let panel = NSOpenPanel()
@@ -2622,6 +3034,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.focusedPaneID.flatMap { workspace.editorPane(for: $0) }
     }
 
+    /// Every terminal pane in this window's flat grid — what `syncTakeoverPanel`
+    /// tells about `sharingIsLive` on both edges of a takeover (spec §5,
+    /// Task 27).
+    private var terminalSurfaces: [TerminalSurfaceView] {
+        workspace.allPaneIDs.compactMap { workspace.terminalSurface(for: $0) }
+    }
+
     /// The engine badge's menu: every engine a terminal can be switched to,
     /// the one it runs now ticked, and the ones whose CLI is not on the `PATH`
     /// greyed rather than missing.
@@ -2642,10 +3061,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // A remote pane's process is another machine's to switch: the badge
         // still names the engine, its menu offers nothing.
         let switchable = descriptor?.isRemote != true
+        // While driving another Mac (spec §4, Task 26), "installed" means
+        // installed on the *host*: this Mac's own `PATH` answers for the
+        // wrong computer. `hostState` is `nil` outside a takeover, and
+        // `EnginePickerModel` falls back to the local answer then anyway.
+        let picker = EnginePickerModel(hostState: hostStateModel, isDrivingRemote: isDrivingRemote)
         for engine in EngineLauncher.selectable {
-            let installed = EngineLauncher.isInstalled(engine)
+            let installed = picker.isAvailable(engine)
+            let title: String
+            if installed {
+                title = engine.badgeTitle
+            } else if isDrivingRemote, let reason = picker.unavailableReason(engine) {
+                title = "\(engine.badgeTitle) — \(reason)"
+            } else {
+                title = "\(engine.badgeTitle) — not installed"
+            }
             let item = NSMenuItem(
-                title: installed ? engine.badgeTitle : "\(engine.badgeTitle) — not installed",
+                title: title,
                 action: #selector(switchEngine(_:)),
                 keyEquivalent: ""
             )
@@ -3151,163 +3583,381 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }?.isRemote != true
     }
 
-    private func remotePaneIDs(for deviceID: String) -> [String] {
-        workspace.allPaneIDs.filter { workspace.descriptor(for: $0)?.remoteDeviceID == deviceID }
-    }
-
     /// The machine's name as the relay last reported it; the id when the
-    /// machine has since dropped off the list.
+    /// machine has since dropped off the list. Kept for the "Remote ·
+    /// ‹machine›" pane meta label, which reads a fact no pane can carry any
+    /// more (`PaneDescriptor.remoteDeviceID` has no writer left — Task 29
+    /// deleted `openRemoteSession`, its only setter) but is left in place
+    /// rather than stripped from every other `isRemote` guard in this file,
+    /// none of which this task's brief named.
     private func remoteMachineName(for deviceID: String) -> String {
         remoteMachines.machine(for: deviceID)?.name ?? deviceID
     }
 
-    /// The relay's machines as the sidebar tree renders them — the host's own
-    /// tree, in the very same value types the local sidebar is built from, so
-    /// the two sidebars cannot drift into different shapes. Everything about
-    /// the shape is `treeEntries`'; this side only says which machine the
-    /// payload came from.
-    private func remoteTreeEntries() -> [RemoteMachineTreeEntry] {
-        remoteMachines.machines.map { machine in
-            RemoteMachineTreeEntry(
-                deviceID: machine.deviceID,
-                name: machine.name,
-                workspaces: RemoteControlProjection.treeEntries(
-                    machine.projection,
-                    idPrefix: "remote:\(machine.deviceID)"
-                )
-            )
-        }
-    }
-
-    /// The same list, flattened to the names the spotlight's rows print. The
-    /// palette's rows are the things a click can *open*, and what a viewer
-    /// attaches to is a **terminal** pane — so a session of three terminals
-    /// is three rows here, each named the way the host's own tab is, while
-    /// the sidebar keeps them as one row with three dots. An editor or
-    /// browser pane is in the projection for structural fidelity only (the
-    /// phase-2 spec's §2) and gets no row: opening one would build a
-    /// terminal pane for an id the daemon has no session behind.
+    /// The spotlight's copy of the relay's online machines — one **Connect
+    /// to ‹machine›** row apiece (spec §10, Task 29). There is nothing below
+    /// the machine to flatten any more: the per-pane picker and the
+    /// projection it read from are both gone.
     private func paletteRemoteMachines() -> [PaletteRemoteMachine] {
-        remoteMachines.machines.map { machine in
-            PaletteRemoteMachine(
-                deviceID: machine.deviceID,
-                name: machine.name,
-                workspaces: machine.projection.workspaces.map { workspace in
-                    PaletteRemoteWorkspace(
-                        id: workspace.id,
-                        name: workspace.name,
-                        panes: workspace.sessions
-                            .flatMap(\.panes)
-                            .filter { $0.kind == PaneKind.terminal.rawValue }
-                            .map { PaletteRemotePane(id: $0.id, title: $0.title) }
-                    )
-                }
-            )
-        }
+        remoteMachines.machines.map { PaletteRemoteMachine(deviceID: $0.deviceID, name: $0.name) }
     }
 
-    /// The daemon connection a pane's session lives on: its machine's for a
-    /// remote pane — the retained object, so a pane whose machine is offline
-    /// keeps addressing the connection that will come back — and the local
-    /// socket for everything else.
-    private func connection(forPane sessionID: String) -> SessionConnection {
-        workspace.descriptor(for: sessionID)?.remoteDeviceID
-            .flatMap { remoteMachines.retainedConnection(for: $0) as? SessionConnection }
-            ?? connection
-    }
-
-    /// The local connection's `start()` wiring, for a machine's connection:
-    /// output to its pane, status to the header and hover card. Deliberately
-    /// less than the local set — no notifications, no usage metering, no
-    /// `--resume` fallback, no restart-loss report: those are about sessions
-    /// this Mac runs, and none of these is.
-    ///
-    /// Reached from `onConnectionCreated` for every object the model makes,
-    /// and again from `openRemoteSession` for one the model made before this
-    /// window was listening. Plain reassignment both times: the closures are
-    /// identical, so wiring twice is wiring once, and there is no identity
-    /// set to go stale when the model releases an object and the allocator
-    /// hands its address to the next.
-    private func wireRemoteConnection(_ remote: SessionConnection, deviceID: String) {
-        remote.onTerminalData = { [weak self] id, bytes, sequence, isSnapshot in
-            guard let self, let surface = workspace.terminalSurface(for: id) else { return }
-            surface.feed(bytes, isSnapshot: isSnapshot, sequence: sequence)
-            workspace.noteOutput(for: id)
-        }
-        remote.onStatus = { [weak self] event in
-            guard let self, workspace.container(for: event.id) != nil else { return }
-            let now = Date().timeIntervalSince1970 * 1000
-            lastStatus[event.id] = event.status
-            lastStatusEventAt[event.id] = now
-            activity.record(paneID: event.id, status: event.status, at: now)
-            applySessionStatus(event.status.title, for: event.id)
-            workspace.setStatus(event.status, for: event.id)
-        }
-        remote.onExit = { [weak self] event in
-            guard let self, workspace.container(for: event.id) != nil else { return }
-            readySessions.remove(event.id)
-            lastStatus.removeValue(forKey: event.id)
-            lastStatusEventAt.removeValue(forKey: event.id)
-            activity.forget(paneID: event.id)
-            applySessionStatus("Session ended", for: event.id)
-            workspace.setStatus(nil, for: event.id)
-        }
-    }
-
-    /// Follows the account: signed in polls the relay, signed out stops and
-    /// closes every remote pane — the socket behind them is gone with the
-    /// bearer, and a pane of a machine this account no longer sees is not
-    /// one to leave on the Desk.
+    /// Follows the account: signed in polls the relay for the machine list,
+    /// signed out stops.
     private func syncRemoteMachines(signedIn: Bool) {
         if signedIn {
             remoteMachines.start()
         } else {
+            // Signing out ends a takeover too: the bearer the relay socket
+            // rides on is gone, and the window must be back on its own daemon
+            // before `stop()` clears the model.
+            disconnectRemote()
             remoteMachines.stop()
-            for paneID in workspace.allPaneIDs where workspace.descriptor(for: paneID)?.isRemote == true {
-                destroyPane(paneID)
+        }
+    }
+
+    // MARK: - Driving another Mac (2026-09-01 remote environment sharing §6)
+
+    /// The workspaces this window is currently listing, in order. The
+    /// coarsest possible statement of "which environment is on screen", and
+    /// what `ConnectionSwapTests` compares across a takeover and back.
+    var workspaceIDs: [String] { workspaces.map(\.id) }
+
+    /// Whether this Mac is publishing its own gauges, limits and engines to a
+    /// lease holder (spec §4). Host-side, so false for the whole of a
+    /// takeover — see `syncTakeoverPanel`.
+    var isPublishingHostState: Bool { hostStatePublisher.isRunning }
+
+    /// How a machine is turned into the connection that reaches it —
+    /// `RemoteMachinesModel`'s, in production. A seam in the house style
+    /// (`viewerLister`, `sessionEnsurer`), so a swap can be exercised without
+    /// a relay, a device registration or a socket.
+    var remoteConnectionProvider: ((RemoteMachine) -> SessionConnection?)?
+
+    /// The handful of things the local daemon's answers had put in this
+    /// window that no later read brings back by itself: which screen was on,
+    /// which workspace was open, and the project list behind both.
+    ///
+    /// Everything else — the panes, the layout, the session metadata, the
+    /// notification feed, the usage store — is deliberately **not** in here.
+    /// Those live in rows in the local daemon's database, which a takeover
+    /// does not touch, so re-reading them on the swap back is both simpler
+    /// and more honest than replaying a copy of them from memory.
+    private struct LocalEnvironment {
+        var destination: WorkspaceDestination
+        var workspaces: [BrainProjectSummary]
+        var selectedProjectID: String?
+        var projectLabels: [String: String]
+        var recentSessionGroupIDs: [String]
+    }
+
+    /// Set for exactly as long as `isDrivingRemote` is true.
+    private var parkedLocalEnvironment: LocalEnvironment?
+
+    // MARK: - The connect ceremony (spec §6, Task 24)
+
+    /// The ceremony currently on screen, or `nil` outside a takeover dial.
+    /// Not `private`: a test drives it directly rather than synthesising
+    /// clicks on the overlay it is shown through.
+    ///
+    /// `installConnectionHandlers`'s `onStateChange`/`onError` forward to
+    /// this — in *addition* to their ordinary work, never in place of it —
+    /// whenever it is set and `isDrivingRemote`. One set of real events
+    /// drives both the restore machinery and the ceremony's four steps,
+    /// which is what keeps a synthetic delay from ever sneaking in: nothing
+    /// here has a timer of its own.
+    ///
+    /// **Never awaited by `connectRemote` itself.** `connectRemote` swaps
+    /// and returns the moment the swap happens — `ConnectionSwapTests`
+    /// depends on that timing, dialling connections that never actually
+    /// reach `.connected` in a test — so the ceremony has to be driven as a
+    /// side effect of the ordinary connection pushes, not by making the
+    /// `async` function wait on them.
+    private(set) var connectCeremony: RemoteConnectCeremony?
+    /// The glass the ceremony above is shown through, mounted over the
+    /// window's content view for as long as `connectCeremony` is set.
+    private var connectCeremonyView: RemoteConnectCeremonyOverlayView?
+    /// Which machine `connectCeremony` is for — kept apart from the
+    /// ceremony's own `machineName` (a display string) so **Try again**
+    /// after a failure that happened *before* `connectRemote` ever swapped
+    /// (already driving, the machine went offline, self-drive) can call
+    /// `connectRemote` a second time rather than reconnecting a transport
+    /// that was never swapped in to begin with.
+    private var connectCeremonyMachine: RemoteMachine?
+    /// Fires once, the first time `applyRestoredPanes` completes after this
+    /// connect — the ceremony's "Loading environment…" step reads the same
+    /// fact `layoutReadCompleted` gates: the saved layout has actually come
+    /// back and been turned into panes. Set inside `installConnectionHandlers`'s
+    /// `.connected` case, before `restoreAccountStateIfNeeded()` is called,
+    /// so it is in place before the `getSetting(layout)` round trip it is
+    /// waiting on can possibly complete; cleared the moment it fires.
+    ///
+    /// **Only marks its own half done** (Task 26's carried item): the step
+    /// used to advance the ceremony straight from here, which meant
+    /// "Loading environment…" could finish before the first `HostState` had
+    /// ever landed — the glass lifting on gauges and limits still blank. It
+    /// now calls `markConnectCeremonyLayoutLoaded()`, which only advances
+    /// once `connectCeremonyReadiness`'s other half is also true.
+    private var connectCeremonyLoadedHandler: (() -> Void)?
+
+    /// What "Loading environment…" (step 4, spec §6) is still waiting on —
+    /// the saved layout turned into panes, and the first `HostState`. `nil`
+    /// outside a live takeover attempt; set alongside
+    /// `connectCeremonyLoadedHandler` in `installConnectionHandlers`'s
+    /// `.connected` case, and cleared wherever that is. Both flags start
+    /// `false`, and `markConnectCeremonyLayoutLoaded`/
+    /// `markConnectCeremonyHostStateLoaded` advance the ceremony the moment
+    /// both are `true` — from whichever of the two lands second.
+    private var connectCeremonyReadiness: (layoutLoaded: Bool, hostStateLoaded: Bool)?
+
+    /// `applyRestoredPanes`'s half of `connectCeremonyReadiness`.
+    private func markConnectCeremonyLayoutLoaded() {
+        guard connectCeremonyReadiness != nil else { return }
+        connectCeremonyReadiness?.layoutLoaded = true
+        finishConnectCeremonyIfReady()
+    }
+
+    /// `applyHostState`'s half of `connectCeremonyReadiness`.
+    private func markConnectCeremonyHostStateLoaded() {
+        guard connectCeremonyReadiness != nil else { return }
+        connectCeremonyReadiness?.hostStateLoaded = true
+        finishConnectCeremonyIfReady()
+    }
+
+    /// Advances the ceremony to `.done` the moment both halves of
+    /// `connectCeremonyReadiness` are true — never before either one is.
+    private func finishConnectCeremonyIfReady() {
+        guard let readiness = connectCeremonyReadiness,
+              readiness.layoutLoaded, readiness.hostStateLoaded
+        else { return }
+        connectCeremonyReadiness = nil
+        guard let ceremony = connectCeremony else { return }
+        ceremony.environmentLoaded()
+        finishConnectCeremony()
+    }
+
+    /// The user-facing entry point for a takeover: presents the ceremony
+    /// over this window, then calls `connectRemote(to:)`. Every "Connect to
+    /// ‹machine›" affordance in the app (the palette's row today; the
+    /// sidebar and picker per spec §3, once Task 29 gives them a "Connect
+    /// to" surface of their own) runs through here rather than calling
+    /// `connectRemote` directly, so the ceremony is never skipped.
+    @MainActor
+    func beginConnecting(to machine: RemoteMachine) {
+        // One at a time — a second press while the first is still dialling
+        // does nothing, the same "already driving" refusal `connectRemote`
+        // itself would give once the swap has happened, just before it has.
+        guard connectCeremony == nil, let content = window?.contentView else { return }
+        let ceremony = RemoteConnectCeremony(machineName: machine.name)
+        connectCeremony = ceremony
+        connectCeremonyMachine = machine
+        let view = RemoteConnectCeremonyOverlayView(ceremony: ceremony)
+        view.frame = content.bounds
+        view.autoresizingMask = [.width, .height]
+        view.onRetry = { [weak self] in self?.retryConnecting() }
+        view.onCancel = { [weak self] in self?.cancelConnecting() }
+        content.addSubview(view, positioned: .above, relativeTo: nil)
+        connectCeremonyView = view
+        window?.makeFirstResponder(view)
+        dial(machine, ceremony: ceremony)
+    }
+
+    /// Runs `connectRemote(to:)` and reports a failure that happens *before*
+    /// the swap — `connectRemote`'s three synchronous refusals (already
+    /// driving, the machine went offline, self-drive) — to `ceremony`. A
+    /// failure *after* the swap is `installConnectionHandlers`'s business,
+    /// not this function's: `connectRemote` itself never throws for those.
+    private func dial(_ machine: RemoteMachine, ceremony: RemoteConnectCeremony) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await connectRemote(to: machine)
+            } catch {
+                guard connectCeremony === ceremony else { return }
+                ceremony.failed(.init(message: error.localizedDescription))
             }
         }
     }
 
-    /// Opens one of another machine's shared sessions on this Desk: focuses
-    /// the pane if it is already open, else adds a terminal pane bound to
-    /// that machine's connection and attaches. No daemon `CreateSession`
-    /// anywhere — the session exists, on the other Mac — and the pane is
-    /// never persisted (`localPaneDescriptors`). Nothing happens for a
-    /// machine the relay does not list online: there is no socket to attach
-    /// through, and the row that offered it is on its way out.
-    func openRemoteSession(deviceID: String, sessionID: String, title: String) {
-        if let existing = workspace.descriptor(for: sessionID), existing.remoteDeviceID == deviceID {
-            revealPane(sessionID)
-            return
+    /// **Try again.** While the swap has already happened
+    /// (`isDrivingRemote`), only the transport-level connect needs
+    /// repeating — `SessionConnection.connect()` over the *same* connection
+    /// object `connectRemote` swapped in, its own "no-op if already trying"
+    /// guard keeping a double-press harmless. Before the swap, there is
+    /// nothing to reconnect: `dial(_:ceremony:)` runs the whole attempt
+    /// again.
+    private func retryConnecting() {
+        guard let ceremony = connectCeremony, let machine = connectCeremonyMachine else { return }
+        ceremony.retry()
+        if isDrivingRemote {
+            connection.connect()
+        } else {
+            dial(machine, ceremony: ceremony)
         }
-        guard let remote = remoteMachines.sessionConnection(for: deviceID) else { return }
-        guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
-        wireRemoteConnection(remote, deviceID: deviceID)
-        // The host's own grouping and engine, so two panes of one remote
-        // session share a grid here as they do there and the badge names
-        // what is actually running. The id handed in is a *pane* id — the
-        // only thing a viewer may attach to — so the session it belongs to
-        // is found by looking inside the panes, never by matching the
-        // session's own id, which is the host's grouping and matches
-        // nothing a viewer ever holds.
-        let projected = remoteMachines.machine(for: deviceID)?.projection.workspaces
-            .lazy
-            .flatMap(\.sessions)
-            .first { $0.panes.contains { $0.id == sessionID } }
-        let projectedPane = projected?.panes.first { $0.id == sessionID }
-        let descriptor = PaneDescriptor(
-            sessionID: sessionID,
-            group: projected?.id ?? sessionID,
-            groupLabel: projected?.label ?? title,
-            project: "remote:\(deviceID)",
-            engine: projectedPane.flatMap { Engine(rawValue: $0.engine) } ?? .shell,
-            label: projectedPane?.title ?? title,
-            remoteDeviceID: deviceID
+    }
+
+    /// **Cancel**, or Esc: unwinds whatever `beginConnecting` started —
+    /// swaps back to the local daemon if the swap had already happened, and
+    /// always takes the overlay down.
+    private func cancelConnecting() {
+        guard connectCeremony != nil else { return }
+        if isDrivingRemote {
+            disconnectRemote()
+        } else {
+            connectCeremony = nil
+            connectCeremonyMachine = nil
+            connectCeremonyView?.removeFromSuperview()
+            connectCeremonyView = nil
+        }
+    }
+
+    /// `ceremony.onDone`'s handler, wired from `installConnectionHandlers`:
+    /// the ceremony has reached `.done` and is fading itself out
+    /// (`RemoteConnectCeremonyOverlayView.animateOutOnDone`) — this only has
+    /// to stop treating it as the thing on screen.
+    private func finishConnectCeremony() {
+        connectCeremony = nil
+        connectCeremonyMachine = nil
+        connectCeremonyView = nil
+    }
+
+    /// Points the whole window at another Mac's daemon.
+    ///
+    /// Local state is not destroyed — `disconnectRemote()` restores it. What
+    /// *is* destroyed, deliberately and permanently for the duration, is the
+    /// **attachment to this Mac's own daemon**: `swapConnection` clears every
+    /// subscription on the local connection and disconnects it.
+    ///
+    /// That is not an optimisation and must not be "fixed" by keeping both
+    /// attached. It is the whole of the app's half of the no-chaining
+    /// property (spec §3): the daemon shares a machine only while at least
+    /// one local app connection exists (spec §2, condition 3), so a Mac that
+    /// is driving another Mac fails that test and refuses everyone inbound.
+    /// No hops, no chains, enforced by construction rather than by a rule.
+    /// Two connections would make the condition satisfiable by accident, and
+    /// the property would silently stop holding.
+    @MainActor
+    func connectRemote(to machine: RemoteMachine) async throws {
+        guard !isDrivingRemote else {
+            throw RemoteDriveError.alreadyDriving
+        }
+        // The poll already drops this Mac's own device from `remoteMachines
+        // .machines` (`RemoteMachinesModel.apply`'s `online && deviceID !=
+        // localDeviceID` filter), which is why this has never yet been
+        // reachable in practice — but that is the UI's list filtering
+        // itself, not this method refusing to be called with the wrong
+        // argument. A test, a future caller, or a `remoteConnectionProvider`
+        // override could still hand this the local device id directly, and
+        // driving oneself is exactly the loop the no-chaining property
+        // exists to make impossible — so it is refused here too, by
+        // construction, rather than by trusting one caller upstream to have
+        // filtered correctly.
+        guard machine.deviceID != remoteMachines.localDeviceID else {
+            throw RemoteDriveError.isThisMachine
+        }
+        let provider = remoteConnectionProvider ?? { [weak self] machine in
+            self?.remoteMachines.sessionConnection(for: machine.deviceID)
+        }
+        guard let remote = provider(machine) else {
+            throw RemoteDriveError.machineOffline(machine.name)
+        }
+        parkedLocalEnvironment = LocalEnvironment(
+            destination: destination,
+            workspaces: workspaces,
+            selectedProjectID: selectedProjectID,
+            projectLabels: projectLabels,
+            recentSessionGroupIDs: recentSessionGroupIDs
         )
-        guard addDescriptor(descriptor, reattaches: true, startSession: false) else { return }
-        attach(sessionID)
-        revealPane(sessionID)
+        // The UI-side half of "no chaining in the UI" (spec §3, Task 25)
+        // closes the instant the takeover *begins* — before the far end has
+        // answered anything — not once it finishes connecting: every
+        // "Connect to ‹machine›" row reads `remoteSharing.activeRemoteSession`
+        // directly, and a window in the middle of the connect ceremony must
+        // already refuse a second one.
+        remoteSharing.beganDriving(machine.name)
+        swapConnection(to: remote)
+    }
+
+    /// Swaps back to the local socket and puts this Mac's own environment
+    /// back where it was. A no-op when nothing is being driven.
+    func disconnectRemote() {
+        guard isDrivingRemote else { return }
+        let parked = parkedLocalEnvironment
+        parkedLocalEnvironment = nil
+        remoteSharing.endedDriving()
+        connectCeremony = nil
+        connectCeremonyMachine = nil
+        connectCeremonyView?.removeFromSuperview()
+        connectCeremonyView = nil
+        connectCeremonyLoadedHandler = nil
+        connectCeremonyReadiness = nil
+        swapConnection(to: localConnection)
+        if let parked {
+            destination = parked.destination
+            workspaces = parked.workspaces
+            selectedProjectID = parked.selectedProjectID
+            projectLabels = parked.projectLabels
+            recentSessionGroupIDs = parked.recentSessionGroupIDs
+        }
+        applyDestination(destination)
+        reloadOutline()
+        // The panes, the layout and every row-backed surface come back from
+        // the local daemon's own database on the next `.connected`, which
+        // `swapConnection` has just asked for. Nothing wrote to those rows
+        // while the takeover was live: the reset below drops
+        // `layoutReadCompleted`, which is the write gate every `persist*`
+        // checks, and after the swap the writes that did happen went to the
+        // machine being driven.
+    }
+
+    /// Re-points `active`, and does the three things that must happen with it
+    /// in one place: forget the environment the old daemon was showing, move
+    /// every subscription across, and dial the new connection.
+    private func swapConnection(to next: SessionConnection) {
+        let previous = active.current
+        guard previous !== next else { return }
+        // Write gates down *first* (`resetForAccountSwitch` starts by
+        // dropping them), so nothing below persists this window's outgoing
+        // state into the incoming daemon's database.
+        resetForAccountSwitch()
+        clearConnectionHandlers(on: previous)
+        previous.disconnect()
+        active.current = next
+        // A fresh takeover of a *different* machine (or the swap back to
+        // this one's own) must not show a moment of the previous host's
+        // readings (spec §4, Task 26) — cleared before the new connection's
+        // first `HostState` can possibly arrive.
+        hostStateModel.reset()
+        shellSidebar.statsRow.applyHostState(nil)
+        shellSidebar.claudeLimits.applyHostState(nil)
+        installConnectionHandlers()
+        next.connect()
+        // The panel and the host-state publisher are host-side, and
+        // `isDrivingRemote` has just changed under them.
+        syncTakeoverPanel()
+    }
+
+    /// Why `connectRemote` refused.
+    enum RemoteDriveError: LocalizedError, Equatable {
+        case alreadyDriving
+        case machineOffline(String)
+        /// `connectRemote`'s own self-drive guard (Task 23/25's carried
+        /// item C.3) — see its call site's doc comment for why this exists
+        /// even though `remoteMachines.machines` already excludes this
+        /// device from every list a caller would build a `RemoteMachine`
+        /// from.
+        case isThisMachine
+
+        var errorDescription: String? {
+            switch self {
+            case .alreadyDriving:
+                return "End the current remote session first."
+            case let .machineOffline(name):
+                return "\(name) is not reachable."
+            case .isThisMachine:
+                return "This is this Mac — there is nothing to connect to."
+            }
+        }
     }
 
     // MARK: - Restoration
@@ -3360,8 +4010,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Only here, with the row's contents actually in hand, does writing
         // back become safe.
         layoutReadCompleted = true
+        // While driving with an empty grid — a host whose `layout` row is
+        // empty, a first connection to it or one with nothing saved — the
+        // bootstrap pane must not carry this Mac's own home directory
+        // (Task 28 fix round 2, item 1): `bootstrapPane`'s own doc.
         let plan = panes.isEmpty && workspace.allPaneIDs.isEmpty
-            ? [WorkspaceRestoration.bootstrapPane()]
+            ? [WorkspaceRestoration.bootstrapPane(isDrivingRemote: isDrivingRemote)]
             : panes
         for pane in plan where workspace.descriptor(for: pane.sessionID) == nil {
             addPane(pane, startSession: false)
@@ -3402,6 +4056,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // The first launch over pre-account data: only now, with the panes
         // back, can the sessions the switch would end be counted.
         adoptLegacyAccountIfNeeded()
+        // Half of step 4 → done of the connect ceremony (spec §6): the saved
+        // `layout` row has actually come back and been turned into panes —
+        // set only while `installConnectionHandlers`'s `.connected` case is
+        // driving a live takeover, `nil` on every ordinary local restore.
+        // Consumed and cleared here rather than left standing, so a *later*
+        // `applyRestoredPanes` call (a reconnect's `layoutReadDispatched`
+        // guard skipping straight to `ensureSession`, say) cannot fire it a
+        // second time. The ceremony itself only advances once the *other*
+        // half — the first `HostState` — has also landed
+        // (`connectCeremonyReadiness`, Task 26's carried item).
+        let ceremonyLoaded = connectCeremonyLoadedHandler
+        connectCeremonyLoadedHandler = nil
+        ceremonyLoaded?()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -3500,33 +4167,48 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 signedIn: settingsView.accountSignedIn,
                 githubConnected: settingsView.accountGitHubConnected,
                 remoteMachines: paletteRemoteMachines(),
-                // Zoom is what a remote pane has instead of a resize; on a
-                // local pane there is nothing to scale, so the rows stay
-                // away rather than appearing and doing nothing.
-                remotePaneFocused: focusedRemoteTerminal() != nil,
-                // And who is watching this Mac right now — the popover the
-                // sidebar's count opens, by name (phase 2 §5).
-                watchedWorkspaces: watchedPaletteWorkspaces(),
                 // Which of the three update rows can be taken right now.
-                updateState: updateController.state
+                updateState: updateController.state,
+                // The sharing switch is only offered where it can be taken.
+                canShareEnvironment: canShareEnvironment,
+                // Terminate/Block exist for exactly as long as the panel
+                // does — read off the panel itself, not off the roster, so a
+                // row can never be offered for a verb that has nothing to
+                // act on.
+                liveRemoteMachine: takeoverPanel?.info.machineName,
+                blockedMachineCount: remoteSharing.blockedViewerIDs.count,
+                // The machine *this* Mac is driving, if any — disables every
+                // Connect row and adds End remote session (spec §3/§10).
+                activeRemoteSession: remoteSharing.activeRemoteSession
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
             initialQuery: initialQuery,
-            over: window
+            // Above the takeover panel while it is up — the rows it offers
+            // there (Terminate, Block) are unreachable otherwise.
+            over: paletteParentWindow
         )
     }
 
-    /// "Resume remote session…" — the list of what the other Macs are
-    /// sharing (the phase 2 spec's §4 "The + menu picker"). Phase 1 shipped
-    /// this menu item as "the spotlight, pre-filtered to `remote`", which
-    /// answers "I know its name" and not "show me what is out there"; the
-    /// spotlight rows are untouched, and remain the fast path.
+    /// "Resume remote session…" — the list of the other Macs on this account
+    /// (the phase 2 spec's §4 "The + menu picker", collapsed to a machine
+    /// list by Task 29 §1). Phase 1 shipped this menu item as "the spotlight,
+    /// pre-filtered to `remote`", which answers "I know its name" and not
+    /// "show me what is out there"; the spotlight rows are untouched, and
+    /// remain the fast path.
     ///
     /// The rows are built from the same `remoteMachines.machines` the
-    /// sidebar's remote sections and the spotlight's remote rows are built
-    /// from, so all three agree about what is on the other Mac.
+    /// spotlight's **Connect to ‹machine›** rows are built from, so the two
+    /// agree about what is on the other Mac.
     func presentRemoteSessionPicker() {
+        // Belt-and-braces (spec §3, Task 25): the item that opens this is
+        // already disabled while a session is live
+        // (`NavigationSidebarView.canResumeRemoteSession`), but this Mac's
+        // own local connection is gone for the whole of a takeover, so a
+        // picker that somehow still opened would have nothing to read
+        // anyway. `RemoteSessionPicker.canConnect`'s doc comment explains
+        // why this is not the guarantee itself.
+        guard RemoteSessionPicker.canConnect(model: remoteSharing) else { return }
         // The hover card is a floating window over the workspace; it would
         // otherwise sit above the sheet's glass. `presentCommandPalette`'s
         // reasoning exactly.
@@ -3535,15 +4217,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             over: window,
             rows: RemoteSessionPickerModel.rows(
                 machines: remoteMachines.machines,
+                offlineMachineNames: remoteMachines.offlineMachineNames,
                 // The page's own reading of the account rows, as the
                 // spotlight uses: signed out is "Signing in…", not "nothing
                 // is shared".
                 signedIn: settingsView.accountSignedIn
             )
-        ) { [weak self] deviceID, paneID, title in
-            // A *pane* id: the only thing a viewer may attach to, and what
-            // `openRemoteSession` looks up inside its session.
-            self?.openRemoteSession(deviceID: deviceID, sessionID: paneID, title: title)
+        ) { [weak self] deviceID in
+            guard let self, let machine = remoteMachines.machine(for: deviceID) else { return }
+            beginConnecting(to: machine)
         }
     }
 
@@ -3580,6 +4262,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             disconnectGitHub()
         case .deleteAccount:
             deleteAccount()
+        case .toggleRemoteSharing:
+            toggleRemoteSharing()
+        case .showBlockedMachines:
+            showSettings(section: .remote)
+        case .showRemoteActivity:
+            showSettings(section: .remote)
+        case .terminateRemoteConnection:
+            takeoverPanel?.terminate()
+        case .blockRemoteConnection:
+            takeoverPanel?.block()
+        case let .connectRemoteMachine(deviceID):
+            guard let machine = remoteMachines.machine(for: deviceID) else { return }
+            beginConnecting(to: machine)
+        case .endRemoteSession:
+            disconnectRemote()
         case .showNotifications:
             showNotifications(nil)
         case .showAccountMenu:
@@ -3600,8 +4297,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let focused = workspace.focusedPaneID { _ = revealPane(focused) }
         case let .enterSession(group):
             enterDeskSession(group)
-        case let .openRemoteSession(deviceID, sessionID, title):
-            openRemoteSession(deviceID: deviceID, sessionID: sessionID, title: title)
         case let .searchBrain(query):
             connection.search(query: query, scope: nil) { [weak self] result in
                 guard let self else { return }
@@ -3611,7 +4306,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 case .failure:
                     palette.present(
                         commands: [PaletteCommand(id: "search-error", title: "Brain search failed.", detail: nil, action: .noop, section: .brain)],
-                        over: window
+                        over: paletteParentWindow
                     )
                 }
             }
@@ -3621,32 +4316,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let url = doc.url { NSWorkspace.shared.open(url) }
         case let .revealProjectContext(project):
             showInspector(for: project)
-        case let .zoomRemotePane(zoom):
-            // The View menu's three items by another route — the same `@objc`
-            // actions, sent straight to the focused pane's surface rather
-            // than down the responder chain: the panel has only just
-            // dismissed, and what holds focus at this instant is not
-            // something a spotlight row should have to bet on.
-            guard let surface = focusedRemoteTerminal() else { return }
-            switch zoom {
-            case .magnify: surface.zoomInRemoteTerminal(nil)
-            case .shrink: surface.zoomOutRemoteTerminal(nil)
-            case .fit: surface.resetRemoteTerminalZoom(nil)
-            }
-        case let .showRemoteViewers(workspaceID):
-            showRemoteViewers(forWorkspace: workspaceID)
         case .noop:
             break
         }
-    }
-
-    /// The focused pane when it is another Mac's terminal — what the View
-    /// menu's zoom items act on, and the gate on their spotlight rows.
-    private func focusedRemoteTerminal() -> TerminalSurfaceView? {
-        guard let id = workspace.focusedPaneID,
-              workspace.descriptor(for: id)?.isRemote == true
-        else { return nil }
-        return workspace.terminalSurface(for: id)
     }
 
     // MARK: - Desk canvas commands
@@ -3804,7 +4476,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 )
             }
         }
-        palette.present(commands: rows, over: window)
+        palette.present(commands: rows, over: paletteParentWindow)
     }
 
     /// Named away from AppKit's `toggleSidebar:` on purpose. Toolbar items and
@@ -3825,9 +4497,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// hands over the whole picture: the brain's project list and every live
     /// pane.
     private func reloadOutline() {
-        // This Mac's panes only: a remote pane is reached from its machine's
-        // own section (it re-focuses through `openRemoteSession`), not from
-        // a workspace row named after a device id.
         let all = localPaneDescriptors()
         shellSidebar.reloadWorkspaces(
             workspaces: Self.openWorkspaces(workspaces, closed: closedWorkspaceIDs),
@@ -3843,14 +4512,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             projectLabels: projectLabels,
             eventTimes: lastStatusEventAt,
             customizations: sidebarCustomizations(),
-            sessionMeta: sessionMeta,
-            remoteControlWorkspaceIDs: remoteControlWorkspaceIDs,
-            // The other Macs' sections, after the local tree — built from
-            // the relay's live device list (`RemoteMachinesModel`).
-            remoteMachines: remoteTreeEntries(),
-            // The other direction: who is watching *this* Mac's workspaces
-            // (phase 2 §5).
-            remoteViewerNames: workspaceViewerNames()
+            sessionMeta: sessionMeta
         )
     }
 
@@ -3911,8 +4573,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// (outline/palette/inspector) shares — refreshed on every connect
     /// (cheap, read-only, unlike the `layout` row there is no destructive
     /// write this could clobber, so no "read once" guard is needed).
+    /// `listProjects`, behind the house seam (`viewerLister`'s shape), so a
+    /// test can give this window a workspace list without a socket — which is
+    /// what makes the connection swap's "the environment on screen changed,
+    /// and came back" assertion possible at all.
+    var projectLister: ((@escaping (Result<[BrainProjectSummary], Error>) -> Void) -> Void)?
+
     func refreshProjectLabels() {
-        connection.listProjects { [weak self] result in
+        let apply: (Result<[BrainProjectSummary], Error>) -> Void = { [weak self] result in
             guard let self, case let .success(projects) = result else { return }
             projectLabels = Dictionary(projects.map { ($0.id, $0.label) }, uniquingKeysWith: { _, newest in newest })
             workspaces = projects
@@ -3922,6 +4590,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let selectedProjectID { selectWorkspace(id: selectedProjectID, animated: false) }
             selectInitialWorkspaceIfNeeded(animated: false)
             reloadOutline()
+        }
+        if let projectLister {
+            projectLister(apply)
+        } else {
+            // Through `daemonClient`, which resolves the connection live: the
+            // sidebar must list the workspaces of whichever daemon this window
+            // is driving.
+            daemonClient.listProjects(completion: apply)
         }
     }
 
@@ -3963,8 +4639,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             },
             openOnGitHub: { [weak self] url in self?.openExternally(url) },
             customize: { [weak self] in self?.presentCustomizeWorkspace(id) },
-            remoteControlEnabled: remoteControlWorkspaceIDs.contains(id),
-            toggleRemoteControl: { [weak self] in self?.toggleRemoteControl(workspaceID: id) },
             remove: { [weak self] in self?.removeWorkspace(id) }
         )
     }
@@ -4203,81 +4877,78 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     // MARK: - Remote Control (2026-08-30 remote-session-control spec §2)
 
-    /// Reads the two rows the host side owns: which workspaces are enabled,
-    /// and whether this Mac is already registered with the relay. Both are
-    /// read together because the toggle needs both answers before it can
-    /// decide whether the first enable has to register — the same
-    /// read-once/re-arm-on-failure shape as the rows above.
+    /// Reads whether this Mac is already registered with the relay
+    /// (`relay_device_token`) — the read-once/re-arm-on-failure shape as the
+    /// rows above.
+    ///
+    /// Used to read `remote_control_workspaces` first and apply it before
+    /// this read, because the workspace toggle needed both answers before
+    /// deciding whether the first enable had to register. That row and the
+    /// toggle are gone (2026-09-01 remote environment sharing spec §1); only
+    /// the token read remains.
     private func restoreRemoteControlIfNeeded() {
+        // This Mac's relay identity, read off the local socket — which is
+        // down for the whole of a takeover. Asking a dead socket would only
+        // fail and re-arm; the swap back re-runs it on the local `.connected`.
+        guard !isDrivingRemote else { return }
         guard !remoteControlReadDispatched else { return }
         remoteControlReadDispatched = true
-        connection.getSetting(key: SettingsKey.remoteControlWorkspaces) { [weak self] result in
+        // `localConnection`: `relay_device_token` is this Mac's own relay
+        // identity, in the daemon's protected set (spec §3) and refused to a
+        // remote client on both get and set.
+        localConnection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] result in
             guard let self else { return }
             switch result {
             case let .success(raw):
-                applyRestoredRemoteControlWorkspaces(raw)
-                connection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] tokenResult in
-                    guard let self else { return }
-                    switch tokenResult {
-                    case let .success(raw):
-                        applyRestoredRelayDeviceToken(raw)
-                    case .failure:
-                        // A row that could not be read is not an absent one,
-                        // and `unknown` is exactly that distinction: the
-                        // toggle will re-read rather than register blind.
-                        // Re-arm the pair for the next connect.
-                        remoteControlReadDispatched = false
-                    }
-                }
+                applyRestoredRelayDeviceToken(raw)
             case .failure:
+                // A row that could not be read is not an absent one, and
+                // `unknown` is exactly that distinction. Re-arm for the next
+                // connect rather than guessing.
                 remoteControlReadDispatched = false
             }
         }
     }
 
-    /// Applies the `remote_control_workspaces` row — split out of the read so
-    /// a test can restore without a socket, `applyRestoredWorkspaceCustomizations`'s
-    /// pattern.
-    func applyRestoredRemoteControlWorkspaces(_ raw: String?) {
-        remoteControlWorkspaceIDs = RemoteControlProjection.decodeEnabled(raw)
-        // A row with ids in it is proof this Mac has shared before, whatever
-        // this window has written so far — which is what lets a disable
-        // rewrite the projection on a launch that has written nothing.
-        remoteControlEverEnabled = remoteControlEverEnabled || !remoteControlWorkspaceIDs.isEmpty
-        reloadOutline()
-        // The row may land after the layout did, in which case nothing else
-        // would rewrite the projection until the next pane mutation.
-        persistRemoteControlProjection()
-    }
-
-    // MARK: - Viewer presence (phase 2 §5)
+    // MARK: - Viewer presence
 
     /// The machines watching a session on this daemon right now, in the order
     /// the daemon reports them. Pushed whenever the daemon's registry changes
     /// (`RemoteViewers`) and read once per connect (`listViewers`), because a
     /// freshly opened app gets no push while the roster is empty — and empty
-    /// is an answer, not silence.
+    /// is an answer, not silence. `RemoteTakeoverPanel` is the one place this
+    /// roster renders (spec §7); the per-workspace badge/popover and the
+    /// filmstrip's watched-by line were a duplicate reading of the same
+    /// roster and are gone (Task 29 fix wave).
     private(set) var remoteViewers: [RemoteViewer] = []
 
-    /// Test seam, `settingsWriter`'s pattern: `nil` means the real
-    /// `connection.disconnectViewer`. A kick is a write to another Mac's
-    /// connection; no test may send one down a live socket.
-    var viewerDisconnector: ((String, @escaping (Result<Void, Error>) -> Void) -> Void)?
-
-    /// The read half of the same seam, so the resync a failed kick triggers
-    /// is reachable from a test without a socket.
+    /// The read half of the disconnect seam Terminate/Block use
+    /// (`RemoteTakeoverPanel`'s own `RemoteViewerDisconnecting` connection),
+    /// so the resync a failed kick triggers is reachable from a test without
+    /// a socket.
     var viewerLister: ((@escaping (Result<[RemoteViewer], Error>) -> Void) -> Void)?
 
-    /// The daemon's roster, applied everywhere it shows: the count beside a
-    /// workspace's globe, the machine name under a watched pane's card, and
-    /// an open popover, which has to follow the roster rather than hold the
-    /// list it opened with.
+    /// The daemon's roster, applied everywhere it shows: the takeover panel
+    /// and the menu bar icon.
     func applyRemoteViewers(_ viewers: [RemoteViewer]) {
+        // `RemoteViewers` is a HOST-side push (spec §12.3, local-only), but
+        // `connection.onRemoteViewers` is installed on whichever connection
+        // is active — the machine being driven, for the whole span of a
+        // takeover. Only the daemon's own local-only rule stands between a
+        // remote daemon sending one of these and it landing here as if it
+        // were this Mac's own roster, and this codebase's standing
+        // principle is that a guarantee should not rest on the far end
+        // saying no alone — so it is refused here too, defensively, rather
+        // than trusted to a rule this window has no way to verify held.
+        guard !isDrivingRemote else { return }
+        // The takeover panel and the menu bar icon read the roster through
+        // the sharing model, which is where "somebody is driving this Mac"
+        // is decided — told first, and unconditionally, so a roster that
+        // repeats itself in this window's own terms (same panes) still
+        // corrects an identity the relay filled in a moment later.
+        remoteSharing.applyRemoteViewers(viewers)
         guard viewers != remoteViewers else { return }
         remoteViewers = viewers
-        workspace.setRemoteViewerNames(paneViewerNames())
-        reloadOutline()
-        refreshViewerPopover()
     }
 
     /// Re-reads the roster from the daemon. Called once per connect; the
@@ -4290,326 +4961,410 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if let viewerLister {
             viewerLister(apply)
         } else {
-            connection.listViewers(completion: apply)
+            // `localConnection`: "who is watching this Mac" is a question only
+            // this Mac's daemon can answer, and `ListViewers` is local-only in
+            // the allowlist (spec §12.3).
+            localConnection.listViewers(completion: apply)
         }
     }
 
-    /// How many machines are watching a pane of this workspace. Machines, not
-    /// attachments: two Macs on the same pane are two, and one Mac on three
-    /// panes is one.
-    func remoteViewerCount(forWorkspace id: String) -> Int {
-        remoteViewerNames(forWorkspace: id).count
-    }
-
-    /// The same, named — the row's tooltip and the popover's list.
-    func remoteViewerNames(forWorkspace id: String) -> [String] {
-        // A pane id this window does not own counts for nobody: the roster is
-        // the daemon's and can name panes closed a moment ago.
-        remoteViewers
-            .filter { viewer in
-                viewer.sessions.contains { workspace.descriptor(for: $0)?.project == id }
-            }
-            .map(\.machineName)
-    }
-
-    /// The machines on one pane — the filmstrip card's detail line.
-    func remoteViewerNames(forPane paneID: String) -> [String] {
-        remoteViewers.filter { $0.sessions.contains(paneID) }.map(\.machineName)
-    }
-
-    /// Kicks one machine: the daemon drops its socket and blocks the viewer
-    /// id until Remote Control is switched on again. Dropped from the roster
-    /// here as well as by the daemon's next push — the popover it was
-    /// disconnected from must not keep offering the button.
+    /// Applies the `relay_device_token` row — split out of the read so a
+    /// test can restore without a socket, `applyRestoredWorkspaceCustomizations`'s
+    /// pattern. Only the row's presence is kept — never its value, which
+    /// belongs to the daemon alone.
     ///
-    /// The optimistic removal is a guess, and the daemon's reply is the only
-    /// thing that turns it into a fact. The reply used to be discarded: a
-    /// `DisconnectViewer` the daemon refused — a blocklist write that failed,
-    /// a dropped socket — left nothing blocked and nobody kicked, while the
-    /// host's window had already stopped showing the machine. That is the one
-    /// wrong answer this surface can give, because it is a security surface:
-    /// "you're safe" when the other Mac is still watching. On a failure the
-    /// roster is re-read from the daemon, so the window goes back to showing
-    /// what is actually connected.
-    func disconnectViewer(_ viewerID: String) {
-        let finish: (Result<Void, Error>) -> Void = { [weak self] result in
-            guard case .failure = result else { return }
-            self?.refreshRemoteViewers()
-        }
-        // The guess goes in first, so a reply that arrives synchronously —
-        // an encoding failure, or a test double — corrects it instead of
-        // being overwritten by it.
-        applyRemoteViewers(remoteViewers.filter { $0.viewerID != viewerID })
-        if let viewerDisconnector {
-            viewerDisconnector(viewerID, finish)
-        } else {
-            connection.disconnectViewer(viewerID: viewerID, completion: finish)
-        }
-    }
-
-    /// The popover behind the count: every machine watching this workspace,
-    /// what it is on, how long it has been there, and a Disconnect.
-    func showRemoteViewers(forWorkspace id: String) {
-        let rows = remoteViewers.compactMap { viewer -> RemoteViewersView.Row? in
-            let panes = viewer.sessions.filter { workspace.descriptor(for: $0)?.project == id }
-            guard !panes.isEmpty else { return nil }
-            return RemoteViewersView.Row(
-                viewerID: viewer.viewerID,
-                machineName: viewer.machineName,
-                since: viewer.since,
-                // Pane *titles*: the roster carries ids, and only this window
-                // can say which of them is "migrate".
-                paneTitles: panes.map { workspace.descriptor(for: $0)?.title ?? $0 }
-            )
-        }
-        guard !rows.isEmpty else { return }
-        // The badge itself when the tree is drawing workspace rows; the tree
-        // otherwise (Status and Last-updated mode draw none), and the window
-        // as the floor. `NSPopover` raises rather than shrugs when handed a
-        // view that is off screen or in no window at all, and this can be
-        // reached from the spotlight with the sidebar collapsed.
-        let candidates: [NSView?] = [
-            shellSidebar.workspacesTree.viewerBadge(forWorkspace: id),
-            shellSidebar.workspacesTree,
-            window?.contentView,
-        ]
-        guard let anchor = candidates.compactMap({ $0 }).first(where: {
-            $0.window != nil && !$0.isHiddenOrHasHiddenAncestor
-        }) else { return }
-        viewerPopoverWorkspaceID = id
-        RemoteViewersPopover.show(rows: rows, from: anchor) { [weak self] viewerID in
-            self?.disconnectViewer(viewerID)
-        }
-    }
-
-    /// Which workspace the open popover is listing, so a roster change can
-    /// rebuild it — or close it once the last machine has gone.
-    private var viewerPopoverWorkspaceID: String?
-
-    private func refreshViewerPopover() {
-        guard RemoteViewersPopover.isShown, let id = viewerPopoverWorkspaceID else { return }
-        if remoteViewerCount(forWorkspace: id) == 0 {
-            RemoteViewersPopover.dismiss()
-            viewerPopoverWorkspaceID = nil
-        } else {
-            showRemoteViewers(forWorkspace: id)
-        }
-    }
-
-    /// The roster inverted: pane id -> the machines on it, for the filmstrip.
-    private func paneViewerNames() -> [String: [String]] {
-        var names: [String: [String]] = [:]
-        for viewer in remoteViewers {
-            for pane in viewer.sessions where workspace.descriptor(for: pane) != nil {
-                names[pane, default: []].append(viewer.machineName)
-            }
-        }
-        return names
-    }
-
-    /// The same, as spotlight rows — named and ordered, since a dictionary
-    /// has no order and a palette that reshuffles between opens is one
-    /// nobody's fingers can learn.
-    func watchedPaletteWorkspaces() -> [PaletteWatchedWorkspace] {
-        workspaceViewerNames()
-            .map { id, names in
-                PaletteWatchedWorkspace(
-                    id: id,
-                    label: sidebarDisplayLabel(for: id),
-                    viewerNames: names
-                )
-            }
-            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
-    }
-
-    /// The roster grouped by workspace, for the sidebar's count badges.
-    private func workspaceViewerNames() -> [String: [String]] {
-        var names: [String: [String]] = [:]
-        for viewer in remoteViewers {
-            var seen = Set<String>()
-            for pane in viewer.sessions {
-                guard let project = workspace.descriptor(for: pane)?.project,
-                      seen.insert(project).inserted
-                else { continue }
-                names[project, default: []].append(viewer.machineName)
-            }
-        }
-        return names
-    }
-
-    /// `applyRestoredRemoteControlWorkspaces`'s twin for `relay_device_token`.
-    /// Only the row's presence is kept — never its value, which belongs to
-    /// the daemon alone.
+    /// **Never overwrites `.registering`** (fix round 2, Task 29): this is
+    /// also reached from `restoreRemoteControlIfNeeded`'s ordinary
+    /// reconnect read, which races a registration this window itself
+    /// started. A reconnect's read necessarily predates that registration's
+    /// own conclusion, so applying it mid-flight would reset the state to
+    /// `.absent` and let a second toggle press start a second real
+    /// registration underneath the first — a duplicate `relay_devices` row,
+    /// with whichever lands last winning the token. The in-flight
+    /// registration's own completion is what settles `relayTokenState`
+    /// next; this read simply has nothing to say until then.
     func applyRestoredRelayDeviceToken(_ raw: String?) {
+        guard relayTokenState != .registering else { return }
         relayTokenState = (raw ?? "").isEmpty ? .absent : .present
         // The row also names this Mac's own relay device — the one machine
         // the viewer side must never list or dial.
-        if let deviceID = RemoteMachinesModel.deviceID(inTokenRow: raw) {
+        let deviceID = RemoteMachinesModel.deviceID(inTokenRow: raw)
+        if let deviceID {
             remoteMachines.localDeviceID = deviceID
         }
+        // Settings › Remote's read-only "This machine" identity (Task 3,
+        // §2/§10) — the same row, just the other two fields of it.
+        settingsView.applyThisMachine(name: RemoteMachinesModel.name(inTokenRow: raw), deviceID: deviceID)
     }
 
-    /// The workspace context menu's Enable Remote Control. Flips the id,
-    /// stores the intent, re-derives the projection the daemon authorizes
-    /// against, and — on the first enable this Mac has ever had — registers
-    /// with the relay.
+    /// Whether this Mac currently shares its environment — the menu bar
+    /// icon, its checkmarked item, and the spotlight row all read this
+    /// rather than reaching for `remoteSharing` themselves, `accountDisplayLabel`'s
+    /// reasoning: one seam, so nothing outside this controller has to know
+    /// the model exists.
+    var isSharingEnvironment: Bool { remoteSharing.isSharing }
+
+    /// Flips the switch — Settings › Remote's toggle, the menu bar's
+    /// checkmarked item, and the spotlight row (§10) all call this rather
+    /// than `remoteSharing.setSharing` directly, so there is exactly one
+    /// place that decides what "toggle" means.
     ///
-    /// Order matters: the projection is written before registration is even
-    /// attempted, because the daemon opens its control channel only when
-    /// *both* rows are present. Writing the projection first means the
-    /// token's arrival is the single event that starts the tunnel, whichever
-    /// way round the two writes land.
-    func toggleRemoteControl(workspaceID: String) {
-        let enabling = !remoteControlWorkspaceIDs.contains(workspaceID)
-        if remoteControlWorkspaceIDs.contains(workspaceID) {
-            remoteControlWorkspaceIDs.remove(workspaceID)
-        } else {
-            remoteControlWorkspaceIDs.insert(workspaceID)
-        }
-        remoteControlEverEnabled = true
-        // Turning sharing on is what forgives every machine the user has
-        // disconnected (phase 2 §5). The daemon only ever *adds* to
-        // `remote_control_blocked` — it is the enforcer and has to hold with
-        // the app closed — so if the app never cleared it a kick would be
-        // permanent. Deliberately not on the disable: switching off forgives
-        // nobody, it just stops offering the workspace.
-        if enabling { writeUnsuppressed("[]", to: SettingsKey.remoteControlBlocked) }
-        write(RemoteControlProjection.encodeEnabled(remoteControlWorkspaceIDs), to: SettingsKey.remoteControlWorkspaces)
-        // Unconditional, unlike the layout-derived path: the user just said
-        // what this Mac shares, and a disable that does not reach disk leaves
-        // the daemon authorizing sessions the checkmark says are private.
-        writeRemoteControlProjection()
-        if !remoteControlWorkspaceIDs.isEmpty { ensureRelayRegistration() }
-        reloadOutline()
-    }
-
-    /// Rewrites `remote_control` from the live layout and the enabled ids.
-    /// Called on every toggle *and* from `persistLayout`, so a session added
-    /// to an enabled workspace becomes remotely reachable without anyone
-    /// remembering to refresh — and a session that ends stops being
-    /// attachable in the same instant. `write(_:to:)` swallows the no-change
-    /// case, so the layout path costs one string comparison.
-    func persistRemoteControlProjection() {
-        // A Mac that has never had Remote Control on writes no row at all: an
-        // absent `remote_control` and an empty one say the same thing to the
-        // daemon (nothing is shared), and this runs on every layout persist —
-        // which is often.
-        guard remoteControlEverEnabled else { return }
-        // Derived from the layout, so gated on the layout the same way
-        // `persistLayout` is: a projection built from panes nobody has
-        // restored yet would list every enabled workspace with no sessions in
-        // it, and remote viewers would watch their sessions vanish for the
-        // length of a launch. The toggle path deliberately skips this gate —
-        // there the user's intent, not the layout, is the thing being written.
-        guard layoutReadCompleted else { return }
-        writeRemoteControlProjection()
-    }
-
-    /// The write itself, with no gates: what the toggle calls, because what
-    /// the user just asked for has to reach disk whatever else has or has not
-    /// loaded.
-    private func writeRemoteControlProjection() {
-        // The live pane descriptors, not the persisted tabs: the projection
-        // is the host's *tree*, grouped by the same `SessionOutline.group`
-        // the sidebar renders, and that grouping is a fact about the panes.
-        let payload = RemoteControlProjection.build(
-            panes: localPaneDescriptors(),
-            enabledWorkspaceIDs: remoteControlWorkspaceIDs,
-            workspaceLabels: remoteControlWorkspaceLabels(),
-            tints: remoteControlWorkspaceTints()
-        )
-        write(RemoteControlProjection.encode(payload), to: SettingsKey.remoteControl)
-    }
-
-    /// The names remote viewers see — `sidebarDisplayLabel`'s answer for
-    /// each enabled workspace, so a workspace is called the same thing on
-    /// both machines. Built through that one function rather than reading
-    /// `workspaceCustomizations` directly: customizations are keyed by
-    /// *directory*, not by workspace id (`customizationKey(for:)`), and a
-    /// second mapping here would be the one that drifts.
-    private func remoteControlWorkspaceLabels() -> [String: String] {
-        var labels = projectLabels
-        for id in remoteControlWorkspaceIDs {
-            labels[id] = sidebarDisplayLabel(for: id)
-        }
-        return labels
-    }
-
-    /// And the colours: `sidebarTint`'s answer for each enabled workspace,
-    /// so a workspace is not only called the same thing on both machines but
-    /// wears the same folder colour there as here.
-    private func remoteControlWorkspaceTints() -> [String: NSColor] {
-        var tints: [String: NSColor] = [:]
-        for id in remoteControlWorkspaceIDs {
-            tints[id] = sidebarTint(for: id)
-        }
-        return tints
-    }
-
-    /// Makes sure this Mac has a device token, registering for one only from
-    /// the single state where that is known to be the right thing to do.
-    private func ensureRelayRegistration() {
-        switch relayTokenState {
-        case .present, .registering:
-            // Already registered, or a registration is in flight — a second
-            // enable inside the same round trip must not start another one.
+    /// Turning **on** with a token already present is the synchronous path
+    /// exactly as before — `RelayTokenState.present` is the steady state
+    /// for any Mac that has shared before, and every existing test's
+    /// "toggle it and check" assumption holds. Only a Mac with **no** token
+    /// yet — the fresh-install gap fix round 1 closes — goes through
+    /// `ensureRelayRegistration` first: `remoteSharing.setSharing(true)` is
+    /// never even called unless a token is confirmed present by the time it
+    /// returns, so a failed or still-in-flight registration leaves the
+    /// switch reading `false` — never optimistically on for a Mac the relay
+    /// cannot actually reach. Turning **off** is unconditional,
+    /// `RemoteSharingModel.setSharing`'s own rule: a host with nothing
+    /// registered must still be able to say so.
+    func toggleRemoteSharing() {
+        guard !remoteSharing.isSharing else {
+            remoteSharing.setSharing(false)
             return
+        }
+        guard relayTokenState == .present else {
+            Task { @MainActor [weak self] in
+                guard let self, await ensureRelayRegistration() else { return }
+                remoteSharing.setSharing(true)
+            }
+            return
+        }
+        remoteSharing.setSharing(true)
+    }
+
+    /// `remoteSharing.onChange`'s one handler: pushes the confirmed state to
+    /// `settingsView` (non-optimistic — this only ever runs after a write
+    /// actually landed, or after a restore), puts the takeover panel up or
+    /// takes it down, and tells whoever is watching the menu bar icon.
+    private func applyRemoteSharingChange() {
+        settingsView.applyRemoteSharing(
+            isSharing: remoteSharing.isSharing,
+            canShare: canShareEnvironment,
+            // A registration this window started is still in flight (fix
+            // round 2, Task 29): the switch surface says so — disabled,
+            // different copy — rather than silently eating a second press.
+            isRegistering: relayTokenState == .registering
+        )
+        settingsView.applyBlockedMachines(remoteSharing.blockedViewerIDs)
+        syncTakeoverPanel()
+        applyActiveRemoteSession()
+        onRemoteSharingChanged?()
+    }
+
+    /// The viewer half of `applyRemoteSharingChange` (Task 25): the sidebar's
+    /// live-session widget, and the gate on every "Connect to ‹machine›"
+    /// surface in the window — one place, so the widget and the gate can
+    /// never read `remoteSharing.activeRemoteSession` a beat apart from each
+    /// other.
+    private func applyActiveRemoteSession() {
+        shellSidebar.remoteSessionWidget.apply(remoteSharing.activeRemoteSession)
+        shellSidebar.canResumeRemoteSession = RemoteSessionPicker.canConnect(model: remoteSharing)
+        shellSidebar.remoteSessionDisabledReason = RemoteSessionPicker.disabledReason(model: remoteSharing)
+    }
+
+    /// Whether sharing can be switched on at all: an `auth_account_email`
+    /// row exists.
+    ///
+    /// Read off the page's own account reading (`refreshAccountSection`
+    /// fills it), the same seam the spotlight's account rows use — so the
+    /// row the palette offers and the switch the page shows can never
+    /// disagree. The *structural* refusal is `RemoteSharingModel.setSharing`,
+    /// which re-reads the row before writing; this only decides what to
+    /// offer.
+    var canShareEnvironment: Bool { !settingsView.accountEmail.isEmpty }
+
+    /// The machine driving this Mac right now — the menu bar's blue icon and
+    /// the palette's Terminate/Block rows are this one reading.
+    var liveRemoteConnection: RemoteConnectionInfo? { remoteSharing.liveConnection }
+
+    /// The takeover panel (spec §7) while somebody is connected, `nil`
+    /// otherwise. Not `private`: its presence *is* the assertion a test about
+    /// this behaviour makes.
+    private(set) var takeoverPanel: RemoteTakeoverPanel?
+
+    /// The window the spotlight (and anything else that opens "over" this
+    /// window) must stack against: the takeover panel while it is up, the
+    /// workspace window otherwise.
+    ///
+    /// `CommandPaletteController.present(over:)` stacks by **child window**
+    /// rather than by level — "strict stacking without fighting window
+    /// levels", its own words — and a child is always drawn above its
+    /// parent. Passing the workspace window while the takeover panel is up
+    /// therefore put the spotlight *behind* the panel (`.floating` under
+    /// `.modalPanel`), where it took the keyboard, showed nothing, and
+    /// dismissed itself on the next resign-key. The Terminate/Block rows
+    /// passed their test and could not be reached. Handing the same
+    /// mechanism the right parent fixes it without a level fight.
+    var paletteParentWindow: NSWindow? { takeoverPanel?.window ?? window }
+
+    /// How the panel reaches the screen. `nil` — production, always — is
+    /// `RemoteTakeoverPanel.present(over:)`.
+    ///
+    /// A test seam, `viewerLister`'s pattern, and deliberately *only*
+    /// about presentation: the decision to present is never gated on it. It
+    /// exists because feeding a roster to a controller now presents a real
+    /// borderless screen-covering key window, which eight presence tests
+    /// would otherwise order into the shared test host. A test-only concern
+    /// must never narrow a security-visible guard, so it narrows nothing —
+    /// `takeoverPanel` is still built, still recorded, and still the thing
+    /// `run(.terminateRemoteConnection)` acts on.
+    var takeoverPanelPresenter: ((RemoteTakeoverPanel) -> Void)?
+
+    /// Puts the panel up the moment a remote connection is live and takes it
+    /// down the moment it is not — driven off the daemon's roster rather than
+    /// off the click that ended it, so a Terminate that did not land leaves
+    /// the panel exactly where it was.
+    ///
+    /// **Also the one place `hostStatePublisher` starts and stops** (spec
+    /// §4, Task 22), **and the one place the sidebar's gauges/limits are
+    /// told whether they are driving** (spec §4, Task 26). It shares this
+    /// function rather than getting its own `onChange` hook because none of
+    /// these may ever disagree about whether somebody is here: the panel,
+    /// the publisher and the sidebar are all readings of the same
+    /// `isDrivingRemote`/`liveConnection` transition, taken in the same call.
+    private func syncTakeoverPanel() {
+        // Read here, unconditionally, rather than folded into either branch
+        // below: `isDrivingRemote` can flip on its own swap (no `takeoverPanel`
+        // involved at all — this Mac is not a host while it drives another),
+        // and the cards must catch up on that transition too.
+        shellSidebar.statsRow.isDrivingRemote = isDrivingRemote
+        shellSidebar.claudeLimits.isDrivingRemote = isDrivingRemote
+        // The App view composer's attach button (Task 28 fix round 3): the
+        // workspace's own reading is what `PaneContainerView
+        // .makeAppViewIfNeeded` consults for a pane's App view built while
+        // this is already the answer — no sweep of already-built ones is
+        // needed here, unlike `sharingIsLive` above: every `isDrivingRemote`
+        // transition goes through `swapConnection`, and
+        // `resetForAccountSwitch` closes every pane (`workspace.closePane`)
+        // as part of that same call, before this line ever runs — there is
+        // no `PaneAppView` left standing for a sweep to reach.
+        workspace.isDrivingRemote = isDrivingRemote
+        workspace.drivingHostName = remoteSharing.activeRemoteSession?.machineName
+        // `liveConnection` **alone**, and never `isSharing` with it.
+        //
+        // `isSharing` is this app's cached copy of a row the daemon reads
+        // from disk on its own; a post-connect restore that fails leaves it
+        // `false` until the next `.connected` (which is exactly why
+        // `connectionDidComeUp()` exists). Anding the two would mean a live
+        // viewer's roster push could arrive with `isSharing == false` and
+        // put **no panel** on screen while a stranger drives the Mac — and
+        // the menu bar would go blue at the same moment, since
+        // `MenuBarController.shareState` asks `liveRemoteConnection` first.
+        // Two surfaces disagreeing about whether anyone is here is the one
+        // thing this surface cannot do.
+        //
+        // So it fails **open**: a panel a moment early is harmless, a panel
+        // missing is the whole failure. The daemon is the authority on
+        // whether a remote connection exists, and the roster is what it says.
+        //
+        // The one thing that does gate it is `isDrivingRemote`: a machine
+        // driving another machine is not a host. Its local connection is
+        // gone, so its daemon has already stopped accepting anyone (spec §2
+        // condition 3) and this roster is a frozen copy of the last thing the
+        // local daemon said — which must not raise a panel over an
+        // environment that belongs to another Mac, and must never start
+        // `hostStatePublisher`, whose whole subject is *this* Mac.
+        guard !isDrivingRemote else {
+            takeoverPanel?.dismiss()
+            takeoverPanel = nil
+            hostStatePublisher.stop()
+            return
+        }
+        guard let info = remoteSharing.liveConnection else {
+            // The lease just let go, or there never was one — either way
+            // this Mac's own panes reclaim the grid (spec §5, Task 27): a
+            // resize suppressed for the whole of a takeover may already be
+            // stale by the time sharing actually ends, so each pane is
+            // asked for its *current* geometry rather than trusted to have
+            // queued the right one.
+            let wasLive = takeoverPanel != nil
+            takeoverPanel?.dismiss()
+            takeoverPanel = nil
+            hostStatePublisher.stop()
+            if wasLive {
+                for surface in terminalSurfaces { surface.sharingWentIdle() }
+            }
+            return
+        }
+        if let panel = takeoverPanel {
+            panel.apply(info)
+            return
+        }
+        // Whoever drives owns the grid (spec §5, Task 27): a viewer just
+        // took the lease, so this Mac's own panes stop sending `Resize` for
+        // the duration — `TerminalSurfaceView.flushResize()`'s own gate. A
+        // pane opened *during* an already-live share picks this up at
+        // construction instead (the pane factory, below).
+        for surface in terminalSurfaces { surface.sharingIsLive = true }
+        // `localConnection`: Terminate and Block are `DisconnectViewer` on
+        // *this* Mac's daemon, local-only in the allowlist (spec §12.3).
+        let panel = RemoteTakeoverPanel(info: info, connection: localConnection)
+        // The daemon owns `remote_control_blocked`, so the app's copy is
+        // stale the instant a Block lands.
+        panel.onBlocked = { [weak self] in self?.remoteSharing.refreshBlockedList() }
+        takeoverPanel = panel
+        hostStatePublisher.start()
+        if let takeoverPanelPresenter {
+            takeoverPanelPresenter(panel)
+        } else {
+            panel.present(over: window)
+        }
+    }
+
+    /// `remoteSharing.onWriteFailed`'s one handler — `registerThisMachine`'s
+    /// catch block, the same liquid-glass ask card every failure in this
+    /// window uses, never an `NSAlert`. Fired whether the write was asked
+    /// for from Settings, the menu bar, or the spotlight: wherever it came
+    /// from, the honest answer is the same card.
+    private func applyRemoteSharingWriteFailed(_ error: Error) {
+        presentWindowAsk(
+            title: "Could not update sharing",
+            message: error.localizedDescription,
+            icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
+            severity: .critical,
+            options: [PaneAskOption("OK", isPrimary: true) { _ in }]
+        )
+    }
+
+    /// Makes sure this Mac has a device token before sharing can start, from
+    /// the one state where registering is known to be the right thing to do
+    /// — restored (fix round 1, Task 29) from the per-workspace toggle's own
+    /// `ensureRelayRegistration`, which had exactly this switch. Sharing is
+    /// one machine-wide flag now instead of a set of enabled workspaces, but
+    /// the token question underneath it is unchanged: `relay_config` (the
+    /// daemon's own gate on dialling the relay at all) returns `nil` without
+    /// one, so a Mac that never used the old toggle can turn "Share this
+    /// environment" on and have it mean nothing, silently — no control
+    /// channel, never in `relay_devices`, invisible to every viewer's
+    /// `listDevices()`. `toggleRemoteSharing` is the only caller now.
+    ///
+    /// Returns once whether a token is present is actually known — `true`
+    /// only once `relayTokenState` itself reads `.present`, never
+    /// optimistically.
+    ///
+    /// **Bails if the account changes underneath it** (fix round 2, Task
+    /// 29): `accountAtStart` is captured before the one `await` this
+    /// function itself introduces (the `.unknown` row read) and compared
+    /// after. `registerThisMachine` carries the same guard around its own,
+    /// longer `await` — capture-and-compare rather than cancellation,
+    /// because nothing here cancels the `Task` `toggleRemoteSharing` starts,
+    /// and a check that could be skipped is a check that will be.
+    @MainActor
+    private func ensureRelayRegistration() async -> Bool {
+        let accountAtStart = currentAccountID
+        switch relayTokenState {
+        case .present:
+            return true
+        case .registering:
+            // A registration is already in flight — a second request here
+            // would risk a duplicate `relay_devices` row and a token
+            // overwritten by whichever lands last. Stand down; the caller
+            // that started it will see its own outcome, and this one is
+            // told "not yet" rather than guessing.
+            return false
         case .absent:
-            registerThisMachine()
+            return await registerThisMachine()
         case .unknown:
             // The token row has not been read yet, or its read failed.
             // Registering on a guess costs a duplicate device row, so ask
-            // first and decide on the answer; if that read fails too, nothing
-            // happens here and the next connect re-arms the pair.
-            connection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] result in
-                guard let self, case let .success(raw) = result, relayTokenState == .unknown else { return }
+            // first and decide on the answer.
+            let result: Result<String?, Error> = await withCheckedContinuation { continuation in
+                localConnection.getSetting(key: SettingsKey.relayDeviceToken) { continuation.resume(returning: $0) }
+            }
+            guard currentAccountID == accountAtStart else {
+                // The account changed while this read was in flight — its
+                // answer describes nobody here any more. `resetForAccountSwitch`
+                // has already reset `relayTokenState` to `.unknown` for the
+                // account now signed in; applying a read that predates the
+                // switch would be exactly the foreign-account mistake this
+                // guard exists to stop, one step earlier than the write.
+                return false
+            }
+            if case let .success(raw) = result, relayTokenState == .unknown {
                 applyRestoredRelayDeviceToken(raw)
-                if relayTokenState == .absent, !remoteControlWorkspaceIDs.isEmpty { registerThisMachine() }
+            }
+            switch relayTokenState {
+            case .present: return true
+            case .absent: return await registerThisMachine()
+            case .registering, .unknown: return false
             }
         }
     }
 
-    /// The first Enable Remote Control on a Mac with no device token:
-    /// registers with the relay and hands the token straight to the daemon.
-    /// The app never stores it — the relay keeps only its hash, the daemon
-    /// keeps the only copy, and this window keeps nothing but the fact that
-    /// one exists.
-    private func registerThisMachine() {
+    /// Registers this Mac with the relay and hands the token straight to the
+    /// daemon. The app never stores it — the relay keeps only its hash, the
+    /// daemon keeps the only copy, and this window keeps nothing but the
+    /// fact that one exists.
+    ///
+    /// **Bails if the account changes underneath it** (fix round 2, Task
+    /// 29): `accountAtStart` is captured before `await register(name)`, and
+    /// compared after — an account switch or sign-out mid-registration must
+    /// not write account A's device token into account B's directory
+    /// (`write(_:to:machineLocal:)` always targets *whichever* daemon
+    /// `localConnection` currently points at), nor tell B it is registered
+    /// when what actually landed belongs to A. The daemon's own account
+    /// check (spec §9) would refuse a viewer whose asserted account does
+    /// not match B's directory, so this could not leak a session either
+    /// way — but a device registered under the wrong account is wrong on
+    /// its own terms, not merely unreachable. Neither `relayTokenState`
+    /// (already reset by `resetForAccountSwitch`) nor a failure card is
+    /// touched on the way out: A's attempt has nobody left to report to,
+    /// and B's own state is not this abandoned attempt's to set.
+    ///
+    /// Not `private`: `ensureRelayRegistration` is the one production
+    /// caller, but a test may still want to drive this directly. Callers
+    /// must check `relayTokenState` themselves first (`ensureRelayRegistration`'s
+    /// own switch) — this does not guard against a second call arriving
+    /// while one is already in flight; only `relayTokenState = .registering`
+    /// below, claimed before the `await`, makes that guard possible at all.
+    @MainActor
+    @discardableResult
+    func registerThisMachine() async -> Bool {
         let name = Host.current().localizedName ?? "Mac"
+        let accountAtStart = currentAccountID
         let register = relayDeviceRegistrar ?? { try await RelayClient.shared.registerDevice(name: $0) }
-        // Claimed before the `await`, so a second enable arriving while this
-        // is in flight sees `registering` and stands down.
         relayTokenState = .registering
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let registration = try await register(name)
-                // Through `write(_:to:)` like every other settings row, not
-                // `connection.setSetting` directly: one seam means a test can
-                // watch this land without a socket, and without touching the
-                // developer's real `brain.db`.
-                write(RelayClient.shared.deviceTokenRow(registration, name: name), to: SettingsKey.relayDeviceToken)
-                relayTokenState = .present
-                remoteMachines.localDeviceID = registration.deviceID
-            } catch {
-                // Back to `absent`, not `unknown`: the read succeeded, the
-                // registration is what failed, so the retry the card promises
-                // has to be able to start another one.
-                relayTokenState = .absent
-                presentWindowAsk(
-                    title: "Could not register this Mac",
-                    message: "Remote Control stays on for this workspace, but this Mac is not registered with "
-                        + "the relay yet, so no other computer can reach it. Turn Remote Control off and on "
-                        + "again to retry.\n\n\(error.localizedDescription)",
-                    icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
-                    // The overlay's two severities: `.critical` is the tinted
-                    // card a failure gets (`Could not create branch session`'s
-                    // treatment). Never an `NSAlert` — every modal question in
-                    // this app is liquid glass.
-                    severity: .critical,
-                    options: [PaneAskOption("OK", isPrimary: true) { _ in }]
-                )
-            }
+        applyRemoteSharingChange()
+        do {
+            let registration = try await register(name)
+            guard currentAccountID == accountAtStart else { return false }
+            // Through `write(_:to:)` like every other settings row, not
+            // `connection.setSetting` directly: one seam means a test can
+            // watch this land without a socket, and without touching the
+            // developer's real `brain.db`.
+            write(
+                RelayClient.shared.deviceTokenRow(registration, name: name),
+                to: SettingsKey.relayDeviceToken,
+                machineLocal: true
+            )
+            relayTokenState = .present
+            remoteMachines.localDeviceID = registration.deviceID
+            return true
+        } catch {
+            guard currentAccountID == accountAtStart else { return false }
+            // Back to `absent`, not `unknown`: the read succeeded, the
+            // registration is what failed, so the retry the card promises
+            // has to be able to start another one.
+            relayTokenState = .absent
+            applyRemoteSharingChange()
+            presentWindowAsk(
+                title: "Could not register this Mac",
+                message: "Sharing stays off until this Mac is registered with the relay — no other "
+                    + "computer could reach it otherwise. Turn Share this environment off and on again "
+                    + "to retry.\n\n\(error.localizedDescription)",
+                icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
+                // The overlay's two severities: `.critical` is the tinted
+                // card a failure gets (`Could not create branch session`'s
+                // treatment). Never an `NSAlert` — every modal question in
+                // this app is liquid glass.
+                severity: .critical,
+                options: [PaneAskOption("OK", isPrimary: true) { _ in }]
+            )
+            return false
         }
     }
 
@@ -5623,6 +6378,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 settingsStore.get(SettingsKey.authGithubLogin) { [weak self] githubResult in
                     guard let self, case .success(let githubLogin) = githubResult else { return }
                     settingsView.applyAccount(email: email, signedIn: signedIn, githubLogin: githubLogin)
+                    // The account row is the sharing gate's input, so the
+                    // switch and its copy are re-decided the moment it lands
+                    // — signing in must enable sharing without a relaunch.
+                    applyRemoteSharingChange()
                     settingsStore.get(SettingsKey.authAccountName) { [weak self] nameResult in
                         guard let self, case .success(let name) = nameResult else { return }
                         settingsStore.get(SettingsKey.authAccountPicture) { [weak self] pictureResult in
@@ -6037,6 +6796,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// daemon what roots exist needs the socket. Whichever lands last runs
     /// it. Dispatched once per launch; a reconnect does not re-ask.
     private func presentOnboardingIfNeeded() {
+        // Not while driving another Mac: onboarding is this install asking
+        // its own user for a folder on this disk, and the swap's reset
+        // deliberately re-arms `onboardingDispatched` for the local daemon.
+        guard !isDrivingRemote else { return }
         guard authGateResolved, didConnect, !onboardingDispatched else { return }
         onboardingDispatched = true
         presentFirstRunIfNeeded()
@@ -6252,7 +7015,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             daemonTerminator(completion)
             return
         }
-        daemonPersistence.terminateDaemon(pid: connection.peerProcessID(), completion: completion)
+        // `localConnection`: the pid to signal is the daemon on the other end
+        // of *this* Mac's socket, never anything reached through the relay.
+        daemonPersistence.terminateDaemon(pid: localConnection.peerProcessID(), completion: completion)
     }
 
     /// Forgets the daemon that just went away: every pane, without
@@ -6262,6 +7027,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// whatever the *new* daemon's directory holds. Terminal panes whose
     /// sessions are gone come back through `handleReattachFailure →
     /// ensureSession` as new terminals resuming their conversations.
+    ///
+    /// Two callers now, and they mean the same thing by it: an account switch
+    /// (the daemon restarts onto another directory) and a takeover
+    /// (`swapConnection` points the window at another Mac's daemon, and back).
+    /// The name is the older of the two; the operation is "this window is
+    /// about to be answered by a different daemon".
     func resetForAccountSwitch() {
         // Write gates first, so nothing below persists anything.
         layoutReadDispatched = false
@@ -6283,6 +7054,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         remoteControlReadDispatched = false
         usageReadDispatched = false
         usageReadCompleted = false
+        // The "did this row actually change?" cache is per *database*. Left
+        // standing, it would suppress the first write of a value the outgoing
+        // daemon happened to already hold and the incoming one has never seen.
+        lastPersisted.removeAll()
 
         for id in workspace.allPaneIDs {
             homeLaunches[id]?.cancel()
@@ -6303,7 +7078,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         reviewPanelStates = [:]
         workspaceCustomizations = [:]
         closedWorkspaceIDs = []
-        remoteControlWorkspaceIDs = []
         relayTokenState = .unknown
         projectLabels = [:]
         workspaces = []
@@ -6346,7 +7120,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     private func presentFirstRunIfNeeded() {
-        FirstRunWindowController.needsPresenting(ingestion: connection) { [weak self] needed in
+        // `localConnection`: first run is about this install's own brain, and
+        // the folder it would go on to add is this Mac's.
+        FirstRunWindowController.needsPresenting(ingestion: localConnection) { [weak self] needed in
             guard let self, needed else { return }
             firstRunWindow.present(over: window) { [weak self] project in
                 guard let self else { return }
@@ -6395,10 +7171,27 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// Settings, opened on a particular section.
     func showSettings(section: SettingsSection) {
+        if section == .remote {
+            refreshActivityHistory()
+        }
         settingsView.select(section)
         settingsPanel.clearSearch()
         applyDestination(.settings)
     }
+
+    /// Settings › Remote › Activity (Task 20, spec §8): reads
+    /// `remote-activity.jsonl` back and groups it by connection, fresh every
+    /// time the section is opened — the same "read on view, not on a timer"
+    /// shape `applyThisMachine`'s row already has.
+    private func refreshActivityHistory() {
+        let url = AccountDirectory.dataDir(root: accountRoot)
+            .appendingPathComponent("remote-activity.jsonl")
+        let entries = RemoteActivityLog.history(from: url, limit: Self.activityHistoryLimit)
+        settingsView.applyActivityHistory(RemoteActivityHistoryGroup.grouped(from: entries))
+    }
+
+    /// Task 20, spec §8: "Cap at the most recent 2 000 rows."
+    private static let activityHistoryLimit = 2000
 
     /// Slides the panel to `place`. Docked: 12pt inside the content card's
     /// top-left corner. Hidden: fades where it is, and measures nothing — the
@@ -6507,10 +7300,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             PersistedLayoutCodec.serialize(WorkspaceRestoration.persistedTabs(from: descriptors)),
             to: SettingsKey.layout
         )
-        // The projection is a function of this same layout, so it is
-        // re-derived wherever the layout is — the spec's "rewritten on every
-        // toggle and on every layout persist".
-        persistRemoteControlProjection()
     }
 
     // MARK: - Browser pane persistence (Task 5)
@@ -6699,13 +7488,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// its OSC title on every prompt would otherwise write an identical
     /// `layout` row several times a second, against the database the web app
     /// is also reading.
-    private func write(_ value: String, to key: String) {
+    ///
+    /// `machineLocal` marks a row that describes **this** Mac rather than the
+    /// environment on screen — `relay_device_token`, `engine_search_path`.
+    /// Those go to the local daemon whatever the window is driving, so a takeover
+    /// can never write this Mac's relay identity into the host's database.
+    /// (The daemon refuses them to a remote client too — spec §3's protected
+    /// set — but a call site that says which machine it means is better than
+    /// one that relies on the far end to say no.)
+    private func write(_ value: String, to key: String, machineLocal: Bool = false) {
         guard lastPersisted[key] != value else { return }
         lastPersisted[key] = value
         if let settingsWriter {
             settingsWriter(key, value)
         } else {
-            connection.setSetting(key: key, value: value)
+            (machineLocal ? localConnection : connection).setSetting(key: key, value: value)
         }
     }
 
@@ -7378,7 +8175,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let command = EngineLauncher.command(
                 for: engine,
                 conversationID: resuming ? ClaudeConversation.uuid(forSessionID: sessionID) : claimed,
-                resuming: resuming
+                resuming: resuming,
+                // While driving, this Mac's own resolved path names a file
+                // on the wrong disk (Task 28's carried gap) — the daemon
+                // resolves the bare name against the HOST's own instead.
+                isDrivingRemote: isDrivingRemote
             )
         else {
             let message = "\(engine.rawValue) is not installed — \(EngineLauncher.binaryName(for: engine)) is not on your PATH"
@@ -7397,7 +8198,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Read off the built argv rather than off `engine`, so engines that
         // ignore the conversation id never arm the fallback.
         if command.contains("--resume") { resumeSpawns[sessionID] = Date() }
-        let cwd = startingDirectory(for: descriptor)
+        // `startingDirectory` is `nil` only while driving with nothing the
+        // host has told us about (Task 28 fix round 2) — this Mac's own
+        // home directory would be a guess `portable_pty` accepts silently
+        // whenever a directory of that same name happens to exist on the
+        // host too (the common case for one person's own two Macs), so the
+        // session would start there with nothing anywhere saying so. A
+        // visible refusal, on the exact path an uninstalled engine already
+        // fails through above, is strictly better than that.
+        guard let cwd = startingDirectory(for: descriptor) else {
+            let host = remoteSharing.activeRemoteSession?.machineName ?? "the other Mac"
+            let message = "Couldn't tell which folder to start this session in on \(host)"
+            endEnsure(sessionID)
+            applySessionStatus(message, for: sessionID)
+            reportSessionFailure(message, for: sessionID)
+            return
+        }
         connection.createSession(
             CreateSessionRequest(
                 id: sessionID,
@@ -7441,7 +8257,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         surface.feed(Data(text.utf8), isSnapshot: false)
     }
 
-    /// The directory a pane's process starts in.
+    /// The directory a pane's process starts in, or `nil` when nothing
+    /// honest can be said about one (only reachable while driving — see
+    /// below).
     ///
     /// A terminal belongs to its workspace, so the workspace's folder is the
     /// answer unless the pane already sits *inside* it — a pane that was in
@@ -7449,12 +8267,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// older layout does not. Without that rule a workspace opened today
     /// inherits last week's home directory and every agent starts in the wrong
     /// tree.
-    func startingDirectory(for descriptor: PaneDescriptor?) -> String {
+    ///
+    /// **While driving, with nothing recorded** (Task 28 fix round 2,
+    /// 2026-09-01 remote environment sharing spec §4/§6): the local case's
+    /// last resort, this Mac's own home directory, is answered `nil`
+    /// instead. `portable_pty::CommandBuilder::as_command()` treats a `cwd`
+    /// that does not exist *on the spawning machine* as absent and falls
+    /// back to the daemon's own home — silently, with no error anywhere —
+    /// so on two Macs sharing a username (the common case for one person's
+    /// own machines) this Mac's home directory string is not obviously
+    /// wrong on the host: it exists there too, just as somebody else's real
+    /// folder. A session would start there with nothing anywhere saying so,
+    /// which reads as "the agent is confused about my project" rather than
+    /// a bug with a cause. `createSession` turns `nil` into a visible
+    /// refusal instead.
+    func startingDirectory(for descriptor: PaneDescriptor?) -> String? {
         let carried = descriptor?.cwd ?? ""
         guard let folder = workspaceDirectory(for: descriptor?.project) else {
-            return carried.isEmpty
-                ? FileManager.default.homeDirectoryForCurrentUser.path
-                : carried
+            if !carried.isEmpty { return carried }
+            guard !isDrivingRemote else { return nil }
+            return FileManager.default.homeDirectoryForCurrentUser.path
         }
         return WorkspaceWindowController.isInside(carried, folder) ? carried : folder
     }
@@ -7473,8 +8305,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard let id else { return nil }
         // Home's Chat scratch workspace is not in the brain — it is a fixed
         // folder under Documents, resolved here so anything asking "where
-        // would this run?" gets a real answer for it too.
-        if id == HomeChatWorkspace.id { return HomeChatWorkspace.directory }
+        // would this run?" gets a real answer for it too. Not while driving
+        // (Task 28 fix round 2): that folder is this Mac's own, and the
+        // host has never heard of it — falling through to the ordinary
+        // "nothing recorded" path below lets `startingDirectory` decide
+        // honestly instead of silently rooting a session in a folder that
+        // happens to exist on the host for a completely different reason.
+        if id == HomeChatWorkspace.id, !isDrivingRemote { return HomeChatWorkspace.directory }
         if let path = workspaces.first(where: { $0.id == id })?.path, !path.isEmpty {
             return path
         }
@@ -7599,7 +8436,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// workspace, not a twin; an unknown one takes the id the brain would
     /// mint for it (`roots::project_id_for`: the basename).
     private func pickHomeFolder() {
-        chooseSessionDirectory(startingAt: homeDirectory() ?? workspaceRoot()) { [weak self] chosen in
+        // A browsing seed only, same reasoning as `openWorkspaceFolder`'s
+        // own `?? "/"`: nothing is added or started until the sheet's Add
+        // fires with an explicit choice.
+        chooseSessionDirectory(startingAt: homeDirectory() ?? workspaceRoot() ?? "/") { [weak self] chosen in
             guard let self, let chosen else { return }
             let id = workspaces.first { $0.path == chosen }?.id ?? (chosen as NSString).lastPathComponent
             homePendingFolder = BrainProjectSummary(id: id, label: id, path: chosen)
@@ -7628,7 +8468,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func attach(_ sessionID: String) {
         guard let surface = workspace.terminalSurface(for: sessionID) else { return }
         readySessions.insert(sessionID)
-        connection(forPane: sessionID).attach(sessionID: sessionID, afterSequence: nil)
+        connection.attach(sessionID: sessionID, afterSequence: nil)
         surface.syncSize()
         // Only this session's status clears — another pane's error stays on its
         // own pane.

@@ -395,8 +395,16 @@ final class CommandPaletteController: NSWindowController, NSTableViewDataSource,
 
     /// Runs the highlighted row. Closes first: the action belongs to the
     /// workspace, and it should land with focus already back there.
+    ///
+    /// A disabled row (`PaletteCommand.isEnabled == false` — **Connect to
+    /// ‹machine›** while a session is already live, spec §3) beeps and stays
+    /// up rather than running: the row is findable and explains itself
+    /// through its subtitle, but Return on it is not a way around the
+    /// reason it is disabled.
     func runSelected() {
-        guard let action = model.selected?.action else { return }
+        guard let selected = model.selected else { return }
+        guard selected.isEnabled else { return NSSound.beep() }
+        let action = selected.action
         if case let .showMore(section) = action {
             // The one row that is the panel's own: it opens the category a
             // step further in place and the panel stays up.
@@ -747,6 +755,13 @@ final class PaletteSectionHeaderView: NSTableCellView {
 final class PaletteRowView: NSTableCellView {
     init(command: PaletteCommand) {
         super.init(frame: .zero)
+        // A disabled row (**Connect to ‹machine›** while a session is
+        // already live, spec §3) is dimmed rather than removed — it stays
+        // findable and its subtitle carries the reason — but every label on
+        // it reads at roughly half the strength an ordinary row does, so
+        // "you can see it, you cannot run it" is legible before a word is
+        // read.
+        let strength: CGFloat = command.isEnabled ? 1 : 0.45
         let plate = NSView()
         plate.wantsLayer = true
         plate.layer?.cornerRadius = 8
@@ -758,12 +773,12 @@ final class PaletteRowView: NSTableCellView {
             systemSymbolName: command.icon,
             accessibilityDescription: nil
         )?.withSymbolConfiguration(.init(pointSize: 15, weight: .regular))
-        icon.contentTintColor = NSColor(white: 1, alpha: 0.85)
+        icon.contentTintColor = NSColor(white: 1, alpha: 0.85 * strength)
         plate.addSubview(icon)
 
         let title = NSTextField(labelWithString: command.title)
         title.font = .systemFont(ofSize: 15, weight: .medium)
-        title.textColor = NSColor(white: 1, alpha: 0.97)
+        title.textColor = NSColor(white: 1, alpha: 0.97 * strength)
         title.lineBreakMode = .byTruncatingTail
         addSubview(title)
         textField = title
@@ -782,9 +797,11 @@ final class PaletteRowView: NSTableCellView {
         addSubview(detail)
 
         setAccessibilityElement(true)
-        setAccessibilityLabel([command.title, command.subtitle, command.detail]
-            .compactMap { $0 }
-            .joined(separator: ", "))
+        setAccessibilityLabel(
+            ([command.title, command.subtitle, command.detail].compactMap { $0 }
+                .joined(separator: ", "))
+                + (command.isEnabled ? "" : ", disabled")
+        )
 
         [plate, icon, title, subtitle, detail].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         // One line or two: a row with no location centres its title rather

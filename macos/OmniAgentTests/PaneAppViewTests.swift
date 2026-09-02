@@ -1350,6 +1350,79 @@ final class PaneAppViewTests: XCTestCase {
         XCTAssertEqual(view.composerField.stringValue, "/tmp/a.swift")
     }
 
+    // MARK: - Attach button while driving (Task 28 fix round 3,
+    // 2026-09-01 remote environment sharing spec §4/§6)
+
+    func testAttachButtonStartsEnabledWithThePlainTooltip() {
+        let view = makeView()
+        XCTAssertTrue(view.isAttachButtonEnabledForTesting)
+        XCTAssertEqual(view.attachButtonToolTipForTesting, "Attach a file")
+    }
+
+    /// The composer's text is sent into the *host's* PTY while driving
+    /// (`onSubmit`, wired by `PaneContainerView`) — a path an `NSOpenPanel`
+    /// picked from this Mac's own disk would mean nothing there.
+    func testDrivingDisablesTheAttachButtonAndNamesTheHostInItsTooltip() {
+        let view = makeView()
+        view.drivingHostName = "Bruno's Mac Studio"
+        view.isDrivingRemote = true
+
+        XCTAssertFalse(view.isAttachButtonEnabledForTesting)
+        XCTAssertEqual(
+            view.attachButtonToolTipForTesting,
+            "Attachments aren't available while driving Bruno's Mac Studio"
+        )
+    }
+
+    func testTheTooltipFallsBackToAPlainNameWhenTheHostIsNotYetKnown() {
+        let view = makeView()
+        view.isDrivingRemote = true
+
+        XCTAssertEqual(view.attachButtonToolTipForTesting, "Attachments aren't available while driving another Mac")
+    }
+
+    /// The host name can arrive after driving already started (the connect
+    /// ceremony resolves it asynchronously) — the tooltip must pick it up
+    /// rather than being frozen at whatever `isDrivingRemote`'s own
+    /// `didSet` last saw.
+    func testTheHostNameArrivingAfterDrivingStartedStillUpdatesTheTooltip() {
+        let view = makeView()
+        view.isDrivingRemote = true
+        XCTAssertEqual(view.attachButtonToolTipForTesting, "Attachments aren't available while driving another Mac")
+
+        view.drivingHostName = "Bruno's Mac Studio"
+        XCTAssertEqual(
+            view.attachButtonToolTipForTesting,
+            "Attachments aren't available while driving Bruno's Mac Studio"
+        )
+    }
+
+    /// Ending a takeover re-enables the button and restores the plain
+    /// tooltip — the same round trip `syncTakeoverPanel`'s sweep drives.
+    func testEndingTheTakeoverReEnablesTheAttachButton() {
+        let view = makeView()
+        view.isDrivingRemote = true
+        view.isDrivingRemote = false
+
+        XCTAssertTrue(view.isAttachButtonEnabledForTesting)
+        XCTAssertEqual(view.attachButtonToolTipForTesting, "Attach a file")
+    }
+
+    /// Belt-and-braces: even if something fired the button's action anyway
+    /// (an `NSButton` still calls its action on a stale click while
+    /// disabled), the guard inside `chooseAttachment` itself refuses —
+    /// never reaching `NSOpenPanel`, which would otherwise steal the test
+    /// runner's focus and hang this test.
+    func testChooseAttachmentRefusesWithoutOpeningAPanelWhileDriving() {
+        let view = makeView()
+        view.isDrivingRemote = true
+        view.composerField.stringValue = ""
+
+        view.chooseAttachmentForTesting()
+
+        XCTAssertEqual(view.composerField.stringValue, "", "nothing was inserted — the panel was never reached")
+    }
+
     // MARK: - Pane colour and focus
 
     /// Two Claude panes side by side are told apart by their `/color`, and the

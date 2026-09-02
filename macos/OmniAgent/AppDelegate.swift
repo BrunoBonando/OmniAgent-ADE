@@ -25,7 +25,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // has a head start on the connection's first retry.
         let daemonPersistence = DaemonPersistenceController(paths: paths)
         daemonPersistence.start()
-        let connection = SessionConnection(socketURL: paths.socketURL)
+        // This Mac's own daemon, and the only connection this app builds for
+        // it. The window can be *re-pointed* at another Mac's daemon
+        // (`WorkspaceWindowController.connectRemote`), which swaps this one
+        // out and disconnects it rather than running a second one beside it —
+        // see `localConnection`'s doc comment for why that is a security
+        // property and not a tidiness one.
+        let localConnection = SessionConnection(socketURL: paths.socketURL)
         // The viewer side of remote session control: one connection per
         // online machine on the account, polled while signed in. Constructed
         // idle; the window starts it once the launch gate says signed in.
@@ -36,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // window must not wait on the daemon — a daemon that is slow (or not
         // running) has to produce a visible window saying so, not no window.
         let workspace = WorkspaceWindowController(
-            connection: connection,
+            connection: localConnection,
             panes: [],
             notifier: SessionNotifier(delivery: delivery),
             daemonPersistence: daemonPersistence,
@@ -46,6 +52,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             workspace?.revealPane(sessionID)
         }
         self.workspace = workspace
+        // `RemoteSharingModel.shared` reads and writes through this same
+        // connection — never a second one of its own — so its rows reach
+        // the real daemon. Configured only once `workspace` is actually
+        // connected (`runWhenConnected`), not at launch alongside it: a
+        // daemon slow to spawn used to strand the model at its defaults for
+        // the whole process, because the old call here raced
+        // `workspace.start()`'s `connect()` below with only a bounded
+        // 5×1s retry to cover the gap. `runWhenConnected` is the readiness
+        // signal that race was standing in for. See `RemoteSharingModel
+        // .shared`'s own doc comment.
+        //
+        // Deliberately the **local** connection, captured here, and not
+        // `workspace.connection`, which follows a takeover: `remote_sharing`,
+        // `relay_device_token` and `remote_control_blocked` say whether *this*
+        // Mac is shareable and by whom. Resolving them through the window
+        // would point the sharing switch at the machine being driven — and
+        // they are in the daemon's protected set anyway (spec §3), so a
+        // remote read or write of them is refused.
+        workspace.runWhenConnected {
+            RemoteSharingModel.shared.configure(store: SettingsStore(client: localConnection))
+        }
+        // The menu bar icon's live push (Task 4, §2): `workspace` is the
+        // sole subscriber to `RemoteSharingModel.shared.onChange` and has no
+        // reference to `menuBar` of its own (`menuBar` is this object's,
+        // created and released on sign-in/out), so it calls back here
+        // instead. A weak lookup through `self`, not captured once at
+        // sign-in: `menuBar` is nil while signed out and a fresh object
+        // every sign-in after the first, and this always wants whichever one
+        // currently exists.
+        workspace.onRemoteSharingChanged = { [weak self] in self?.menuBar?.refreshShareIcon() }
         // The menu bar item follows the account: created when the gate
         // resolves signed in, gone on log-out.
         workspace.onSignedInStateChanged = { [weak self, weak workspace] signedIn in
@@ -260,18 +296,6 @@ enum ApplicationMenus {
         view.addItem(
             item("Toggle Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
         )
-        view.addItem(.separator())
-        // A viewer never resizes the host's grid (remote session control
-        // phase 2 §1) — it draws all of it, scaled — so zoom is what a remote
-        // pane has instead of a resize. `TerminalSurfaceView.validateMenuItem`
-        // enables these three for a remote pane and greys them everywhere
-        // else, which is also what settles ⌘0: the Panes menu binds it to
-        // Pane 10, and a disabled item there hands the chord straight on.
-        // Menu items rather than a view-level chord alone so the dispatch
-        // order is not the thing deciding which of the two wins.
-        view.addItem(item("Zoom In", Selector(("zoomInRemoteTerminal:")), "+"))
-        view.addItem(item("Zoom Out", Selector(("zoomOutRemoteTerminal:")), "-"))
-        view.addItem(item("Actual Fit", Selector(("resetRemoteTerminalZoom:")), "0"))
 
         let session = NSMenu(title: "Session")
         main.addItem(withSubmenu: session)

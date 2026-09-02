@@ -1007,16 +1007,55 @@ final class SidebarClaudeLimitsView: NSView {
             return
         }
         ClaudeUsageLimitsPoller.shared.addObserver(self) { [weak self] in
-            self?.apply(ClaudeUsageLimitsPoller.shared.latest)
+            self?.applyLocal(ClaudeUsageLimitsPoller.shared.latest)
         }
         ClaudeUsageLimitsPoller.shared.start()
-        apply(ClaudeUsageLimitsPoller.shared.latest)
+        applyLocal(ClaudeUsageLimitsPoller.shared.latest)
         // A minute, because the readout's finest unit is a minute.
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
-            self?.apply(ClaudeUsageLimitsPoller.shared.latest)
+            self?.applyLocal(ClaudeUsageLimitsPoller.shared.latest)
         }
         RunLoop.main.add(timer, forMode: .common)
         clock = timer
+    }
+
+    /// Whether this window is currently driving another machine (spec §5,
+    /// Task 26) — set by `WorkspaceWindowController` alongside the takeover
+    /// panel. Flipping it re-applies whichever source now applies —
+    /// **instantly**, never animated, the same reasoning
+    /// `SidebarSystemStatsView.isDrivingRemote` documents: the local and
+    /// host readings are two different machines' numbers, not two moments
+    /// of the same one.
+    var isDrivingRemote = false {
+        didSet {
+            guard isDrivingRemote != oldValue else { return }
+            if isDrivingRemote {
+                applyHostState(lastHostState, animated: false)
+            } else {
+                applyLocal(ClaudeUsageLimitsPoller.shared.latest, animated: false)
+            }
+        }
+    }
+
+    private var lastHostState: HostStateModel?
+
+    /// This machine's own poller reading — guarded on `isDrivingRemote` so
+    /// the local 60-second clock and the poller's own push cannot paint over
+    /// the host's numbers for the whole of a takeover.
+    private func applyLocal(_ limits: ClaudeUsageLimits?, animated: Bool = true) {
+        guard !isDrivingRemote else { return }
+        apply(limits, animated: animated)
+    }
+
+    /// The host's own Claude limits, read from `HostStateModel` — called on
+    /// every `HostState` push, which arrives roughly once a second while
+    /// driving (`HostStatePublisher`'s own cadence) and so doubles as this
+    /// card's clock for the duration: no separate timer is needed to keep
+    /// the countdown moving while the local one is suppressed.
+    func applyHostState(_ hostState: HostStateModel?, animated: Bool = true) {
+        lastHostState = hostState
+        guard isDrivingRemote else { return }
+        apply(hostState?.limits, animated: animated)
     }
 
     /// Internal rather than private so the tests can drive it with a fixed

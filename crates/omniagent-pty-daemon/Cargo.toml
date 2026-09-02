@@ -11,6 +11,15 @@ path = "src/lib.rs"
 name = "omniagent-pty-daemon"
 path = "src/main.rs"
 
+[features]
+# Gates `ActivityContext::fixture()` (activity.rs). `#[cfg(test)]` would not
+# work for it: `tests/remote_activity.rs` is a separate crate that links this
+# library built WITHOUT `cfg(test)`, so a genuinely test-only `pub fn` needs a
+# real feature — enabled for every test binary via this crate's own
+# self-referencing `[dev-dependencies]` entry below, never turned on for the
+# real daemon binary.
+test-support = []
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -40,7 +49,21 @@ bytes = "1"
 # Same pin as brain-core's, so this adds a direct edge to a crate the
 # workspace already builds rather than a new dependency.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# activity.rs: `sanitize_display_text`'s Unicode General Category check
+# (`\p{L}\p{M}\p{N}`, fix round 3) — already fully resolved in the workspace
+# lockfile via brain-core's and brain-ingest's own `regex` dependency, so this
+# adds no new download, only a direct edge to a crate the workspace already
+# builds. Its Unicode tables are the correct source of truth for "letter,
+# mark, or number", which the standard library does not expose on its own
+# (`char::is_alphabetic()` alone excludes combining marks).
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
 tokio-tungstenite = "0.26"
+# `remote_chaining.rs` moves the 5 s sharing grace with `tokio::time::pause`/
+# `advance` instead of sleeping through it, which needs tokio's test clock.
+# The grace is read off `tokio::time::Instant` (`connections.rs`) for the same
+# reason.
+tokio = { version = "1", features = ["test-util"] }
+omniagent-pty-daemon = { path = ".", features = ["test-support"] }
