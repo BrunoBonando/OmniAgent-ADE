@@ -8,6 +8,7 @@ use omniagent_pty_daemon::protocol::{
     SessionStatus, SessionStatusPayload, SettingKey, SettingValue, ViewerSummaryPayload,
     MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
+use omniagent_pty_daemon::{ActivityEntry, RemoteActivityPayload};
 
 #[test]
 fn envelope_is_exactly_sixteen_big_endian_bytes() {
@@ -424,6 +425,65 @@ fn phase_2_payload_shapes_match_the_swift_client() {
         (named.viewer_id.as_deref(), named.machine_name.as_deref()),
         (Some("v-air"), Some("Air"))
     );
+}
+
+/// Task 19's `RemoteActivity`, appended after `RemoteViewers` with 0x8e left
+/// as a hole for phase 5's `HostState` push — the same reasoning `ListDirectory`
+/// leaves 0x1c for `PublishHostState`: discriminants are appended and never
+/// renumbered.
+#[test]
+fn remote_activity_is_appended_at_0x8f_leaving_0x8e_for_host_state() {
+    assert_eq!(MessageKind::RemoteActivity as u8, 0x8f);
+    assert_eq!(
+        MessageKind::try_from(0x8f).unwrap(),
+        MessageKind::RemoteActivity
+    );
+    assert!(
+        MessageKind::try_from(0x8e).is_err(),
+        "0x8e is reserved, not yet assigned"
+    );
+}
+
+/// The `RemoteActivity` push payload round-trips. Unlike
+/// `ViewerSummaryPayload`'s optional fields, `ActivityEntry.detail` has no
+/// `skip_serializing_if`: a row with nothing to expand sends an explicit
+/// `"detail": null` rather than omitting the key, matching the interface Task
+/// 19's brief and Task 20's Swift-side reader both spell out literally.
+#[test]
+fn remote_activity_payload_round_trips_with_an_explicit_null_detail() {
+    let ts = "2026-09-01T10:00:00+00:00";
+    let payload = RemoteActivityPayload {
+        entries: vec![
+            ActivityEntry {
+                ts: chrono::DateTime::parse_from_rfc3339(ts)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+                    .into(),
+                kind: "attach".into(),
+                summary: "Opened Terminal 1".into(),
+                detail: None,
+            },
+            ActivityEntry {
+                ts: chrono::DateTime::parse_from_rfc3339(ts)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+                    .into(),
+                kind: "input".into(),
+                summary: "Sent a prompt to Terminal 1".into(),
+                detail: Some("hello".into()),
+            },
+        ],
+    };
+    let value = serde_json::to_value(&payload).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"entries": [
+            {"ts": ts, "kind": "attach", "summary": "Opened Terminal 1", "detail": null},
+            {"ts": ts, "kind": "input", "summary": "Sent a prompt to Terminal 1", "detail": "hello"}
+        ]})
+    );
+    let round_tripped: RemoteActivityPayload = serde_json::from_value(value).unwrap();
+    assert_eq!(round_tripped, payload);
 }
 
 #[test]

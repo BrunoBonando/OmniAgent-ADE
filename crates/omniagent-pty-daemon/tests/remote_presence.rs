@@ -310,8 +310,18 @@ async fn a_viewer_is_never_told_about_other_viewers() {
 
     // The host really is being pushed rosters — without this the assertions
     // below would pass on a daemon that never published anything at all.
+    //
+    // `RemoteActivity` (Task 19, spec §8) is expected here too, and skipped
+    // rather than asserted against: Air's own `Attach` above is exactly the
+    // kind of frame that produces an activity row, and it is pushed to this
+    // same host connection alongside the roster. This test is about the
+    // roster, not the activity log, so it only checks the frames that claim
+    // to be one.
     let mut named_the_viewer = false;
     while let Some(frame) = host.try_read(Duration::from_millis(500)).await {
+        if frame.header.message_kind == MessageKind::RemoteActivity {
+            continue;
+        }
         assert_eq!(frame.header.message_kind, MessageKind::RemoteViewers);
         let roster: RemoteViewersPayload = serde_json::from_slice(&frame.payload).unwrap();
         named_the_viewer |= roster

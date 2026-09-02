@@ -516,6 +516,19 @@ pub enum MessageKind {
     /// only, whenever the set of identified remote viewers or what they are
     /// attached to changes: a viewer never learns about other viewers.
     RemoteViewers = 0x8d,
+    // 0x8e is reserved for phase 5's `HostState` push (spec §4), which lands
+    // with the host-state feed — the same reasoning 0x1c is left as a hole
+    // for `PublishHostState`: discriminants are appended and never
+    // renumbered, and a hole costs nothing next to two Macs disagreeing
+    // about what a byte means.
+    /// One batch of daemon-witnessed activity rows,
+    /// [`crate::activity::RemoteActivityPayload`] (phase 3 spec §8 — Task
+    /// 19). Pushed to **local** connections only, exactly like
+    /// `RemoteViewers`: a remote viewer must never learn what the log says
+    /// about it, so this is deliberately absent from
+    /// `crate::authorize_remote`'s allowlist rather than merely unreachable
+    /// by convention.
+    RemoteActivity = 0x8f,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -564,6 +577,7 @@ impl TryFrom<u8> for MessageKind {
             0x8b => Self::Error,
             0x8c => Self::SessionResized,
             0x8d => Self::RemoteViewers,
+            0x8f => Self::RemoteActivity,
             other => return Err(FrameError::UnknownMessageKind(other)),
         })
     }

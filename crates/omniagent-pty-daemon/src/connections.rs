@@ -35,6 +35,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::activity::{ActivityEntry, RemoteActivityPayload};
 use crate::protocol::{
     write_frame, Frame, MessageKind, RemoteViewersPayload, ViewerSummaryPayload,
 };
@@ -242,6 +243,58 @@ pub struct ConnectionRegistry {
     /// changes may collapse into one frame, which is correct — a roster is a
     /// statement of the present, not an event log.
     roster: Arc<watch::Sender<Arc<RemoteViewersPayload>>>,
+    /// The daemon-lifetime activity history (Task 19, spec §8) — published
+    /// through a `watch` channel exactly like [`Self::roster`] and for the
+    /// same reason: publishing must never be able to block on a slow local
+    /// reader, and giving every local connection its own feed task
+    /// ([`ActivityFeed::spawn`]) is what makes that structural rather than
+    /// merely likely.
+    ///
+    /// **Unlike the roster, this is not "the present," and [`Self::notify_activity`]
+    /// does not simply replace it.** A roster genuinely is the current state,
+    /// so overwriting it on every publish is correct — a `watch` receiver
+    /// that misses an intermediate value has missed nothing, because the
+    /// *latest* roster is the only one that was ever true. An activity row is
+    /// an event, not a state: overwriting the same way would mean two
+    /// publishes landing before an `ActivityFeed` task gets scheduled between
+    /// them silently erases the first one, which is exactly the failure mode
+    /// this file's own doc comment warns a naive copy of `PresenceFeed` would
+    /// have. So `notify_activity` *extends* [`ActivityHistory::entries`]
+    /// instead, and each feed tracks how much of it it has already forwarded
+    /// by a monotonic index rather than a length — see
+    /// [`ActivityFeed::spawn`].
+    activity: Arc<watch::Sender<Arc<ActivityHistory>>>,
+}
+
+/// The cap on [`ActivityHistory::entries`] — bounds this registry's memory
+/// over a long-lived daemon (this channel's lifetime is the whole process,
+/// spanning however many remote connections come and go, not one connection),
+/// generous enough that a real local reader (draining every 30s scheduling
+/// beat while a session is live) never comes close to it. Losing entries to a
+/// trim requires a local reader that has fallen behind by this many rows
+/// without ever draining — the same class of "this reader is broken, not the
+/// stream" accepted for session output's own `CLIENT_QUEUE_CAPACITY` +
+/// `ResyncRequired`. The durable `remote-activity.jsonl` file
+/// ([`crate::append`]) is unaffected either way: it is written before this
+/// channel is ever touched, from every entry `record` produces, independent
+/// of whether any local reader is even attached.
+const ACTIVITY_HISTORY_CAP: usize = 1000;
+
+/// The value inside [`ConnectionRegistry`]'s activity `watch` channel. See
+/// the field's own doc for why this is an ever-growing, capped log rather
+/// than a value [`ConnectionRegistry::notify_activity`] simply replaces.
+/// `pub(crate)` rather than private: `server.rs`'s `serve_client` is the
+/// caller that hands the subscribed receiver to [`ActivityFeed::spawn`], so
+/// the receiver's type has to name this — but it never reaches outside this
+/// crate, since `mod connections;` in `lib.rs` is not `pub`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ActivityHistory {
+    /// How many entries have ever been dropped off the front by the cap —
+    /// what turns "how many entries are in `entries` right now" into a
+    /// *global*, never-reused index ([`ActivityFeed::spawn`]'s `next`), so a
+    /// trim can never make a feed re-send or silently skip something.
+    trimmed: usize,
+    entries: Vec<ActivityEntry>,
 }
 
 impl Default for ConnectionRegistry {
@@ -249,12 +302,14 @@ impl Default for ConnectionRegistry {
         let (roster, _) = watch::channel(Arc::new(RemoteViewersPayload {
             viewers: Vec::new(),
         }));
+        let (activity, _) = watch::channel(Arc::new(ActivityHistory::default()));
         Self {
             entries: Arc::default(),
             next_id: Arc::default(),
             lease: Arc::default(),
             local_gone_since: Arc::default(),
             roster: Arc::new(roster),
+            activity: Arc::new(activity),
         }
     }
 }
@@ -576,6 +631,38 @@ impl ConnectionRegistry {
         trust.is_local().then(|| self.roster.subscribe())
     }
 
+    /// Extends the activity history with everything one frame, or one
+    /// [`crate::ActivityLog::tick`], produced — never replaces it (see the
+    /// field's own doc for why). A no-op for an empty batch: nothing
+    /// happened, so there is nothing to append or announce.
+    pub fn notify_activity(&self, new_entries: Vec<ActivityEntry>) {
+        if new_entries.is_empty() {
+            return;
+        }
+        let mut history = self.activity.borrow().as_ref().clone();
+        history.entries.extend(new_entries);
+        if history.entries.len() > ACTIVITY_HISTORY_CAP {
+            let overflow = history.entries.len() - ACTIVITY_HISTORY_CAP;
+            history.entries.drain(0..overflow);
+            history.trimmed += overflow;
+        }
+        self.activity.send_replace(Arc::new(history));
+    }
+
+    /// The activity feed for one connection, or `None` when it must never
+    /// have one — [`Self::presence_updates`]'s reasoning, applied to spec §8
+    /// rather than §7: `RemoteActivity` reaches local connections only, so a
+    /// remote viewer never learns what the log says about it. This is what
+    /// makes that structural: `crate::authorize_remote`'s allowlist keeps a
+    /// remote client from *asking* for it, and this keeps the daemon from
+    /// ever *offering* it.
+    pub(crate) fn activity_updates(
+        &self,
+        trust: &ClientTrust,
+    ) -> Option<watch::Receiver<Arc<ActivityHistory>>> {
+        trust.is_local().then(|| self.activity.subscribe())
+    }
+
     /// Drops every **remote** connection with this viewer id, returning
     /// whether there was one. The entries go here, not when each
     /// `serve_client` notices its token — so the roster published straight
@@ -675,6 +762,81 @@ async fn write_roster(writer: &SharedWriter, roster: &RemoteViewersPayload) -> s
     // A push, so the header carries a sequence rather than a request id, and
     // there is no request this answers.
     let frame = Frame::new(MessageKind::RemoteViewers, 0, payload);
+    write_frame(&mut *writer.lock().await, &frame).await
+}
+
+/// Writes `RemoteActivity` pushes to one local connection, on its own task
+/// (Task 19, spec §8) — the same structure as [`PresenceFeed`], and the same
+/// reason: a client that stops draining its socket must be able to stall
+/// only itself, never presence or another connection's dispatch.
+///
+/// **Unlike [`PresenceFeed`], nothing is sent at subscribe time.** A roster
+/// is the present, worth replaying to a connection that just opened; an
+/// activity batch is a record of things that already happened, and replaying
+/// whatever was last published to a freshly-attached local connection would
+/// announce old news as if it were new. So the value already in the channel
+/// when this subscribes is marked seen and never written — only what is
+/// published *after* this task starts watching ever reaches this connection.
+///
+/// **Tracks a monotonic global index, not a length.** [`ActivityHistory`] is
+/// capped and trimmed from the front (see its own doc), so "how many entries
+/// are in the vec right now" is not a stable measure of "how much of it has
+/// this feed already sent" across a trim. `trimmed + entries.len()` is: it
+/// only ever grows, so comparing against it — and slicing from `next -
+/// trimmed` — is correct whether or not a trim happened in between.
+pub struct ActivityFeed(JoinHandle<()>);
+
+impl Drop for ActivityFeed {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl ActivityFeed {
+    pub fn spawn(mut updates: watch::Receiver<Arc<ActivityHistory>>, writer: SharedWriter) -> Self {
+        Self(tokio::spawn(async move {
+            let mut next = {
+                let seen = updates.borrow_and_update();
+                seen.trimmed + seen.entries.len()
+            };
+            while updates.changed().await.is_ok() {
+                let history = updates.borrow_and_update().clone();
+                let total = history.trimmed + history.entries.len();
+                if total <= next {
+                    // Coalesced watch notification with nothing new for this
+                    // feed specifically — can happen if this task observes a
+                    // publish that superseded one it never got to see.
+                    continue;
+                }
+                // `next.saturating_sub` rather than a plain subtraction: if
+                // every entry this feed had not yet sent was trimmed out from
+                // under it (an extreme, accepted loss — see
+                // `ACTIVITY_HISTORY_CAP`'s doc), send everything still
+                // retained rather than panicking on the underflow.
+                let start = next
+                    .saturating_sub(history.trimmed)
+                    .min(history.entries.len());
+                let fresh = RemoteActivityPayload {
+                    entries: history.entries[start..].to_vec(),
+                };
+                next = total;
+                if fresh.entries.is_empty() {
+                    continue;
+                }
+                if write_activity(&writer, &fresh).await.is_err() {
+                    return;
+                }
+            }
+        }))
+    }
+}
+
+async fn write_activity(
+    writer: &SharedWriter,
+    payload: &RemoteActivityPayload,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(payload).map_err(std::io::Error::other)?;
+    let frame = Frame::new(MessageKind::RemoteActivity, 0, bytes);
     write_frame(&mut *writer.lock().await, &frame).await
 }
 

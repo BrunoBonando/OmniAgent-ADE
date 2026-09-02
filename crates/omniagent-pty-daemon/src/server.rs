@@ -1,5 +1,6 @@
+use crate::activity::{append, ActivityContext, ActivityEntry, ActivityLog};
 use crate::connections::{
-    AssertedIdentity, ConnectionRegistry, LeaseHolder, PresenceFeed, ViewerIdentity,
+    ActivityFeed, AssertedIdentity, ConnectionRegistry, LeaseHolder, PresenceFeed, ViewerIdentity,
 };
 use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, read_handshake_frame, write_frame,
@@ -23,7 +24,7 @@ use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, Mutex, Notify};
@@ -1073,8 +1074,52 @@ where
     if named_itself {
         connections.notify_presence();
     }
+    // The activity feed (Task 19, spec §8): `RemoteActivity` reaches local
+    // connections only, exactly like the roster above — `activity_updates`
+    // is `None` for a `Remote` connection.
+    let _activity_feed = connections
+        .activity_updates(&trust)
+        .map(|updates| ActivityFeed::spawn(updates, Arc::clone(&writer)));
+
+    // The opening row (carried-over item A). `ActivityLog::record` cannot
+    // build this one itself: `Hello` was already consumed by the handshake
+    // above, so this is built directly from the connection's own
+    // `AssertedIdentity` and the moment it was admitted, exactly where the
+    // module doc says Task 19 should. Remote-only in effect as well as in
+    // intent — a `Local` connection has no `AssertedIdentity` to report, and
+    // the host's own use of its own Mac is not something to log about itself.
+    let connected_at = Instant::now();
+    if let ClientTrust::Remote(asserted) = &trust {
+        flush_activity(
+            vec![ActivityEntry::new(
+                "connected",
+                format!(
+                    "Connected from {machine_name} ({})",
+                    asserted.ip.as_deref().unwrap_or("unknown IP")
+                ),
+                Some(identity_detail(asserted)),
+            )],
+            &connections,
+            &data_dir,
+        );
+    }
 
     let mut attachments = HashMap::<String, Attachment>::new();
+    // Per-connection activity state (Task 19). `activity_ctx` is `None` until
+    // the first frame that needs it — the lazy read carried-over item C asks
+    // for — and is invalidated (never eagerly rebuilt) whenever this loop
+    // sees the `SetSetting("layout")` that would make it stale; see
+    // `record_remote_activity` below.
+    let mut activity_log = ActivityLog::default();
+    let mut activity_ctx: Option<ActivityContext> = None;
+    // Flushes a session's half-typed input, or an unsettled resize, after
+    // `SETTLE_QUIET`'s worth of quiet even when no further frame ever
+    // arrives to trigger it — the tick `ActivityLog::tick` needs and would
+    // otherwise never get. Ticking every connection, not only remote ones,
+    // costs nothing: a local connection's log never has anything recorded
+    // into it in the first place (recording itself is remote-only, below),
+    // so its tick is always a no-op.
+    let mut activity_ticker = tokio::time::interval(Duration::from_secs(1));
     loop {
         let frame = tokio::select! {
             // A kicked connection stops mid-frame. Dropping a partly-read
@@ -1082,6 +1127,10 @@ where
             // not cancel-safe — but here the stream is being torn down, so
             // there is nothing left to desynchronise.
             _ = cancel.cancelled() => break,
+            _ = activity_ticker.tick() => {
+                flush_activity(activity_log.tick(Instant::now()), &connections, &data_dir);
+                continue;
+            }
             frame = read_frame(&mut reader) => match frame {
                 Ok(frame) => frame,
                 Err(_) => break,
@@ -1098,6 +1147,17 @@ where
                 }
                 continue;
             }
+            // An authorized frame is one that happened (Task 19). `record`
+            // never sees a frame the daemon refused, which is exactly the
+            // set spec §8's table describes.
+            record_remote_activity(
+                &frame,
+                &mut activity_log,
+                &mut activity_ctx,
+                &settings,
+                &connections,
+                &data_dir,
+            );
         }
         /// Decodes this frame's JSON payload, or answers with an `Error`
         /// frame and moves on to the next frame.
@@ -1613,6 +1673,20 @@ where
         );
     }
 
+    // The closing row, and carried-over item B: whatever text a viewer typed
+    // but never sent must still land in the log, so `flush_all` runs before
+    // the "disconnected" row rather than being left for a tick that will
+    // never come now that this connection is ending.
+    if trust.is_remote() {
+        let mut trailing = activity_log.flush_all();
+        trailing.push(ActivityEntry::new(
+            "disconnected",
+            format!("Disconnected · {}", format_duration(connected_at.elapsed())),
+            None,
+        ));
+        flush_activity(trailing, &connections, &data_dir);
+    }
+
     if cancel.is_cancelled() {
         // End the socket here rather than whenever the last clone of the
         // shared writer happens to go — the attachments' forwarding tasks
@@ -1621,6 +1695,116 @@ where
         let _ = writer.lock().await.shutdown().await;
     }
     Ok(())
+}
+
+/// Builds an [`ActivityContext`] from the daemon's own `layout` settings row
+/// — the lazy read [`ActivityContext`]'s own doc asks the caller to do
+/// (carried-over item C). An unreadable store or a missing/malformed row all
+/// resolve to an empty context, [`ActivityContext::from_layout`]'s own safe
+/// direction: every lookup then falls back to the raw id it was asked about.
+fn activity_context_from_settings(settings: &Arc<std::sync::Mutex<Store>>) -> ActivityContext {
+    let raw = lock_store(settings)
+        .ok()
+        .and_then(|store| store.get_setting("layout").ok().flatten());
+    ActivityContext::from_layout(raw.as_deref())
+}
+
+/// Whether `frame` is the one write this whole cache cares about by name —
+/// `SetSetting("layout")`, the row [`activity_context_from_settings`] reads.
+/// A malformed payload is not that write, the same fail-safe direction
+/// `authorize_remote`'s own `SetSetting`/`GetSetting` arm takes.
+fn is_set_layout(frame: &Frame) -> bool {
+    frame.header.message_kind == MessageKind::SetSetting
+        && parse_json::<SettingKey>(&frame.payload)
+            .map(|setting| setting.key == "layout")
+            .unwrap_or(false)
+}
+
+/// Task 19's one recording call: resolves (and lazily caches) the
+/// [`ActivityContext`] this connection is using, records `frame` into `log`,
+/// invalidates the cache if `frame` is about to change the row it was built
+/// from, and flushes whatever `record` produced.
+///
+/// **The invalidation happens after the read, never before it.** `frame`
+/// itself has not been dispatched yet at this point — the `SetSetting` that
+/// writes the new `layout` row happens further down this same loop iteration
+/// — so rebuilding the cache *now* would still read the row this frame is
+/// about to replace. Clearing it instead means the next frame that needs a
+/// pane name is the one that rebuilds, once the write below has actually
+/// happened.
+fn record_remote_activity(
+    frame: &Frame,
+    log: &mut ActivityLog,
+    ctx_cache: &mut Option<ActivityContext>,
+    settings: &Arc<std::sync::Mutex<Store>>,
+    connections: &ConnectionRegistry,
+    data_dir: &Path,
+) {
+    let ctx = ctx_cache.get_or_insert_with(|| activity_context_from_settings(settings));
+    let entries = log.record(frame, ctx);
+    if is_set_layout(frame) {
+        *ctx_cache = None;
+    }
+    flush_activity(entries, connections, data_dir);
+}
+
+/// Persists every entry to `remote-activity.jsonl` and pushes the batch to
+/// local connections in one `RemoteActivity` frame — "survives the
+/// connection" (Task 18) and "reaches the host live" (Task 19) are the same
+/// batch, written and pushed together so the two can never disagree about
+/// what happened. A no-op for an empty batch — nothing happened, so there is
+/// nothing to persist or announce. [`append`]'s own failure is already
+/// swallowed (with a `warn`) inside `append` itself; a full disk must never
+/// be the reason a remote session drops.
+fn flush_activity(entries: Vec<ActivityEntry>, connections: &ConnectionRegistry, data_dir: &Path) {
+    if entries.is_empty() {
+        return;
+    }
+    for entry in &entries {
+        let _ = append(entry, data_dir);
+    }
+    connections.notify_activity(entries);
+}
+
+/// "Connected from ‹machine› (‹ip›)"'s expansion (spec §8: "expands to full
+/// identity block") — every fact the relay asserted about this connection,
+/// one per line, omitting whichever ones it did not send rather than
+/// printing a blank for them.
+fn identity_detail(asserted: &AssertedIdentity) -> String {
+    [
+        asserted
+            .account_email
+            .as_deref()
+            .map(|value| format!("account: {value}")),
+        asserted.ip.as_deref().map(|value| format!("ip: {value}")),
+        asserted
+            .country
+            .as_deref()
+            .map(|value| format!("country: {value}")),
+        asserted
+            .client
+            .as_deref()
+            .map(|value| format!("client: {value}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+/// "Disconnected · ‹duration›"'s duration — coarse on purpose (minutes and
+/// seconds, or hours and minutes), since the point is "about how long", not
+/// a stopwatch reading.
+fn format_duration(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    let (hours, minutes, seconds) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 /// Keeps one connection in the registry for as long as it is being served.

@@ -1,11 +1,18 @@
-//! Frames become rows (Task 17), then rows survive the connection (Task 18) —
+//! Frames become rows (Task 17), then rows survive the connection (Task 18),
+//! then reach the host app (Task 19) —
 //! `docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`
 //! §8.
 //!
-//! Pure unit-level tests: no daemon, no socket. `ActivityLog::record` maps a
-//! [`Frame`] straight to zero or more [`ActivityEntry`] values, and
-//! [`append`] is a plain function over a directory — both testable without
-//! `serve_client` at all.
+//! Most of this file is pure unit-level tests: no daemon, no socket.
+//! `ActivityLog::record` maps a [`Frame`] straight to zero or more
+//! [`ActivityEntry`] values, and [`append`] is a plain function over a
+//! directory — both testable without `serve_client` at all. The Task 19
+//! section at the bottom is the one place this file runs a real daemon: it is
+//! the only way to pin *who* gets pushed a `RemoteActivity` frame, since that
+//! is a property of `serve_client`'s dispatch loop, not of `ActivityLog`
+//! itself.
+
+mod support;
 
 use std::time::{Duration, Instant};
 
@@ -734,4 +741,47 @@ fn a_fresh_data_dir_appends_without_error() {
     // it to already exist.
     append(&entry("attach", "Opened Terminal 1"), dir.path()).unwrap();
     assert!(dir.path().join("remote-activity.jsonl").exists());
+}
+
+// ---------------------------------------------------------------------
+// Task 19: `RemoteActivity` reaches the host app, and only the host app
+// ---------------------------------------------------------------------
+
+/// The whole point of Task 19, end to end: an authorized remote frame is
+/// pushed to the local (host) connection as `RemoteActivity`, and the remote
+/// connection that caused it never sees a thing — spec §8/§12 invariant 3,
+/// the same "never told about itself" shape `RemoteViewers` already has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn activity_is_pushed_to_local_clients_and_never_to_the_remote_one() {
+    let mut harness = support::daemon_with_local_client().await;
+    let mut viewer = harness.connect_remote("MacBook Pro");
+    viewer.hello().await;
+
+    // The opening row (carried-over item A): built the moment the connection
+    // is admitted, ahead of anything the viewer sends.
+    harness.local().wait_for_activity("connected").await;
+
+    viewer.attach("pane-1").await;
+    let attach = harness.local().wait_for_activity("attach").await;
+    assert_eq!(attach.summary, "Opened pane-1");
+    assert!(viewer.received_no_activity_push().await);
+}
+
+/// The closing row (carried-over item A) and `flush_all` (item B): text typed
+/// but never sent must still land in the log when the connection ends, and
+/// the "disconnected" row must follow it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disconnecting_flushes_pending_input_then_logs_the_close() {
+    let mut harness = support::daemon_with_local_client().await;
+    let mut viewer = harness.connect_remote("MacBook Pro");
+    viewer.hello().await;
+    harness.local().wait_for_activity("connected").await;
+
+    // No trailing `\r`: this stays buffered rather than flushing on its own.
+    viewer.input("pane-1", b"never sent").await;
+
+    drop(viewer);
+    let flushed = harness.local().wait_for_activity("input").await;
+    assert_eq!(flushed.detail.as_deref(), Some("never sent"));
+    harness.local().wait_for_activity("disconnected").await;
 }

@@ -25,13 +25,13 @@ use std::time::Duration;
 
 use brain_core::Store;
 use omniagent_pty_daemon::protocol::{
-    read_frame, read_handshake_frame, write_frame, ErrorPayload, Frame, HelloAckPayload,
-    MessageKind, RefusalCode,
+    encode_raw_payload, read_frame, read_handshake_frame, write_frame, ErrorPayload, Frame,
+    HelloAckPayload, MessageKind, RefusalCode,
 };
 use omniagent_pty_daemon::{
-    serve_client, sharing_should_be_live, AssertedIdentity, ClientContext, ClientTrust,
-    DaemonServer, AUTH_ACCOUNT_EMAIL_KEY, BLOCKED_VIEWERS_KEY, DEVICE_TOKEN_KEY,
-    LOCAL_ABSENCE_GRACE, REMOTE_SHARING_KEY,
+    serve_client, sharing_should_be_live, ActivityEntry, AssertedIdentity, ClientContext,
+    ClientTrust, DaemonServer, RemoteActivityPayload, AUTH_ACCOUNT_EMAIL_KEY, BLOCKED_VIEWERS_KEY,
+    DEVICE_TOKEN_KEY, LOCAL_ABSENCE_GRACE, REMOTE_SHARING_KEY,
 };
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
@@ -387,6 +387,7 @@ fn connect(ctx: &ClientContext, trust: ClientTrust, machine: &str, version: Opti
         machine: machine.to_owned(),
         claimed: None,
         last_error_code: None,
+        pending_activity: std::collections::VecDeque::new(),
     }
 }
 
@@ -406,6 +407,12 @@ pub struct Client {
     /// existing callers matching on the message are untouched by Task 14 item
     /// 2, and a caller that wants the code reads it from here instead.
     last_error_code: Option<RefusalCode>,
+    /// Entries from a `RemoteActivity` push not yet handed to a caller of
+    /// [`Self::wait_for_activity`] — a push can carry more than one row (rows
+    /// coalesced under the activity `watch` channel land in the same batch),
+    /// and the first caller that looked at a batch must not throw away the
+    /// rows it was not looking for.
+    pending_activity: std::collections::VecDeque<ActivityEntry>,
 }
 
 /// What the daemon answered a `Hello` with. There are only two answers, and
@@ -499,6 +506,104 @@ impl Client {
     pub fn claiming_in_hello(mut self, email: &str) -> Self {
         self.claimed = Some(email.to_owned());
         self
+    }
+
+    /// Sends `Attach` and waits for whatever answers it — `Response`/`Error`
+    /// on success or failure of the attach itself. Used by the Task 19
+    /// activity-push tests, which only care that the frame was *sent and
+    /// admitted*, not whether a session by that id actually exists: an
+    /// authorized frame produces its activity row regardless of what the
+    /// dispatch that follows does with it.
+    pub async fn attach(&mut self, id: &str) {
+        let request = self
+            .send(
+                MessageKind::Attach,
+                serde_json::json!({"id": id, "after_sequence": null}),
+            )
+            .await;
+        self.read_reply(request).await;
+    }
+
+    /// Sends one JSON-payload request frame and does not wait for its reply —
+    /// [`Self::send`], made public for a caller (the Task 19 activity tests)
+    /// that only needs the frame to have been *sent and admitted*, not
+    /// answered. Whatever the daemon replies is left unread on the stream;
+    /// harmless, since [`Self::next_activity`] skips anything that is not a
+    /// `RemoteActivity` push.
+    pub async fn send_and_forget(&mut self, kind: MessageKind, payload: impl serde::Serialize) {
+        self.send(kind, payload).await;
+    }
+
+    /// Writes raw bytes for `session` as one `Input` frame — the wire shape
+    /// `encode_raw_payload` builds, not JSON, so this bypasses [`Self::send`].
+    /// Fire-and-forget: the reply (`Response` on a real session, `Error` on
+    /// one that does not exist, as in the Task 19 activity tests, which never
+    /// create a real session for "pane-1") is left unread on the stream —
+    /// harmless, since [`Self::next_activity`] skips anything that is not a
+    /// `RemoteActivity` push.
+    pub async fn input(&mut self, session: &str, bytes: &[u8]) {
+        self.request += 1;
+        let frame = Frame::new(
+            MessageKind::Input,
+            self.request,
+            encode_raw_payload(session, bytes).unwrap(),
+        );
+        write_frame(&mut self.stream, &frame).await.unwrap();
+    }
+
+    /// Reads frames until a `RemoteActivity` push arrives, and decodes it —
+    /// Task 19's local-only push (spec §8). Skips anything else that
+    /// interleaves (a `RemoteViewers` roster update, say), the same way
+    /// [`Self::read_reply`] skips pushes while waiting for a specific reply.
+    async fn next_activity_push(&mut self) -> RemoteActivityPayload {
+        loop {
+            let frame = tokio::time::timeout(PATIENCE, read_frame(&mut self.stream))
+                .await
+                .expect("no RemoteActivity push arrived")
+                .expect("the daemon closed before pushing activity");
+            if frame.header.message_kind == MessageKind::RemoteActivity {
+                return serde_json::from_slice(&frame.payload).unwrap();
+            }
+        }
+    }
+
+    /// Pops one activity row, reading a new push only once
+    /// [`Self::pending_activity`] is empty — so a push carrying more than one
+    /// row (rows coalesced under the activity `watch` channel land in the
+    /// same batch) is not lost past whichever caller looked at that batch
+    /// first.
+    async fn next_activity_entry(&mut self) -> ActivityEntry {
+        if self.pending_activity.is_empty() {
+            let payload = self.next_activity_push().await;
+            self.pending_activity.extend(payload.entries);
+        }
+        self.pending_activity
+            .pop_front()
+            .expect("a push was just read into the buffer")
+    }
+
+    /// Reads activity rows until one of `kind` appears, and returns it — the
+    /// robust way to wait for one expected row rather than assuming one push
+    /// per event, since two rows produced close enough together can
+    /// legitimately arrive in the same push.
+    pub async fn wait_for_activity(&mut self, kind: &str) -> ActivityEntry {
+        loop {
+            let entry = self.next_activity_entry().await;
+            if entry.kind == kind {
+                return entry;
+            }
+        }
+    }
+
+    /// Whether nothing arrives on this connection within a short, real wait —
+    /// the negative half of Task 19's own guarantee: a remote viewer's
+    /// connection must never receive a `RemoteActivity` push. Real time, not
+    /// the paused clock: there is nothing to advance past when the daemon is
+    /// not going to answer at all, ever.
+    pub async fn received_no_activity_push(&mut self) -> bool {
+        tokio::time::timeout(Duration::from_millis(200), read_frame(&mut self.stream))
+            .await
+            .is_err()
     }
 
     /// Sends `DisconnectViewer` for `machine` — Terminate (`block: false`) or

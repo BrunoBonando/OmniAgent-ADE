@@ -249,6 +249,12 @@ final class SessionConnection {
     /// `RemoteViewers` push (phase 2 §5). Local connections only: the daemon
     /// never tells a viewer about other viewers.
     var onRemoteViewers: (([RemoteViewer]) -> Void)?
+    /// One batch of daemon-witnessed activity rows, from a `RemoteActivity`
+    /// push (Task 19, spec §8). Local connections only, the same reasoning as
+    /// `onRemoteViewers`: a remote viewer must never learn what the log says
+    /// about it. A row this build cannot parse (an unparseable timestamp) is
+    /// dropped rather than crashing the batch it arrived in.
+    var onRemoteActivity: (([RemoteActivityLog.Entry]) -> Void)?
     /// Fires when a **reconnect's automatic reattach** comes back "session
     /// not found" — Task 6c's restart-loss signal. Only the reconnect-time
     /// blind reattach (the `helloAck` handler's loop below) is tracked, not
@@ -1210,6 +1216,11 @@ final class SessionConnection {
         case .remoteViewers:
             if let payload = try? decoder.decode(RemoteViewersPayload.self, from: frame.payload) {
                 callbackQueue.async { self.onRemoteViewers?(payload.viewers) }
+            }
+        case .remoteActivity:
+            if let payload = try? decoder.decode(RemoteActivityPushPayload.self, from: frame.payload) {
+                let entries = payload.entries.compactMap(RemoteActivityLog.Entry.init(wire:))
+                callbackQueue.async { self.onRemoteActivity?(entries) }
             }
         case .attention:
             if let id = try? decoder.decode(SessionIDPayload.self, from: frame.payload).id {

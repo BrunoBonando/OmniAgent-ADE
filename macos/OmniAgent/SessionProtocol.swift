@@ -85,6 +85,14 @@ enum MessageKind: UInt8 {
     /// local connections only — a viewer never learns about other viewers.
     /// Mirrors `RemoteViewers`.
     case remoteViewers = 0x8d
+    // 0x8e is reserved for phase 5's `HostState` push (spec §4) — left as a
+    // hole, never renumbered, the same reasoning `RemoteViewers`/
+    // `RemoteActivity` are appended rather than slotted in.
+    /// One batch of daemon-witnessed activity rows,
+    /// `{"entries":[{"ts","kind","summary","detail"}]}` (phase 3 spec §8 —
+    /// Task 19). Sent to local connections only — a remote viewer must never
+    /// learn what the log says about it. Mirrors `RemoteActivity`.
+    case remoteActivity = 0x8f
 }
 
 enum SessionProtocolError: Error, Equatable {

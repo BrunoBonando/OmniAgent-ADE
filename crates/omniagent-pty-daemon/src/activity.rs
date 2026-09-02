@@ -120,6 +120,17 @@ impl ActivityEntry {
     }
 }
 
+/// The `RemoteActivity` (`0x8f`) push payload (Task 19, spec §8) — one batch
+/// of everything a single frame, or a single quiet-tick flush, produced.
+/// Never persisted as-is: each entry inside it is what actually lands, one
+/// per line, in `remote-activity.jsonl` (see [`append`]); this wrapper exists
+/// only on the wire, exactly as [`crate::protocol::RemoteViewersPayload`]
+/// wraps [`crate::protocol::ViewerSummaryPayload`] for its own push.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteActivityPayload {
+    pub entries: Vec<ActivityEntry>,
+}
+
 /// Resolves protocol ids into the words a person reads — pane titles,
 /// session names, workspace names, engines — by reading the daemon's own
 /// `layout` settings row (`PersistedLayoutCodec`'s JSON shape,

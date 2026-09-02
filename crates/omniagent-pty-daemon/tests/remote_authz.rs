@@ -250,7 +250,13 @@ fn every_message_kind_is_deliberately_classified() {
             | MessageKind::ResyncRequired
             | MessageKind::Error
             | MessageKind::SessionResized
-            | MessageKind::RemoteViewers => false,
+            | MessageKind::RemoteViewers
+            // `RemoteActivity` (Task 19, spec §8/§12 invariant 3): a push to
+            // local connections only. A remote viewer must never learn what
+            // the log says about it, so this is deliberately absent from
+            // `authorize_remote`'s allowlist rather than merely unreachable
+            // by convention — the same treatment `RemoteViewers` gets.
+            | MessageKind::RemoteActivity => false,
         };
         assert_eq!(
             authorize_remote(&frame(kind, b"{}")).is_ok(),
