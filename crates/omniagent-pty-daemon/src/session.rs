@@ -1188,10 +1188,21 @@ fn resolve_engine_binary(name: &str, host_search_path: Option<&str>) -> Option<P
         candidates.push(PathBuf::from(fixed));
     }
 
-    candidates.into_iter().find_map(|dir| {
-        let candidate = dir.join(name);
-        is_executable_file(&candidate).then_some(candidate)
-    })
+    candidates
+        .into_iter()
+        // An empty `PATH` entry (a leading/trailing/doubled `:`) means "the
+        // current directory" — the classic `.`-in-`PATH` pitfall — and
+        // `dir.join(name)` on an empty `PathBuf` would silently produce
+        // that relative path rather than an absolute one, resolving
+        // against whatever the daemon's own working directory happens to
+        // be (Task 28 fix round 2, item 3). Only a local writer can put an
+        // empty entry in `host_search_path` (the row is protected), so
+        // this is not an escalation path, but it is skipped regardless.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| {
+            let candidate = dir.join(name);
+            is_executable_file(&candidate).then_some(candidate)
+        })
 }
 
 fn is_executable_file(path: &std::path::Path) -> bool {
@@ -1199,6 +1210,76 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     std::fs::metadata(path)
         .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+/// A unit test, not an integration one, and deliberately so: an
+/// end-to-end `CreateSession` round trip cannot isolate this fix.
+/// `resolve_engine_binary`'s own (pre-fix) match on an empty `PATH` entry
+/// returns nothing more than the bare name back
+/// (`PathBuf::from("").join(name) == PathBuf::from(name)`), which
+/// `portable_pty::CommandBuilder` then re-resolves *itself* — against its
+/// own, decoupled notion of the child's cwd/PATH — so the overall spawn
+/// fails at that later, unrelated layer regardless of whether this
+/// function's own filter is present. Calling the function directly is what
+/// actually proves it (Task 28 fix round 2, item 3).
+#[cfg(test)]
+mod resolve_engine_binary_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Serializes against the other test in this module — both mutate the
+    /// real process working directory, which every thread in the binary
+    /// shares. Nothing outside this module does; every other test in this
+    /// crate resolves purely absolute paths.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// An empty `PATH` entry (a leading/trailing/doubled `:`) means "the
+    /// current directory" — the classic `.`-in-`PATH` pitfall. Proven by
+    /// placing the fake binary exactly where a naive (un-filtered) empty
+    /// entry would resolve it — the process's own working directory — and
+    /// changing into it: without the filter this resolves for the wrong
+    /// reason; with it, the empty entry is skipped, `/definitely/not/a
+    /// /real/dir` does not exist, and nothing else offers this made-up
+    /// name, so resolution correctly fails.
+    #[test]
+    fn an_empty_path_entry_is_not_treated_as_the_current_directory() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let name = "totally-fake-cwd-only-engine";
+        let path = temp.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+        // A leading empty entry — the classic `:/real/dir` typo.
+        let result = resolve_engine_binary(name, Some(":/definitely/not/a/real/dir"));
+        std::env::set_current_dir(original_cwd).unwrap();
+
+        assert!(
+            result.is_none(),
+            "an empty PATH entry must not resolve relative to the process's own cwd: {result:?}"
+        );
+    }
+
+    /// The filter's own existence is not what stands between a real,
+    /// *non-empty* entry and a match — proven by a leading empty entry
+    /// immediately followed by the directory that actually holds the
+    /// binary.
+    #[test]
+    fn a_real_entry_after_an_empty_one_still_resolves() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let name = "totally-fake-real-entry-engine";
+        let path = temp.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let search_path = format!(":{}", temp.path().display());
+        let result = resolve_engine_binary(name, Some(&search_path));
+
+        assert_eq!(result, Some(path));
+    }
 }
 
 fn spawn_session(

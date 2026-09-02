@@ -363,6 +363,30 @@ final class ConnectionSwapTests: XCTestCase {
         XCTAssertNil(controller.workspaceDirectory(for: HomeChatWorkspace.id))
     }
 
+    /// Task 28 fix round 2, item 1: connecting to a host whose `layout` row
+    /// is empty — the grid is empty too, straight after
+    /// `resetForAccountSwitch` — is exactly a first connection to that
+    /// host, and it must not bootstrap a pane carrying this Mac's own home
+    /// directory. `WorkspaceRestorationTests` proves `bootstrapPane`
+    /// itself; this proves the real path a host's own empty `layout`
+    /// answer actually takes.
+    func testAnEmptyHostLayoutWhileDrivingBootstrapsAPaneWithNoCarriedDirectory() async throws {
+        let (controller, _, remote) = try makeController()
+        defer { controller.close() }
+        controller.remoteConnectionProvider = { _ in remote }
+        try await controller.connectRemote(to: studio)
+
+        controller.applyRestoredPanes([])
+
+        let paneID = try XCTUnwrap(controller.workspaceView.allPaneIDs.first)
+        let descriptor = try XCTUnwrap(controller.workspaceView.descriptor(for: paneID))
+        XCTAssertEqual(descriptor.cwd, "", "no viewer-local directory carried")
+        XCTAssertNil(
+            controller.startingDirectory(for: descriptor),
+            "and startingDirectory refuses to guess one, rather than the carried value short-circuiting that"
+        )
+    }
+
     // MARK: - The App view composer's attach button follows the swap
     // (Task 28 fix round 3)
 

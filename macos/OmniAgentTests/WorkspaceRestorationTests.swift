@@ -220,4 +220,16 @@ final class WorkspaceRestorationTests: XCTestCase {
         XCTAssertEqual(pane.group, WorkspaceRestoration.ungroupedSessionID)
         XCTAssertTrue(pane.project.isEmpty)
     }
+
+    /// Task 28 fix round 2, item 1: this Mac's own home directory baked in
+    /// as a *carried* cwd short-circuits `startingDirectory(for:)`'s
+    /// `isDrivingRemote` guard before it is ever reached — a bootstrap pane
+    /// for a host with nothing saved must not carry it at all.
+    func testTheBootstrapPaneCarriesNoDirectoryWhileDriving() {
+        let pane = WorkspaceRestoration.bootstrapPane(sessionID: "native-terminal", isDrivingRemote: true)
+
+        XCTAssertEqual(pane.cwd, "")
+        XCTAssertEqual(pane.engine, .shell)
+        XCTAssertEqual(pane.group, WorkspaceRestoration.ungroupedSessionID)
+    }
 }

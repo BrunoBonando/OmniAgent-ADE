@@ -512,3 +512,16 @@ fn the_clients_own_env_path_is_still_never_trusted_even_with_a_search_path_prese
         "the client's own env[\"PATH\"] must never be consulted, even alongside a real host_search_path"
     );
 }
+
+// The empty-`PATH`-entry fix (Task 28 fix round 2, item 3) is proven as a
+// unit test inside `session.rs` itself, directly against the private
+// `resolve_engine_binary` — not here. An end-to-end `CreateSession` round
+// trip cannot isolate it: `resolve_engine_binary`'s own (buggy, pre-fix)
+// match on an empty entry returns nothing more than the bare name back
+// (`PathBuf::from("").join(name) == PathBuf::from(name)`), which
+// `portable_pty::CommandBuilder` then re-resolves *itself* — against its
+// own notion of the child's cwd/PATH, decoupled from this crate's fix —
+// so the overall spawn fails at that later, unrelated layer regardless of
+// whether this fix's filter is present. A first draft of this test lived
+// here and passed identically with the filter removed, which is what
+// caught the flaw.

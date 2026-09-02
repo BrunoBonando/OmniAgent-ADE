@@ -1015,14 +1015,29 @@ final class WorkspaceWindowControllerTests: XCTestCase {
     /// same string to resolve a bare engine name a remote viewer sends, or
     /// the two disagree again — an engine reported available, then failing
     /// to launch. Construction publishes it, off the `prewarm()` completion.
+    /// Fix round 2, item 2: publishing is gated on `runWhenConnected` now
+    /// (never lost to a write attempted before the socket is up), so
+    /// nothing is sent until a `.connected` actually fires — simulated
+    /// directly, the same way `testAConnectedEventWhileAwaitingSignInSkips
+    /// TheRestorePass` does, since this harness has no real daemon behind
+    /// the socket to connect to.
     func testConstructionPublishesThisMachinesSearchPathToTheLocalDaemon() throws {
         let controller = makeEmptyController()
         defer { controller.close() }
         var writes: [(String, String)] = []
         controller.settingsWriter = { writes.append(($0, $1)) }
+        XCTAssertTrue(writes.isEmpty, "nothing is sent before the connection is genuinely up")
 
-        // `prewarm()`'s completion is dispatched, not synchronous — pump
-        // until it lands rather than asserting on the very next line.
+        // `onStateChange` is installed by `start()`, not by construction —
+        // firing it before that would silently call nothing at all.
+        controller.start()
+        controller.connection.onStateChange?(.connected)
+
+        // `prewarm()`'s own completion is dispatched, not synchronous — pump
+        // until it lands rather than asserting on the very next line. (It is
+        // itself gated on `runWhenConnected` too, so it is not what actually
+        // delivers this — the `.connected` handler's own direct write,
+        // exercised below, is — but both end up racing for the same row.)
         let deadline = Date().addingTimeInterval(2)
         while !writes.contains(where: { $0.0 == SettingsKey.engineSearchPath }), Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
@@ -1030,6 +1045,52 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         let write = try XCTUnwrap(writes.first { $0.0 == SettingsKey.engineSearchPath })
         XCTAssertEqual(write.1, EngineLauncher.searchPath)
+    }
+
+    /// An ordinary reconnect to the *same* database, nothing about an
+    /// account switch involved, must not resend an unchanged value —
+    /// `write(_:to:machineLocal:)`'s own no-redundant-write rule, still in
+    /// force: this fix adds a second trigger, not a bypass of the first
+    /// one's dedup.
+    func testAnOrdinaryReconnectDoesNotResendAnUnchangedSearchPath() {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+
+        controller.start()
+        controller.connection.onStateChange?(.connected)
+        controller.connection.onStateChange?(.disconnected)
+        controller.connection.onStateChange?(.connected)
+
+        XCTAssertEqual(
+            writes.filter { $0.0 == SettingsKey.engineSearchPath }.count, 1,
+            "the value has not changed and the database has not been swapped"
+        )
+    }
+
+    /// The actual case fix round 2 item 2 exists for: `commitAccountSwitch`
+    /// clears the write cache (`resetForAccountSwitch`, ahead of the daemon
+    /// restart it triggers) before the reconnect that follows it lands on a
+    /// fresh account database with no row at all — the republish must reach
+    /// that reconnect too, not just the first one this window ever made.
+    func testTheSearchPathIsRepublishedAfterAnAccountSwitchClearsTheCache() throws {
+        let controller = makeEmptyController(settingsClient: FakeSettingsClient(), defaults: try throwawayDefaults())
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+
+        controller.start()
+        controller.connection.onStateChange?(.connected)
+        XCTAssertEqual(writes.filter { $0.0 == SettingsKey.engineSearchPath }.count, 1)
+
+        controller.resetForAccountSwitch()
+        controller.connection.onStateChange?(.connected)
+
+        XCTAssertEqual(
+            writes.filter { $0.0 == SettingsKey.engineSearchPath }.count, 2,
+            "the reconnect into the fresh account database republishes — the outgoing account's cache does not suppress it"
+        )
     }
 
     // MARK: - Sessions

@@ -1307,12 +1307,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // (`SettingsKey.engineSearchPath`, Task 28 fix round 1) so a remote
         // viewer's driven session can find an nvm/asdf-installed engine the
         // daemon's own fixed lookup list cannot name —
-        // `resolve_engine_binary` (session.rs) reads this exact row. The
-        // completion fires on a background queue; hop to main before
-        // touching `write(_:to:machineLocal:)`'s per-window cache.
+        // `resolve_engine_binary` (session.rs) reads this exact row.
+        //
+        // **Fix round 2, item 2:** this alone published the row once, with
+        // no retry. A write that lands before the socket is up, or a
+        // reconnect into a fresh account database with no row at all
+        // (`commitAccountSwitch`), silently reverted resolution to the
+        // fixed-list gap fix round 1 exists to close — and the failure was
+        // no longer visible even then, because `write(_:to:machineLocal:)`
+        // caches the value as sent *before* knowing whether the send
+        // actually reached the daemon, which would then suppress a real
+        // resend of the same value later. `runWhenConnected` is the fix: it
+        // holds the write until `localConnection` is genuinely up rather
+        // than attempting it early and losing it. It does not by itself
+        // cover a *later* reconnect once this specific connection is
+        // already up — the `.connected` handler below republishes on every
+        // one of those, catching the account-switch case (the daemon
+        // restarts into the new account's database, and this Mac's own
+        // `localConnection` reconnects into it) along with an ordinary
+        // drop-and-reconnect.
         EngineLauncher.prewarm { [weak self] in
-            DispatchQueue.main.async {
-                self?.write(EngineLauncher.searchPath, to: SettingsKey.engineSearchPath, machineLocal: true)
+            DispatchQueue.main.async { [weak self] in
+                self?.runWhenConnected { [weak self] in
+                    self?.write(EngineLauncher.searchPath, to: SettingsKey.engineSearchPath, machineLocal: true)
+                }
             }
         }
         for pane in panes { addPane(pane, startSession: false) }
@@ -1792,6 +1810,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     // defaults for the life of the process. A no-op once a
                     // restore has actually completed.
                     remoteSharing.connectionDidComeUp()
+                    // The `engine_search_path` row, republished on every
+                    // genuine local connect rather than only once off
+                    // `EngineLauncher.prewarm()`'s own completion (fix
+                    // round 2, item 2 — that doc comment has the full
+                    // reasoning). Covers a cold launch (whatever
+                    // `EngineLauncher.searchPath` currently holds — the
+                    // fallback if `prewarm()` has not resolved yet, updated
+                    // again once it does), an ordinary reconnect, and the
+                    // reconnect after an account switch into a database
+                    // with no row at all.
+                    write(EngineLauncher.searchPath, to: SettingsKey.engineSearchPath, machineLocal: true)
                 }
                 didConnect = true
                 presentOnboardingIfNeeded()
@@ -4101,8 +4130,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Only here, with the row's contents actually in hand, does writing
         // back become safe.
         layoutReadCompleted = true
+        // While driving with an empty grid — a host whose `layout` row is
+        // empty, a first connection to it or one with nothing saved — the
+        // bootstrap pane must not carry this Mac's own home directory
+        // (Task 28 fix round 2, item 1): `bootstrapPane`'s own doc.
         let plan = panes.isEmpty && workspace.allPaneIDs.isEmpty
-            ? [WorkspaceRestoration.bootstrapPane()]
+            ? [WorkspaceRestoration.bootstrapPane(isDrivingRemote: isDrivingRemote)]
             : panes
         for pane in plan where workspace.descriptor(for: pane.sessionID) == nil {
             addPane(pane, startSession: false)
