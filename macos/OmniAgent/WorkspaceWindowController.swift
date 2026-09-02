@@ -653,6 +653,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// with no viewer never starts it.
     private let hostStatePublisher: HostStatePublisher
 
+    /// The **viewer** half of spec §4 (Task 26): this window's read of
+    /// whichever machine it is driving, fed by `connection.onHostState` and
+    /// read by the sidebar's gauges/limits and every engine picker while
+    /// `isDrivingRemote`. Reset on every `swapConnection` so a fresh takeover
+    /// of a *different* machine never shows the previous host's readings.
+    let hostStateModel = HostStateModel()
+
+    /// `connection.onHostState`'s handler: merges the push into
+    /// `hostStateModel` and tells everything that reads it to catch up, then
+    /// counts toward the ceremony's "Loading environment…" step (Task 26's
+    /// carried item, spec §6) — see `connectCeremonyReadiness`.
+    private func applyHostState(_ payload: Data) {
+        hostStateModel.apply(payload)
+        shellSidebar.statsRow.applyHostState(hostStateModel)
+        shellSidebar.claudeLimits.applyHostState(hostStateModel)
+        markConnectCeremonyHostStateLoaded()
+    }
+
     /// `panes` may be empty: the app delegate opens the window before the
     /// socket is up, and `start()` fills it from the `layout` row once the
     /// connection lands. A non-empty seed is for callers that already know
@@ -743,6 +761,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // round trip; on the local socket it would draw glyphs the
                 // daemon confirms a millisecond later.
                 surface.predictiveEchoEnabled = target.isRemote
+                // Whoever drives owns the grid (spec §5, Task 27): a pane
+                // built *while* a viewer is already driving this Mac must
+                // start suppressed — `syncTakeoverPanel` only sets this on
+                // the panes that exist at the moment sharing goes live, and
+                // a pane opened mid-share is not one of them.
+                surface.sharingIsLive = remoteSharing.liveConnection != nil
                 return surface
             case .browser:
                 return BrowserPaneView(initialURL: descriptor.browserURL)
@@ -1054,6 +1078,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         remoteSharing.onChange = { [weak self] in self?.applyRemoteSharingChange() }
         remoteSharing.onWriteFailed = { [weak self] error in self?.applyRemoteSharingWriteFailed(error) }
         applyRemoteSharingChange()
+        // Home's own engine picker (spec §4, Task 26): read live rather than
+        // captured once, so a takeover beginning or ending mid-session
+        // changes what the very next menu press shows.
+        homeView.enginePicker = { [weak self] in
+            guard let self else { return EnginePickerModel(hostState: nil, isDrivingRemote: false) }
+            return EnginePickerModel(hostState: hostStateModel, isDrivingRemote: isDrivingRemote)
+        }
         // Home's pill and the Settings page's button reach the same three
         // actions the widget does.
         homeView.onUpdatePillPressed = { [weak self] in
@@ -1708,12 +1739,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // `restoreAccountStateIfNeeded()` below, so it is in place
                 // before the `getSetting(layout)` round trip it is waiting
                 // on can possibly complete.
-                if let ceremony = connectCeremony, isDrivingRemote {
-                    ceremony.helloAcknowledged()
-                    connectCeremonyLoadedHandler = { [weak self, weak ceremony] in
-                        guard let self, let ceremony, self.connectCeremony === ceremony else { return }
-                        ceremony.environmentLoaded()
-                        self.finishConnectCeremony()
+                if connectCeremony != nil, isDrivingRemote {
+                    connectCeremony?.helloAcknowledged()
+                    connectCeremonyReadiness = (layoutLoaded: false, hostStateLoaded: false)
+                    connectCeremonyLoadedHandler = { [weak self] in
+                        self?.markConnectCeremonyLayoutLoaded()
                     }
                 }
                 // Nothing is restored while the login window is up: that
@@ -1908,11 +1938,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.onReattachFailed = { [weak self] sessionID in
             self?.handleReattachFailure(sessionID)
         }
-        // Who is watching this Mac (phase 2 §5). `onSessionSize` is
-        // deliberately not assigned anywhere near here: `TerminalSurfaceView`
-        // registers for it through a shared registry, and one assignment
-        // would silently unpin every remote pane from the host's grid. This
-        // callback has no such owner.
+        // Who is watching this Mac (phase 2 §5).
         connection.onRemoteViewers = { [weak self] viewers in
             self?.applyRemoteViewers(viewers)
         }
@@ -1938,6 +1964,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self, !isDrivingRemote else { return }
             takeoverPanel?.appendActivity(entries)
         }
+        // The host's gauges, Claude limits and engine availability (spec §4,
+        // Task 26) — the viewer half of `HostStatePublisher`. Applying it
+        // unconditionally, the same reasoning as `onRemoteActivity` just
+        // above: the daemon only ever sends this to the lease holder, but
+        // this Mac must not trust that alone, and while `isDrivingRemote` is
+        // false the payload simply never arrives, so there is nothing to
+        // guard against.
+        connection.onHostState = { [weak self] payload in
+            self?.applyHostState(payload)
+        }
     }
 
     /// The exact inverse of `installConnectionHandlers`, applied to the
@@ -1950,9 +1986,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// list read back, and `ConnectionSwapTests` asserts it is false for the
     /// local connection while another Mac is being driven.
     ///
-    /// `onSessionSize` is included even though this window never assigns it:
-    /// `TerminalSurfaceView` does, through its own registry, so a pane that
-    /// somehow outlived the swap would leave one here.
     private func clearConnectionHandlers(on connection: SessionConnection) {
         connection.onStateChange = nil
         connection.onTerminalData = nil
@@ -1960,10 +1993,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.onAttention = nil
         connection.onExit = nil
         connection.onError = nil
-        connection.onSessionSize = nil
         connection.onReattachFailed = nil
         connection.onRemoteViewers = nil
         connection.onRemoteActivity = nil
+        connection.onHostState = nil
     }
 
     func stop() {
@@ -2894,6 +2927,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         workspace.focusedPaneID.flatMap { workspace.editorPane(for: $0) }
     }
 
+    /// Every terminal pane in this window's flat grid — what `syncTakeoverPanel`
+    /// tells about `sharingIsLive` on both edges of a takeover (spec §5,
+    /// Task 27).
+    private var terminalSurfaces: [TerminalSurfaceView] {
+        workspace.allPaneIDs.compactMap { workspace.terminalSurface(for: $0) }
+    }
+
     /// The engine badge's menu: every engine a terminal can be switched to,
     /// the one it runs now ticked, and the ones whose CLI is not on the `PATH`
     /// greyed rather than missing.
@@ -2914,10 +2954,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // A remote pane's process is another machine's to switch: the badge
         // still names the engine, its menu offers nothing.
         let switchable = descriptor?.isRemote != true
+        // While driving another Mac (spec §4, Task 26), "installed" means
+        // installed on the *host*: this Mac's own `PATH` answers for the
+        // wrong computer. `hostState` is `nil` outside a takeover, and
+        // `EnginePickerModel` falls back to the local answer then anyway.
+        let picker = EnginePickerModel(hostState: hostStateModel, isDrivingRemote: isDrivingRemote)
         for engine in EngineLauncher.selectable {
-            let installed = EngineLauncher.isInstalled(engine)
+            let installed = picker.isAvailable(engine)
+            let title: String
+            if installed {
+                title = engine.badgeTitle
+            } else if isDrivingRemote, let reason = picker.unavailableReason(engine) {
+                title = "\(engine.badgeTitle) — \(reason)"
+            } else {
+                title = "\(engine.badgeTitle) — not installed"
+            }
             let item = NSMenuItem(
-                title: installed ? engine.badgeTitle : "\(engine.badgeTitle) — not installed",
+                title: title,
                 action: #selector(switchEngine(_:)),
                 keyEquivalent: ""
             )
@@ -3661,7 +3714,50 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `.connected` case, before `restoreAccountStateIfNeeded()` is called,
     /// so it is in place before the `getSetting(layout)` round trip it is
     /// waiting on can possibly complete; cleared the moment it fires.
+    ///
+    /// **Only marks its own half done** (Task 26's carried item): the step
+    /// used to advance the ceremony straight from here, which meant
+    /// "Loading environment…" could finish before the first `HostState` had
+    /// ever landed — the glass lifting on gauges and limits still blank. It
+    /// now calls `markConnectCeremonyLayoutLoaded()`, which only advances
+    /// once `connectCeremonyReadiness`'s other half is also true.
     private var connectCeremonyLoadedHandler: (() -> Void)?
+
+    /// What "Loading environment…" (step 4, spec §6) is still waiting on —
+    /// the saved layout turned into panes, and the first `HostState`. `nil`
+    /// outside a live takeover attempt; set alongside
+    /// `connectCeremonyLoadedHandler` in `installConnectionHandlers`'s
+    /// `.connected` case, and cleared wherever that is. Both flags start
+    /// `false`, and `markConnectCeremonyLayoutLoaded`/
+    /// `markConnectCeremonyHostStateLoaded` advance the ceremony the moment
+    /// both are `true` — from whichever of the two lands second.
+    private var connectCeremonyReadiness: (layoutLoaded: Bool, hostStateLoaded: Bool)?
+
+    /// `applyRestoredPanes`'s half of `connectCeremonyReadiness`.
+    private func markConnectCeremonyLayoutLoaded() {
+        guard connectCeremonyReadiness != nil else { return }
+        connectCeremonyReadiness?.layoutLoaded = true
+        finishConnectCeremonyIfReady()
+    }
+
+    /// `applyHostState`'s half of `connectCeremonyReadiness`.
+    private func markConnectCeremonyHostStateLoaded() {
+        guard connectCeremonyReadiness != nil else { return }
+        connectCeremonyReadiness?.hostStateLoaded = true
+        finishConnectCeremonyIfReady()
+    }
+
+    /// Advances the ceremony to `.done` the moment both halves of
+    /// `connectCeremonyReadiness` are true — never before either one is.
+    private func finishConnectCeremonyIfReady() {
+        guard let readiness = connectCeremonyReadiness,
+              readiness.layoutLoaded, readiness.hostStateLoaded
+        else { return }
+        connectCeremonyReadiness = nil
+        guard let ceremony = connectCeremony else { return }
+        ceremony.environmentLoaded()
+        finishConnectCeremony()
+    }
 
     /// The user-facing entry point for a takeover: presents the ceremony
     /// over this window, then calls `connectRemote(to:)`. Every "Connect to
@@ -3821,6 +3917,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connectCeremonyView?.removeFromSuperview()
         connectCeremonyView = nil
         connectCeremonyLoadedHandler = nil
+        connectCeremonyReadiness = nil
         swapConnection(to: localConnection)
         if let parked {
             destination = parked.destination
@@ -3853,6 +3950,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         clearConnectionHandlers(on: previous)
         previous.disconnect()
         active.current = next
+        // A fresh takeover of a *different* machine (or the swap back to
+        // this one's own) must not show a moment of the previous host's
+        // readings (spec §4, Task 26) — cleared before the new connection's
+        // first `HostState` can possibly arrive.
+        hostStateModel.reset()
+        shellSidebar.statsRow.applyHostState(nil)
+        shellSidebar.claudeLimits.applyHostState(nil)
         installConnectionHandlers()
         next.connect()
         // The panel and the host-state publisher are host-side, and
@@ -3975,14 +4079,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // The first launch over pre-account data: only now, with the panes
         // back, can the sessions the switch would end be counted.
         adoptLegacyAccountIfNeeded()
-        // Step 4 → done of the connect ceremony (spec §6): the saved
+        // Half of step 4 → done of the connect ceremony (spec §6): the saved
         // `layout` row has actually come back and been turned into panes —
         // set only while `installConnectionHandlers`'s `.connected` case is
         // driving a live takeover, `nil` on every ordinary local restore.
         // Consumed and cleared here rather than left standing, so a *later*
         // `applyRestoredPanes` call (a reconnect's `layoutReadDispatched`
         // guard skipping straight to `ensureSession`, say) cannot fire it a
-        // second time.
+        // second time. The ceremony itself only advances once the *other*
+        // half — the first `HostState` — has also landed
+        // (`connectCeremonyReadiness`, Task 26's carried item).
         let ceremonyLoaded = connectCeremonyLoadedHandler
         connectCeremonyLoadedHandler = nil
         ceremonyLoaded?()
@@ -4084,10 +4190,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 signedIn: settingsView.accountSignedIn,
                 githubConnected: settingsView.accountGitHubConnected,
                 remoteMachines: paletteRemoteMachines(),
-                // Zoom is what a remote pane has instead of a resize; on a
-                // local pane there is nothing to scale, so the rows stay
-                // away rather than appearing and doing nothing.
-                remotePaneFocused: focusedRemoteTerminal() != nil,
                 // And who is watching this Mac right now — the popover the
                 // sidebar's count opens, by name (phase 2 §5).
                 watchedWorkspaces: watchedPaletteWorkspaces(),
@@ -4230,32 +4332,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let url = doc.url { NSWorkspace.shared.open(url) }
         case let .revealProjectContext(project):
             showInspector(for: project)
-        case let .zoomRemotePane(zoom):
-            // The View menu's three items by another route — the same `@objc`
-            // actions, sent straight to the focused pane's surface rather
-            // than down the responder chain: the panel has only just
-            // dismissed, and what holds focus at this instant is not
-            // something a spotlight row should have to bet on.
-            guard let surface = focusedRemoteTerminal() else { return }
-            switch zoom {
-            case .magnify: surface.zoomInRemoteTerminal(nil)
-            case .shrink: surface.zoomOutRemoteTerminal(nil)
-            case .fit: surface.resetRemoteTerminalZoom(nil)
-            }
         case let .showRemoteViewers(workspaceID):
             showRemoteViewers(forWorkspace: workspaceID)
         case .noop:
             break
         }
-    }
-
-    /// The focused pane when it is another Mac's terminal — what the View
-    /// menu's zoom items act on, and the gate on their spotlight rows.
-    private func focusedRemoteTerminal() -> TerminalSurfaceView? {
-        guard let id = workspace.focusedPaneID,
-              workspace.descriptor(for: id)?.isRemote == true
-        else { return nil }
-        return workspace.terminalSurface(for: id)
     }
 
     // MARK: - Desk canvas commands
@@ -5188,11 +5269,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// the panel exactly where it was.
     ///
     /// **Also the one place `hostStatePublisher` starts and stops** (spec
-    /// §4, Task 22). It shares this function rather than getting its own
-    /// `onChange` hook because the two must never disagree about whether
-    /// somebody is here: the panel and the publisher are two readings of the
-    /// same `liveConnection` transition, taken in the same call.
+    /// §4, Task 22), **and the one place the sidebar's gauges/limits are
+    /// told whether they are driving** (spec §4, Task 26). It shares this
+    /// function rather than getting its own `onChange` hook because none of
+    /// these may ever disagree about whether somebody is here: the panel,
+    /// the publisher and the sidebar are all readings of the same
+    /// `isDrivingRemote`/`liveConnection` transition, taken in the same call.
     private func syncTakeoverPanel() {
+        // Read here, unconditionally, rather than folded into either branch
+        // below: `isDrivingRemote` can flip on its own swap (no `takeoverPanel`
+        // involved at all — this Mac is not a host while it drives another),
+        // and the cards must catch up on that transition too.
+        shellSidebar.statsRow.isDrivingRemote = isDrivingRemote
+        shellSidebar.claudeLimits.isDrivingRemote = isDrivingRemote
         // `liveConnection` **alone**, and never `isSharing` with it.
         //
         // `isSharing` is this app's cached copy of a row the daemon reads
@@ -5224,15 +5313,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return
         }
         guard let info = remoteSharing.liveConnection else {
+            // The lease just let go, or there never was one — either way
+            // this Mac's own panes reclaim the grid (spec §5, Task 27): a
+            // resize suppressed for the whole of a takeover may already be
+            // stale by the time sharing actually ends, so each pane is
+            // asked for its *current* geometry rather than trusted to have
+            // queued the right one.
+            let wasLive = takeoverPanel != nil
             takeoverPanel?.dismiss()
             takeoverPanel = nil
             hostStatePublisher.stop()
+            if wasLive {
+                for surface in terminalSurfaces { surface.sharingWentIdle() }
+            }
             return
         }
         if let panel = takeoverPanel {
             panel.apply(info)
             return
         }
+        // Whoever drives owns the grid (spec §5, Task 27): a viewer just
+        // took the lease, so this Mac's own panes stop sending `Resize` for
+        // the duration — `TerminalSurfaceView.flushResize()`'s own gate. A
+        // pane opened *during* an already-live share picks this up at
+        // construction instead (the pane factory, below).
+        for surface in terminalSurfaces { surface.sharingIsLive = true }
         // `localConnection`: Terminate and Block are `DisconnectViewer` on
         // *this* Mac's daemon, local-only in the allowlist (spec §12.3).
         let panel = RemoteTakeoverPanel(info: info, connection: localConnection)

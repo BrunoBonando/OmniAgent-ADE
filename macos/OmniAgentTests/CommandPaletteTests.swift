@@ -1082,45 +1082,6 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(mask.resizingMode, .stretch, "and only the middle stretches to the panel's height")
     }
 
-    /// The standing "Spotlight finds everything" rule reaching the View
-    /// menu's three remote-pane zoom items (the phase 2 spec's §1). Rows only
-    /// while a remote pane has focus — a local pane is already 1:1 and has no
-    /// scale to change, which is why `validateMenuItem` greys the menu items
-    /// there too. Offering a row that does nothing is offering a dead end,
-    /// the same call the Accounts rows make.
-    func testTheRemoteZoomCommandsAreSpotlightRowsOnlyWithARemotePaneFocused() {
-        let local = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
-        XCTAssertTrue(
-            local.filter { $0.id.hasPrefix("view:zoom") }.isEmpty,
-            "a local pane has no scale to change"
-        )
-
-        let commands = CommandPaletteModel.build(
-            panes: [], paneOrder: [], focusedPaneID: nil, remotePaneFocused: true
-        )
-        let rows = commands.filter { $0.id.hasPrefix("view:zoom") }
-        XCTAssertEqual(rows.map(\.id), ["view:zoom:magnify", "view:zoom:shrink", "view:zoom:fit"])
-        XCTAssertEqual(rows.map(\.title), ["Zoom In", "Zoom Out", "Actual Fit"])
-        XCTAssertEqual(
-            rows.map(\.action),
-            [.zoomRemotePane(.magnify), .zoomRemotePane(.shrink), .zoomRemotePane(.fit)]
-        )
-        XCTAssertEqual(
-            rows.map(\.symbol),
-            ["plus.magnifyingglass", "minus.magnifyingglass", "1.magnifyingglass"]
-        )
-        XCTAssertEqual(rows.map(\.subtitle), ["View", "View", "View"], "the row says where it lives")
-        XCTAssertEqual(rows.map(\.section), [.places, .places, .places])
-
-        // Found by what a user would type for it, which is neither title.
-        var model = CommandPaletteModel(commands: commands)
-        model.update(query: "zoom remote")
-        XCTAssertEqual(
-            model.matches.filter { $0.id.hasPrefix("view:zoom") }.count, 3,
-            "all three answer the words a user reaches for"
-        )
-    }
-
     /// The standing rule over the other new surface in this phase: the list
     /// of machines watching a shared workspace, which the sidebar only offers
     /// behind a small glyph. A row per watched workspace, none when nobody is

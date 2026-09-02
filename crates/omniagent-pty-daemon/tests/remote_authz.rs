@@ -23,7 +23,7 @@
 mod support;
 
 use omniagent_pty_daemon::protocol::{
-    read_frame, write_frame, Frame, MessageKind, SessionListPayload, SessionSizePayload,
+    read_frame, write_frame, Frame, MessageKind, SessionListPayload,
 };
 use omniagent_pty_daemon::{
     authorize_remote, protected_setting_key, serve_client, ClientContext, CreateSession,
@@ -258,7 +258,6 @@ fn every_message_kind_is_deliberately_classified() {
             | MessageKind::Response
             | MessageKind::ResyncRequired
             | MessageKind::Error
-            | MessageKind::SessionResized
             | MessageKind::RemoteViewers
             // `RemoteActivity` (Task 19, spec §8/§12 invariant 3): a push to
             // local connections only. A remote viewer must never learn what
@@ -412,12 +411,10 @@ async fn a_lease_holder_sees_every_session_not_a_projection_of_them() {
             serde_json::json!({"id": "s2", "after_sequence": null}),
         )
         .await;
-    // An accepted attach opens with the host's grid, then the screen on it.
-    assert_eq!(reply.header.message_kind, MessageKind::SessionResized);
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
+    // No `SessionResized` push ahead of it any more (2026-09-01 remote
+    // environment sharing spec §5): the lease holder owns the grid, so an
+    // accepted attach opens straight onto the screen.
+    assert_eq!(reply.header.message_kind, MessageKind::Snapshot);
 }
 
 /// The kinds phase 2 refused and phase 3 grants, through the handler rather
@@ -515,68 +512,6 @@ async fn a_lease_holder_can_neither_read_nor_write_a_protected_row() {
         )
         .await;
     assert_eq!(layout.header.message_kind, MessageKind::Response);
-}
-
-/// A viewer renders the host's grid, so it must be told that grid before the
-/// snapshot it has to lay out.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn attaching_tells_the_client_the_session_size_before_the_snapshot() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
-    ctx.registry
-        .get("s1")
-        .unwrap()
-        .resize(120, 40, 0, 0)
-        .unwrap();
-
-    let size = client
-        .round_trip(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    assert_eq!(size.header.message_kind, MessageKind::SessionResized);
-    let size: SessionSizePayload = serde_json::from_slice(&size.payload).unwrap();
-    assert_eq!((size.id.as_str(), size.cols, size.rows), ("s1", 120, 40));
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
-}
-
-/// A resize made anywhere re-pins every attached client, with no request from
-/// the client.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_resize_reaches_every_attached_client() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut client, ctx, _stop) = remote_client(root.path(), "cat").await;
-    let opened = client
-        .round_trip(
-            MessageKind::Attach,
-            serde_json::json!({"id": "s1", "after_sequence": null}),
-        )
-        .await;
-    assert_eq!(opened.header.message_kind, MessageKind::SessionResized);
-    assert_eq!(
-        client.read().await.header.message_kind,
-        MessageKind::Snapshot
-    );
-
-    ctx.registry
-        .get("s1")
-        .unwrap()
-        .resize(100, 30, 0, 0)
-        .unwrap();
-
-    let pushed = loop {
-        let frame = client.read().await;
-        if frame.header.message_kind == MessageKind::SessionResized {
-            break frame;
-        }
-        assert_ne!(frame.header.message_kind, MessageKind::Error);
-    };
-    let pushed: SessionSizePayload = serde_json::from_slice(&pushed.payload).unwrap();
-    assert_eq!((pushed.cols, pushed.rows), (100, 30));
 }
 
 /// With the projection out of the authorizer, the **session registry** is the

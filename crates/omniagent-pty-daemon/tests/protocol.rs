@@ -4,9 +4,9 @@ use omniagent_pty_daemon::protocol::{
     ErrorPayload, Frame, FrameError, Header, HelloPayload, ListDirectoryPayload, MessageKind,
     RefusalCode, RemoteViewersPayload, ResizePayload, ResponsePayload, ResyncRequiredPayload,
     RootsAddProjectPayload, RootsReingestProjectPayload, RootsRenameProjectPayload,
-    RootsSetPausedPayload, RootsStartIngestPayload, SessionExitedPayload, SessionSizePayload,
-    SessionStatus, SessionStatusPayload, SettingKey, SettingValue, ViewerSummaryPayload,
-    MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
+    RootsSetPausedPayload, RootsStartIngestPayload, SessionExitedPayload, SessionStatus,
+    SessionStatusPayload, SettingKey, SettingValue, ViewerSummaryPayload, MAX_PAYLOAD_LEN,
+    PROTOCOL_VERSION,
 };
 use omniagent_pty_daemon::{ActivityEntry, RemoteActivityPayload};
 
@@ -229,19 +229,23 @@ fn roots_message_kind_discriminants_are_appended_after_brain_get_context_never_r
 }
 
 /// Phase 2's kinds, appended after `BrainSearch` and after `Error` rather
-/// than slotted in among the frozen ones. These four discriminants are also
+/// than slotted in among the frozen ones. These discriminants are also
 /// spelled out in `macos/OmniAgent/SessionProtocol.swift`; the two enums are
 /// one wire contract, so a change here without a change there is a bug.
+///
+/// `0x8c` (`SessionResized`) is deliberately absent: the 2026-09-01 remote
+/// environment sharing spec §5/§1 deleted it, and this test never asserted
+/// that byte was *taken* — only what the ones that remain mean — so its
+/// absence needs no assertion of its own, and the byte stays retired.
 #[test]
 fn phase_2_message_kind_discriminants_are_appended_never_renumbering_v1() {
     assert_eq!(
         [
             MessageKind::ListViewers as u8,
             MessageKind::DisconnectViewer as u8,
-            MessageKind::SessionResized as u8,
             MessageKind::RemoteViewers as u8,
         ],
-        [0x1a, 0x1b, 0x8c, 0x8d]
+        [0x1a, 0x1b, 0x8d]
     );
     assert_eq!(
         MessageKind::try_from(0x1a).unwrap(),
@@ -255,6 +259,13 @@ fn phase_2_message_kind_discriminants_are_appended_never_renumbering_v1() {
         MessageKind::try_from(0x8d).unwrap(),
         MessageKind::RemoteViewers
     );
+}
+
+/// `0x8c` is retired, not reused — `SessionResized` was deleted (2026-09-01
+/// remote environment sharing spec §5/§1) and nothing has taken its byte.
+#[test]
+fn the_retired_session_resized_byte_names_nothing() {
+    assert!(MessageKind::try_from(0x8c).is_err());
 }
 
 /// Phase 3's `ListDirectory`, appended after `DisconnectViewer` at 0x1d —
@@ -337,15 +348,6 @@ fn list_directory_payload_shapes_carry_names_and_kinds_and_nothing_else() {
 
 #[test]
 fn phase_2_payload_shapes_match_the_swift_client() {
-    assert_eq!(
-        serde_json::to_value(SessionSizePayload {
-            id: "sess-1".into(),
-            cols: 120,
-            rows: 40,
-        })
-        .unwrap(),
-        serde_json::json!({"id": "sess-1", "cols": 120, "rows": 40})
-    );
     // The roster row an unrelayed or unasserted viewer produces: the four
     // asserted fields are *absent keys*, not nulls and not empty strings, so
     // "the relay said nothing" and "the relay said ''" stay different facts

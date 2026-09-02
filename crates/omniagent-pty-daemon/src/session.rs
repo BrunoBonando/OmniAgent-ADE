@@ -279,14 +279,6 @@ pub enum SessionEvent {
         status: SessionStatus,
         engine: String,
     },
-    /// The grid changed (phase 2 §1). Broadcast like `Status`: subscribers
-    /// only, never recorded in `history`, since it describes the session as
-    /// it is now rather than a byte of its output to replay.
-    Resized {
-        sequence: u64,
-        cols: u16,
-        rows: u16,
-    },
     Exited {
         sequence: u64,
         exit_code: Option<u32>,
@@ -299,7 +291,6 @@ impl SessionEvent {
             Self::Output { sequence, .. }
             | Self::ResyncRequired { sequence }
             | Self::Status { sequence, .. }
-            | Self::Resized { sequence, .. }
             | Self::Exited { sequence, .. } => *sequence,
         }
     }
@@ -481,9 +472,7 @@ impl ManagedSession {
     /// stamp an `AttachState::Snapshot` carries.
     ///
     /// Every server push stamps `request_or_sequence` with a sequence; only a
-    /// reply stamps it with a request id. `SessionResized` is a push on both
-    /// of its routes (attach time and every accepted resize), so both must
-    /// read this rather than one of them borrowing the attach's request id.
+    /// reply stamps it with a request id.
     pub fn sequence(&self) -> u64 {
         self.terminal
             .lock()
@@ -513,25 +502,23 @@ impl ManagedSession {
                 pixel_height,
             })
             .context("resize PTY")?;
-        let sequence = {
+        {
             let mut terminal = self
                 .terminal
                 .lock()
                 .map_err(|e| anyhow!("terminal lock poisoned: {e}"))?;
             terminal.parser.set_size(rows, cols);
-            terminal.sequence
-        };
+        }
         *self
             .size
             .lock()
             .map_err(|e| anyhow!("session size lock poisoned: {e}"))? = (cols, rows);
-        // Told, not asked: attached clients re-pin to the new grid the way
-        // they do for a status change.
-        self.broadcast(SessionEvent::Resized {
-            sequence,
-            cols,
-            rows,
-        });
+        // Nothing is broadcast: whoever drives owns the grid (2026-09-01
+        // remote environment sharing spec §5), and the driver is the one
+        // that called this in the first place. The old `SessionResized`
+        // push told *every* attached client to re-pin to a size that used
+        // to be the host's alone to set; under exclusive takeover there is
+        // exactly one driver and it already knows the size it just sent.
         Ok(())
     }
 

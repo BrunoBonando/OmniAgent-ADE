@@ -32,7 +32,6 @@ fn next_output(
         SessionEvent::Exited { .. } => panic!("session exited before expected output"),
         SessionEvent::ResyncRequired { .. } => panic!("unexpected resync"),
         SessionEvent::Status { .. } => panic!("unexpected status"),
-        SessionEvent::Resized { .. } => panic!("unexpected resize"),
     }
 }
 

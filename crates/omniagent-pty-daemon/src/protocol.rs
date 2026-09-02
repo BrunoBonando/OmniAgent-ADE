@@ -268,17 +268,6 @@ pub struct SessionExitedPayload {
     pub exit_code: Option<u32>,
 }
 
-/// The grid a session is currently running at — the one the host owns
-/// (phase 2 spec §1). Sent on `Attach` and pushed on every accepted resize
-/// so a remote viewer can render that grid scaled instead of imposing its
-/// own window's size on the host.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSizePayload {
-    pub id: String,
-    pub cols: u16,
-    pub rows: u16,
-}
-
 /// One machine currently watching sessions on this daemon — an entry of both
 /// the `RemoteViewers` push and the `ListViewers` reply (phase 2 §5).
 ///
@@ -511,11 +500,11 @@ pub enum MessageKind {
     Response = 0x89,
     ResyncRequired = 0x8a,
     Error = 0x8b,
-    /// The session's current grid, `SessionSizePayload` (phase 2 §1 —
-    /// appended, never renumbering an existing kind). Sent on `Attach` and
-    /// pushed to a session's subscribers whenever its size changes; a local
-    /// client ignores it, a remote viewer re-pins its scaled render to it.
-    SessionResized = 0x8c,
+    // 0x8c was `SessionResized`, deleted in the 2026-09-01 remote environment
+    // sharing spec §5/§1: under exclusive takeover the viewer owns the grid
+    // and sends `Resize` itself, so nobody needs telling the size any more.
+    // Retired, not reused — never renumbering an existing kind, the same
+    // rule that leaves holes elsewhere in this enum.
     /// The presence roster, [`RemoteViewersPayload`] (phase 2 §5 — appended,
     /// never renumbering an existing kind). Pushed to **local** connections
     /// only, whenever the set of identified remote viewers or what they are
@@ -585,7 +574,6 @@ impl TryFrom<u8> for MessageKind {
             0x89 => Self::Response,
             0x8a => Self::ResyncRequired,
             0x8b => Self::Error,
-            0x8c => Self::SessionResized,
             0x8d => Self::RemoteViewers,
             0x8e => Self::HostState,
             0x8f => Self::RemoteActivity,

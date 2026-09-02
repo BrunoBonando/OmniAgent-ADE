@@ -256,12 +256,6 @@ final class SessionConnection {
     var onAttention: ((String) -> Void)?
     var onExit: ((SessionExitedEvent) -> Void)?
     var onError: ((Error) -> Void)?
-    /// The host's grid for one session — `(sessionID, cols, rows)` — from a
-    /// `SessionResized` push (phase 2 §1). The daemon sends one on attach,
-    /// just before the snapshot, and again whenever the host resizes. A
-    /// local pane ignores it (its own view drives the size); a remote pane
-    /// pins its terminal to this grid and scales it into the space it has.
-    var onSessionSize: ((String, UInt16, UInt16) -> Void)?
     /// The machines currently watching sessions on this daemon, from a
     /// `RemoteViewers` push (phase 2 §5). Local connections only: the daemon
     /// never tells a viewer about other viewers.
@@ -280,6 +274,13 @@ final class SessionConnection {
     /// `listSessions` first, so a failure there would be a genuine protocol
     /// anomaly, not "the daemon restarted and forgot this session."
     var onReattachFailed: ((String) -> Void)?
+    /// The host's own state — gauges, Claude usage limits and engine
+    /// availability — from a `HostState` push (2026-09-01 remote environment
+    /// sharing spec §4, Task 26). Pushed to the lease holder only, on attach
+    /// and again on every publish; a local connection never receives one.
+    /// Carries the raw JSON verbatim, exactly as `publishHostState` sent it —
+    /// this connection never parses it, `HostStateModel` does.
+    var onHostState: ((Data) -> Void)?
 
     private struct Attachment {
         var sequence: UInt64?
@@ -354,10 +355,10 @@ final class SessionConnection {
             || onAttention != nil
             || onExit != nil
             || onError != nil
-            || onSessionSize != nil
             || onRemoteViewers != nil
             || onRemoteActivity != nil
             || onReattachFailed != nil
+            || onHostState != nil
     }
 
     /// Whether this connection is attached or trying to be — `connect()` sets
@@ -1266,18 +1267,17 @@ final class SessionConnection {
             } catch {
                 closeConnection(error: error)
             }
-        case .sessionResized:
-            // Deliberately *not* run through `updateSequence`: a resize is
-            // not terminal output, and advancing a session's resume cursor
-            // past output it has not received would drop that output on the
-            // next reattach.
-            if let size = try? decoder.decode(SessionSizePayload.self, from: frame.payload) {
-                callbackQueue.async { self.onSessionSize?(size.id, size.cols, size.rows) }
-            }
         case .remoteViewers:
             if let payload = try? decoder.decode(RemoteViewersPayload.self, from: frame.payload) {
                 callbackQueue.async { self.onRemoteViewers?(payload.viewers) }
             }
+        case .hostState:
+            // Sent verbatim (spec §4): the daemon never parses it, and
+            // neither does this connection — `HostStateModel` does, on the
+            // window controller's own queue. No `updateSequence` for the
+            // same reason `sessionResized` never got one: this describes the
+            // host machine, not a byte of a session's output to replay.
+            callbackQueue.async { self.onHostState?(frame.payload) }
         case .remoteActivity:
             if let payload = try? decoder.decode(RemoteActivityPushPayload.self, from: frame.payload) {
                 var entries = payload.entries.compactMap(RemoteActivityLog.Entry.init(wire:))
@@ -1588,14 +1588,6 @@ enum RefusalCode: String {
     case hostSignedOut = "host_signed_out"
     case wrongAccount = "wrong_account"
     case blocked = "blocked"
-}
-
-/// `SessionResized`'s payload — the daemon's `SessionSizePayload`
-/// (`{id, cols, rows}`), the host's current grid for one session.
-private struct SessionSizePayload: Codable {
-    let id: String
-    let cols: UInt16
-    let rows: UInt16
 }
 
 /// The `RemoteViewers` push payload, and `ListViewers`' `Response` payload —

@@ -1427,7 +1427,6 @@ fn hostile_frame(kind: MessageKind) -> Frame {
         | MessageKind::Response
         | MessageKind::ResyncRequired
         | MessageKind::Error
-        | MessageKind::SessionResized
         | MessageKind::RemoteViewers
         | MessageKind::RemoteActivity => frame(kind, serde_json::json!({})),
     }

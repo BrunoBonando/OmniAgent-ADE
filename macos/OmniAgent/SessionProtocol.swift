@@ -84,12 +84,11 @@ enum MessageKind: UInt8 {
     case response = 0x89
     case resyncRequired = 0x8a
     case error = 0x8b
-    /// The session's current grid, `{id, cols, rows}` (phase 2 §1 —
-    /// appended, never renumbering an existing kind). Pushed on `Attach`,
-    /// just before the snapshot, and again on every accepted resize; a local
-    /// client ignores it, a remote viewer re-pins its scaled render to it.
-    /// Mirrors `omniagent_pty_daemon::protocol::MessageKind::SessionResized`.
-    case sessionResized = 0x8c
+    // 0x8c was `sessionResized`, deleted in the 2026-09-01 remote
+    // environment sharing spec §5/§1: under exclusive takeover the viewer
+    // owns the grid and sends `Resize` itself, so nobody needs telling the
+    // size any more. Mirrors the daemon's own retired byte
+    // (`omniagent_pty_daemon::protocol::MessageKind`, `protocol.rs`).
     /// The presence roster push, `{"viewers":[…]}` (phase 2 §5). Sent to
     /// local connections only — a viewer never learns about other viewers.
     /// Mirrors `RemoteViewers`.

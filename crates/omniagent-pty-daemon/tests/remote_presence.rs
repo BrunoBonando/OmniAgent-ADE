@@ -334,24 +334,31 @@ async fn a_viewer_is_never_told_about_other_viewers() {
         "the host must have been pushed a roster naming the machine watching it"
     );
 
-    // A local resize is the positive control: server pushes really are
-    // reaching the viewer's connection while the roster is not.
+    // Writing to the session is the positive control: server pushes really
+    // are reaching the viewer's connection while the roster is not. `s1`
+    // runs `cat`, so this comes straight back as `Output`.
+    //
+    // A resize used to serve this purpose (`SessionResized`), before the
+    // 2026-09-01 remote environment sharing spec §5 deleted that push:
+    // whoever drives owns the grid now, and the driver already knows the
+    // size it just sent, so there is nothing left for a resize to prove
+    // here.
     ctx.registry
         .get("s1")
         .unwrap()
-        .resize(90, 20, 0, 0)
+        .write_input(b"ping\n")
         .unwrap();
 
-    let mut saw_the_resize = false;
+    let mut saw_output = false;
     while let Some(frame) = air.try_read(Duration::from_millis(500)).await {
         assert_ne!(
             frame.header.message_kind,
             MessageKind::RemoteViewers,
             "Air was told who is watching this machine"
         );
-        saw_the_resize |= frame.header.message_kind == MessageKind::SessionResized;
+        saw_output |= frame.header.message_kind == MessageKind::Output;
     }
-    assert!(saw_the_resize, "Air's connection was live throughout");
+    assert!(saw_output, "Air's connection was live throughout");
 }
 
 /// One local client that stops draining its socket must wedge only itself.

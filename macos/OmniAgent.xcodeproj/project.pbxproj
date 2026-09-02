@@ -124,7 +124,6 @@
 		6E03320AECB47DF4B1CDAC5C /* RemoteSharingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E23E2D1FCA68A5D7E5A271F /* RemoteSharingModel.swift */; };
 		F0B34726F69E4D4E90427E2C /* PredictiveEchoModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 667DDB0CD8F44D5F8AAE32AD /* PredictiveEchoModel.swift */; };
 		1708611130EF44F080D129AB /* PredictiveEchoOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D7DE1558DC4E378D4D62D4 /* PredictiveEchoOverlayView.swift */; };
-		4AF7A38CA20246F096951780 /* RemoteTerminalScaler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D86AA8AA7E40878A8773AC /* RemoteTerminalScaler.swift */; };
 		FFD15FA0A78843F1AFC1F746 /* RemoteSessionPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CCCAEE9829D48B38E81A5F2 /* RemoteSessionPicker.swift */; };
 		A1B2C3D40001470AE987450A /* RemoteTakeoverPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40002470AE987450A /* RemoteTakeoverPanel.swift */; };
 		8056BED5DF0246AD96A75A01 /* RemoteActivityLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A811975FC3A4D93B629EA76 /* RemoteActivityLog.swift */; };
@@ -141,11 +140,11 @@
 		0B4DCBFFB3B8E68CFD297DB3 /* RemoteConnectCeremonyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E24EBC8EB0E8E43D164F71A /* RemoteConnectCeremonyTests.swift */; };
 		4DCE63406C4E44AE182E7CA6 /* RemoteChainingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C9C44CF91353F208A75BB0 /* RemoteChainingTests.swift */; };
 		CEA2D45DB56CF29D7811C69B /* HostStateConsumerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 441241A5A96B8FEF86D66F99 /* HostStateConsumerTests.swift */; };
+		2C68FBC47F898E14F28C9E27 /* GridOwnershipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789E986F7ABBC89C06D06065 /* GridOwnershipTests.swift */; };
 		17D6FB9DD2472F809C905514 /* SidebarRemoteSessionWidgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0438912FEBF74023BE4631A /* SidebarRemoteSessionWidgetTests.swift */; };
 		CBFD87129B354D8E886D71EA /* RemoteActivityLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77CE7813FD7E4601BEE6107B /* RemoteActivityLogTests.swift */; };
 		38CCB7C65BEB4239AECB9FE4 /* HostStatePublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */; };
 		BA524298D19449349AF94799 /* PredictiveEchoModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */; };
-		FB19F31F37E24F2294980EE6 /* RemoteTerminalScalerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED4069DF85734D57BF22CBB2 /* RemoteTerminalScalerTests.swift */; };
 		9F80A299E51B449B8FE08F85 /* RemoteSessionPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */; };
 		493F0889AAA54E95AC9DD5C7 /* RemotePresenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */; };
 		10000000000000000000028 /* UsageAnalyticsRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000029 /* UsageAnalyticsRecorder.swift */; };
@@ -352,7 +351,6 @@
 		1E23E2D1FCA68A5D7E5A271F /* RemoteSharingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSharingModel.swift; sourceTree = "<group>"; };
 		667DDB0CD8F44D5F8AAE32AD /* PredictiveEchoModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoModel.swift; sourceTree = "<group>"; };
 		86D7DE1558DC4E378D4D62D4 /* PredictiveEchoOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoOverlayView.swift; sourceTree = "<group>"; };
-		70D86AA8AA7E40878A8773AC /* RemoteTerminalScaler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTerminalScaler.swift; sourceTree = "<group>"; };
 		7CCCAEE9829D48B38E81A5F2 /* RemoteSessionPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionPicker.swift; sourceTree = "<group>"; };
 		A1B2C3D40002470AE987450A /* RemoteTakeoverPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTakeoverPanel.swift; sourceTree = "<group>"; };
 		6A811975FC3A4D93B629EA76 /* RemoteActivityLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteActivityLog.swift; sourceTree = "<group>"; };
@@ -369,11 +367,11 @@
 		2E24EBC8EB0E8E43D164F71A /* RemoteConnectCeremonyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteConnectCeremonyTests.swift; sourceTree = "<group>"; };
 		19C9C44CF91353F208A75BB0 /* RemoteChainingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteChainingTests.swift; sourceTree = "<group>"; };
 		441241A5A96B8FEF86D66F99 /* HostStateConsumerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostStateConsumerTests.swift; sourceTree = "<group>"; };
+		789E986F7ABBC89C06D06065 /* GridOwnershipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GridOwnershipTests.swift; sourceTree = "<group>"; };
 		D0438912FEBF74023BE4631A /* SidebarRemoteSessionWidgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarRemoteSessionWidgetTests.swift; sourceTree = "<group>"; };
 		77CE7813FD7E4601BEE6107B /* RemoteActivityLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteActivityLogTests.swift; sourceTree = "<group>"; };
 		C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostStatePublisherTests.swift; sourceTree = "<group>"; };
 		A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoModelTests.swift; sourceTree = "<group>"; };
-		ED4069DF85734D57BF22CBB2 /* RemoteTerminalScalerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTerminalScalerTests.swift; sourceTree = "<group>"; };
 		531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionPickerTests.swift; sourceTree = "<group>"; };
 		88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePresenceTests.swift; sourceTree = "<group>"; };
 		20000000000000000000029 /* UsageAnalyticsRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalyticsRecorder.swift; sourceTree = "<group>"; };
@@ -546,7 +544,6 @@
 				60FCA6AFF249925A116E3716 /* SidebarRemoteSessionWidget.swift */,
 				667DDB0CD8F44D5F8AAE32AD /* PredictiveEchoModel.swift */,
 				86D7DE1558DC4E378D4D62D4 /* PredictiveEchoOverlayView.swift */,
-				70D86AA8AA7E40878A8773AC /* RemoteTerminalScaler.swift */,
 				7CCCAEE9829D48B38E81A5F2 /* RemoteSessionPicker.swift */,
 				A1B2C3D40002470AE987450A /* RemoteTakeoverPanel.swift */,
 				6A811975FC3A4D93B629EA76 /* RemoteActivityLog.swift */,
@@ -620,11 +617,11 @@
 				2E24EBC8EB0E8E43D164F71A /* RemoteConnectCeremonyTests.swift */,
 				19C9C44CF91353F208A75BB0 /* RemoteChainingTests.swift */,
 				441241A5A96B8FEF86D66F99 /* HostStateConsumerTests.swift */,
+				789E986F7ABBC89C06D06065 /* GridOwnershipTests.swift */,
 				D0438912FEBF74023BE4631A /* SidebarRemoteSessionWidgetTests.swift */,
 				77CE7813FD7E4601BEE6107B /* RemoteActivityLogTests.swift */,
 				C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */,
 				A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */,
-				ED4069DF85734D57BF22CBB2 /* RemoteTerminalScalerTests.swift */,
 				531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */,
 				88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */,
 				3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */,
@@ -875,7 +872,6 @@
 				6E03320AECB47DF4B1CDAC5C /* RemoteSharingModel.swift in Sources */,
 				F0B34726F69E4D4E90427E2C /* PredictiveEchoModel.swift in Sources */,
 				1708611130EF44F080D129AB /* PredictiveEchoOverlayView.swift in Sources */,
-				4AF7A38CA20246F096951780 /* RemoteTerminalScaler.swift in Sources */,
 				FFD15FA0A78843F1AFC1F746 /* RemoteSessionPicker.swift in Sources */,
 				A1B2C3D40001470AE987450A /* RemoteTakeoverPanel.swift in Sources */,
 				8056BED5DF0246AD96A75A01 /* RemoteActivityLog.swift in Sources */,
@@ -942,11 +938,11 @@
 				0B4DCBFFB3B8E68CFD297DB3 /* RemoteConnectCeremonyTests.swift in Sources */,
 				4DCE63406C4E44AE182E7CA6 /* RemoteChainingTests.swift in Sources */,
 				CEA2D45DB56CF29D7811C69B /* HostStateConsumerTests.swift in Sources */,
+				2C68FBC47F898E14F28C9E27 /* GridOwnershipTests.swift in Sources */,
 				17D6FB9DD2472F809C905514 /* SidebarRemoteSessionWidgetTests.swift in Sources */,
 				CBFD87129B354D8E886D71EA /* RemoteActivityLogTests.swift in Sources */,
 				38CCB7C65BEB4239AECB9FE4 /* HostStatePublisherTests.swift in Sources */,
 				BA524298D19449349AF94799 /* PredictiveEchoModelTests.swift in Sources */,
-				FB19F31F37E24F2294980EE6 /* RemoteTerminalScalerTests.swift in Sources */,
 				9F80A299E51B449B8FE08F85 /* RemoteSessionPickerTests.swift in Sources */,
 				493F0889AAA54E95AC9DD5C7 /* RemotePresenceTests.swift in Sources */,
 				3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */,

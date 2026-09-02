@@ -13,8 +13,8 @@ use crate::protocol::{
     ResizePayload, ResponsePayload, ResyncRequiredPayload, RootsAddProjectPayload,
     RootsReingestProjectPayload, RootsRenameProjectPayload, RootsSetPausedPayload,
     RootsStartIngestPayload, SessionCreatedPayload, SessionExitedPayload, SessionIdPayload,
-    SessionListPayload, SessionSizePayload, SessionStatusPayload, SettingKey, SettingValue,
-    LIST_DIRECTORY_MAX_ENTRIES, PROTOCOL_VERSION,
+    SessionListPayload, SessionStatusPayload, SettingKey, SettingValue, LIST_DIRECTORY_MAX_ENTRIES,
+    PROTOCOL_VERSION,
 };
 use crate::{AttachState, CreateSession, SessionEvent, SessionRegistry, SessionSubscription};
 use anyhow::{anyhow, Context, Result};
@@ -1258,25 +1258,11 @@ where
                                 .chain([attach.id.clone()])
                                 .collect(),
                         );
-                        // The grid before the screen drawn on it: a viewer
-                        // scales the host's size rather than imposing its own
-                        // (phase 2 §1), so it must know that size to lay the
-                        // snapshot out. The header carries the session's
-                        // current sequence, the same stamp `Snapshot` gets —
-                        // never this attach's request id, which would give one
-                        // message kind two meanings for the same header field.
-                        let (cols, rows) = session.size();
-                        send_json(
-                            &writer,
-                            MessageKind::SessionResized,
-                            session.sequence(),
-                            &SessionSizePayload {
-                                id: attach.id.clone(),
-                                cols,
-                                rows,
-                            },
-                        )
-                        .await?;
+                        // No `SessionResized` push here any more (2026-09-01
+                        // remote environment sharing spec §5): whoever drives
+                        // owns the grid and already knows the size it is
+                        // running at, so telling it its own size back is
+                        // nothing a client needs.
                         send_attach_state(&writer, &attach.id, state).await?;
                         if empty_resume {
                             send_response(&writer, request).await?;
@@ -2250,19 +2236,6 @@ async fn send_event(writer: &SharedWriter, id: &str, event: SessionEvent) -> Res
                         | crate::protocol::SessionStatus::Error
                 ),
                 engine,
-            })?,
-        ),
-        SessionEvent::Resized {
-            sequence,
-            cols,
-            rows,
-        } => Frame::new(
-            MessageKind::SessionResized,
-            sequence,
-            serde_json::to_vec(&SessionSizePayload {
-                id: id.into(),
-                cols,
-                rows,
             })?,
         ),
         SessionEvent::Exited {
