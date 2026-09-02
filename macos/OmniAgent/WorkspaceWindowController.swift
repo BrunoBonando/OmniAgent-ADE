@@ -1247,11 +1247,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.onResumeRemoteSession = { [weak self] in
             self?.presentRemoteSessionPicker()
         }
-        // The viewer count beside a shared workspace's globe: the list of
-        // machines watching it, each with a Disconnect (phase 2 spec §5).
-        shellSidebar.onShowViewers = { [weak self] id in
-            self?.showRemoteViewers(forWorkspace: id)
-        }
         // Asking the login shell for its PATH spawns a shell; do it now, off
         // the main thread, so the first terminal does not wait for it. Once
         // resolved, published to this Mac's own daemon
@@ -4104,9 +4099,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 signedIn: settingsView.accountSignedIn,
                 githubConnected: settingsView.accountGitHubConnected,
                 remoteMachines: paletteRemoteMachines(),
-                // And who is watching this Mac right now — the popover the
-                // sidebar's count opens, by name (phase 2 §5).
-                watchedWorkspaces: watchedPaletteWorkspaces(),
                 // Which of the three update rows can be taken right now.
                 updateState: updateController.state,
                 // The sharing switch is only offered where it can be taken.
@@ -4245,8 +4237,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let url = doc.url { NSWorkspace.shared.open(url) }
         case let .revealProjectContext(project):
             showInspector(for: project)
-        case let .showRemoteViewers(workspaceID):
-            showRemoteViewers(forWorkspace: workspaceID)
         case .noop:
             break
         }
@@ -4443,12 +4433,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             projectLabels: projectLabels,
             eventTimes: lastStatusEventAt,
             customizations: sidebarCustomizations(),
-            sessionMeta: sessionMeta,
-            // Who is watching *this* Mac's workspaces (phase 2 §5). The other
-            // Macs themselves are no longer sections of this sidebar — a
-            // viewer reads the host's real tree over the swapped connection
-            // instead (spec §1).
-            remoteViewerNames: workspaceViewerNames()
+            sessionMeta: sessionMeta
         )
     }
 
@@ -4846,28 +4831,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    // MARK: - Viewer presence (phase 2 §5)
+    // MARK: - Viewer presence
 
     /// The machines watching a session on this daemon right now, in the order
     /// the daemon reports them. Pushed whenever the daemon's registry changes
     /// (`RemoteViewers`) and read once per connect (`listViewers`), because a
     /// freshly opened app gets no push while the roster is empty — and empty
-    /// is an answer, not silence.
+    /// is an answer, not silence. `RemoteTakeoverPanel` is the one place this
+    /// roster renders (spec §7); the per-workspace badge/popover and the
+    /// filmstrip's watched-by line were a duplicate reading of the same
+    /// roster and are gone (Task 29 fix wave).
     private(set) var remoteViewers: [RemoteViewer] = []
 
-    /// Test seam, `settingsWriter`'s pattern: `nil` means the real
-    /// `connection.disconnectViewer`. A kick is a write to another Mac's
-    /// connection; no test may send one down a live socket.
-    var viewerDisconnector: ((String, @escaping (Result<Void, Error>) -> Void) -> Void)?
-
-    /// The read half of the same seam, so the resync a failed kick triggers
-    /// is reachable from a test without a socket.
+    /// The read half of the disconnect seam Terminate/Block use
+    /// (`RemoteTakeoverPanel`'s own `RemoteViewerDisconnecting` connection),
+    /// so the resync a failed kick triggers is reachable from a test without
+    /// a socket.
     var viewerLister: ((@escaping (Result<[RemoteViewer], Error>) -> Void) -> Void)?
 
-    /// The daemon's roster, applied everywhere it shows: the count beside a
-    /// workspace's globe, the machine name under a watched pane's card, and
-    /// an open popover, which has to follow the roster rather than hold the
-    /// list it opened with.
+    /// The daemon's roster, applied everywhere it shows: the takeover panel
+    /// and the menu bar icon.
     func applyRemoteViewers(_ viewers: [RemoteViewer]) {
         // `RemoteViewers` is a HOST-side push (spec §12.3, local-only), but
         // `connection.onRemoteViewers` is installed on whichever connection
@@ -4887,9 +4870,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         remoteSharing.applyRemoteViewers(viewers)
         guard viewers != remoteViewers else { return }
         remoteViewers = viewers
-        workspace.setRemoteViewerNames(paneViewerNames())
-        reloadOutline()
-        refreshViewerPopover()
     }
 
     /// Re-reads the roster from the daemon. Called once per connect; the
@@ -4907,163 +4887,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             // the allowlist (spec §12.3).
             localConnection.listViewers(completion: apply)
         }
-    }
-
-    /// How many machines are watching a pane of this workspace. Machines, not
-    /// attachments: two Macs on the same pane are two, and one Mac on three
-    /// panes is one.
-    func remoteViewerCount(forWorkspace id: String) -> Int {
-        remoteViewerNames(forWorkspace: id).count
-    }
-
-    /// The same, named — the row's tooltip and the popover's list.
-    func remoteViewerNames(forWorkspace id: String) -> [String] {
-        // A pane id this window does not own counts for nobody: the roster is
-        // the daemon's and can name panes closed a moment ago.
-        remoteViewers
-            .filter { viewer in
-                viewer.sessions.contains { workspace.descriptor(for: $0)?.project == id }
-            }
-            .map(\.machineName)
-    }
-
-    /// The machines on one pane — the filmstrip card's detail line.
-    func remoteViewerNames(forPane paneID: String) -> [String] {
-        remoteViewers.filter { $0.sessions.contains(paneID) }.map(\.machineName)
-    }
-
-    /// Kicks one machine, and blocks it: the popover's Disconnect is Block,
-    /// not Terminate (`disconnectViewer(viewerID:block:)` defaults to
-    /// blocking, which is what this affordance has always meant).
-    ///
-    /// **Nothing is removed from the roster here.** It used to be: the
-    /// machine was filtered out optimistically and the daemon's reply only
-    /// consulted on failure. That was already the wrong answer for a
-    /// security surface — "you're safe" while the other Mac is still
-    /// watching — and once the roster began driving the takeover panel it
-    /// became the panel disappearing on a kick the daemon had not performed
-    /// yet, or refused. If the follow-up re-read failed too, the window
-    /// stayed wrong.
-    ///
-    /// The roster is the daemon's to report. A successful kick cancels the
-    /// connection, which publishes a new roster within the same round trip;
-    /// a refused one publishes nothing, and the window goes on showing what
-    /// is actually connected. This is `RemoteSharingModel`'s non-optimistic
-    /// rule, applied to the one surface that had not adopted it.
-    func disconnectViewer(_ viewerID: String) {
-        let finish: (Result<Void, Error>) -> Void = { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success:
-                // The daemon appended this id to `remote_control_blocked` as
-                // part of the kick, so the app's copy is stale — and an
-                // `unblock` of some *other* id computed from a stale copy
-                // would silently forgive this one.
-                remoteSharing.refreshBlockedList()
-            case .failure:
-                // Nothing was predicted, so there is nothing to undo — this
-                // only makes sure the window is showing the daemon's answer
-                // rather than a roster that predates the attempt.
-                refreshRemoteViewers()
-            }
-        }
-        if let viewerDisconnector {
-            viewerDisconnector(viewerID, finish)
-        } else {
-            // `localConnection`: kicking a viewer off *this* Mac.
-            // `DisconnectViewer` is local-only (spec §12.3).
-            localConnection.disconnectViewer(viewerID: viewerID, block: true, completion: finish)
-        }
-    }
-
-    /// The popover behind the count: every machine watching this workspace,
-    /// what it is on, how long it has been there, and a Disconnect.
-    func showRemoteViewers(forWorkspace id: String) {
-        let rows = remoteViewers.compactMap { viewer -> RemoteViewersView.Row? in
-            let panes = viewer.sessions.filter { workspace.descriptor(for: $0)?.project == id }
-            guard !panes.isEmpty else { return nil }
-            return RemoteViewersView.Row(
-                viewerID: viewer.viewerID,
-                machineName: viewer.machineName,
-                since: viewer.since,
-                // Pane *titles*: the roster carries ids, and only this window
-                // can say which of them is "migrate".
-                paneTitles: panes.map { workspace.descriptor(for: $0)?.title ?? $0 }
-            )
-        }
-        guard !rows.isEmpty else { return }
-        // The badge itself when the tree is drawing workspace rows; the tree
-        // otherwise (Status and Last-updated mode draw none), and the window
-        // as the floor. `NSPopover` raises rather than shrugs when handed a
-        // view that is off screen or in no window at all, and this can be
-        // reached from the spotlight with the sidebar collapsed.
-        let candidates: [NSView?] = [
-            shellSidebar.workspacesTree.viewerBadge(forWorkspace: id),
-            shellSidebar.workspacesTree,
-            window?.contentView,
-        ]
-        guard let anchor = candidates.compactMap({ $0 }).first(where: {
-            $0.window != nil && !$0.isHiddenOrHasHiddenAncestor
-        }) else { return }
-        viewerPopoverWorkspaceID = id
-        RemoteViewersPopover.show(rows: rows, from: anchor) { [weak self] viewerID in
-            self?.disconnectViewer(viewerID)
-        }
-    }
-
-    /// Which workspace the open popover is listing, so a roster change can
-    /// rebuild it — or close it once the last machine has gone.
-    private var viewerPopoverWorkspaceID: String?
-
-    private func refreshViewerPopover() {
-        guard RemoteViewersPopover.isShown, let id = viewerPopoverWorkspaceID else { return }
-        if remoteViewerCount(forWorkspace: id) == 0 {
-            RemoteViewersPopover.dismiss()
-            viewerPopoverWorkspaceID = nil
-        } else {
-            showRemoteViewers(forWorkspace: id)
-        }
-    }
-
-    /// The roster inverted: pane id -> the machines on it, for the filmstrip.
-    private func paneViewerNames() -> [String: [String]] {
-        var names: [String: [String]] = [:]
-        for viewer in remoteViewers {
-            for pane in viewer.sessions where workspace.descriptor(for: pane) != nil {
-                names[pane, default: []].append(viewer.machineName)
-            }
-        }
-        return names
-    }
-
-    /// The same, as spotlight rows — named and ordered, since a dictionary
-    /// has no order and a palette that reshuffles between opens is one
-    /// nobody's fingers can learn.
-    func watchedPaletteWorkspaces() -> [PaletteWatchedWorkspace] {
-        workspaceViewerNames()
-            .map { id, names in
-                PaletteWatchedWorkspace(
-                    id: id,
-                    label: sidebarDisplayLabel(for: id),
-                    viewerNames: names
-                )
-            }
-            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
-    }
-
-    /// The roster grouped by workspace, for the sidebar's count badges.
-    private func workspaceViewerNames() -> [String: [String]] {
-        var names: [String: [String]] = [:]
-        for viewer in remoteViewers {
-            var seen = Set<String>()
-            for pane in viewer.sessions {
-                guard let project = workspace.descriptor(for: pane)?.project,
-                      seen.insert(project).inserted
-                else { continue }
-                names[project, default: []].append(viewer.machineName)
-            }
-        }
-        return names
     }
 
     /// Applies the `relay_device_token` row — split out of the read so a
@@ -5202,7 +5025,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// How the panel reaches the screen. `nil` — production, always — is
     /// `RemoteTakeoverPanel.present(over:)`.
     ///
-    /// A test seam, `viewerDisconnector`'s pattern, and deliberately *only*
+    /// A test seam, `viewerLister`'s pattern, and deliberately *only*
     /// about presentation: the decision to present is never gated on it. It
     /// exists because feeding a roster to a controller now presents a real
     /// borderless screen-covering key window, which eight presence tests

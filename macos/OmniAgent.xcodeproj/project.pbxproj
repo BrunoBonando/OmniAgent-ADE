@@ -146,7 +146,6 @@
 		BA524298D19449349AF94799 /* PredictiveEchoModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */; };
 		9F80A299E51B449B8FE08F85 /* RemoteSessionPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */; };
 		ED065822AC7D4933D3BA1842 /* RemoteFolderBrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FACF31E844CC8E93921698E /* RemoteFolderBrowserTests.swift */; };
-		493F0889AAA54E95AC9DD5C7 /* RemotePresenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */; };
 		10000000000000000000028 /* UsageAnalyticsRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000029 /* UsageAnalyticsRecorder.swift */; };
 		10000000000000000000029 /* UsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002A /* UsageView.swift */; };
 		1000000000000000000002A /* InspectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002B /* InspectorView.swift */; };
@@ -373,7 +372,6 @@
 		A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoModelTests.swift; sourceTree = "<group>"; };
 		531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionPickerTests.swift; sourceTree = "<group>"; };
 		4FACF31E844CC8E93921698E /* RemoteFolderBrowserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderBrowserTests.swift; sourceTree = "<group>"; };
-		88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePresenceTests.swift; sourceTree = "<group>"; };
 		20000000000000000000029 /* UsageAnalyticsRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalyticsRecorder.swift; sourceTree = "<group>"; };
 		2000000000000000000002A /* UsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageView.swift; sourceTree = "<group>"; };
 		2000000000000000000002B /* InspectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorView.swift; sourceTree = "<group>"; };
@@ -623,7 +621,6 @@
 				A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */,
 				531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */,
 				4FACF31E844CC8E93921698E /* RemoteFolderBrowserTests.swift */,
-				88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */,
 				3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */,
 				4C7A2E5FB9D14038A220260C /* WorkspacesHeaderMenusTests.swift */,
 				4C7A2E5FB9D14038A2202612 /* WorkspaceCustomizationsTests.swift */,
@@ -944,7 +941,6 @@
 				BA524298D19449349AF94799 /* PredictiveEchoModelTests.swift in Sources */,
 				9F80A299E51B449B8FE08F85 /* RemoteSessionPickerTests.swift in Sources */,
 				ED065822AC7D4933D3BA1842 /* RemoteFolderBrowserTests.swift in Sources */,
-				493F0889AAA54E95AC9DD5C7 /* RemotePresenceTests.swift in Sources */,
 				3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */,
 				4C7A2E5FB9D14038A220260D /* WorkspacesHeaderMenusTests.swift in Sources */,
 				4C7A2E5FB9D14038A2202613 /* WorkspaceCustomizationsTests.swift in Sources */,

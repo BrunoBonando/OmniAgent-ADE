@@ -155,8 +155,8 @@ final class RemoteActivityLog: ObservableObject {
     /// The daemon writes RFC 3339 (`chrono`'s `to_rfc3339()`: a numeric
     /// `+00:00` offset, fractional seconds only when the original timestamp
     /// actually has sub-second precision) — the same shape
-    /// `RemoteTakeoverPanel.RemoteConnectionInfo`/`RemoteViewersView` already
-    /// parse the daemon's other RFC 3339 fields with: try without fractional
+    /// `RemoteTakeoverPanel.RemoteConnectionInfo` already
+    /// parses the daemon's other RFC 3339 fields with: try without fractional
     /// seconds first, then with, so both shapes of the same format decode.
     ///
     /// `nonisolated`: everything declared inside `RemoteActivityLog`

@@ -88,11 +88,6 @@ enum PaletteAction: Equatable {
     /// A Help page — the privacy policy or the third-party notices — opened
     /// in the default browser.
     case openLegal(LegalDocument)
-    /// The list of machines watching one of this Mac's shared workspaces,
-    /// each with a Disconnect (the phase 2 spec's §5) — the popover the count
-    /// beside the globe opens, reached by name instead. A row only while
-    /// somebody is actually watching, since an empty list is a dead end.
-    case showRemoteViewers(workspaceID: String)
     /// **Connect to ‹machine›** (2026-09-01 remote environment sharing spec
     /// §6/§10, Task 24/25) — swaps this window onto that machine's daemon
     /// through the connect ceremony. Disabled (`PaletteCommand.isEnabled`)
@@ -230,16 +225,6 @@ struct PaletteWorkspace: Equatable {
     let id: String
     let label: String
     let path: String?
-}
-
-/// One of this Mac's shared workspaces with a machine on it right now (the
-/// phase 2 spec's §5), for the "Viewers of …" row. The names travel with it
-/// so the row can be found by typing the machine's name, which is what a
-/// person reaches for when they want to disconnect one.
-struct PaletteWatchedWorkspace: Equatable {
-    let id: String
-    let label: String
-    let viewerNames: [String]
 }
 
 /// One online machine from the relay's device list — the spotlight's own
@@ -391,9 +376,6 @@ struct CommandPaletteModel: Equatable {
         /// of its shared sessions becomes a row (the remote-session-control
         /// spec's §4 "Spotlight").
         remoteMachines: [PaletteRemoteMachine] = [],
-        /// This Mac's shared workspaces that somebody is watching right now,
-        /// for the "Viewers of …" rows.
-        watchedWorkspaces: [PaletteWatchedWorkspace] = [],
         /// What the self-update controller is doing, which decides which of
         /// the three update rows is offered.
         updateState: UpdateState = .idle,
@@ -849,30 +831,6 @@ struct CommandPaletteModel: Equatable {
         // Nothing to offer while a check or a download is already running.
         case .checking, .updating:
             break
-        }
-        // Who is watching this Mac, and the Disconnect that goes with it —
-        // the same standing rule: the popover behind the sidebar's count is a
-        // place, so it is findable by name rather than only by knowing which
-        // glyph to click. Only workspaces with somebody on them, since the
-        // popover of an empty list has nothing to show.
-        for watched in watchedWorkspaces where !watched.viewerNames.isEmpty {
-            commands.append(
-                PaletteCommand(
-                    id: "viewers:\(watched.id)",
-                    title: "Viewers of \(watched.label)",
-                    detail: watched.viewerNames.count == 1
-                        ? "1 machine"
-                        : "\(watched.viewerNames.count) machines",
-                    action: .showRemoteViewers(workspaceID: watched.id),
-                    // Found by the machine's own name too: "disconnect Air"
-                    // is what someone types when a Mac has to go.
-                    keywords: "viewers watching remote disconnect "
-                        + watched.viewerNames.joined(separator: " "),
-                    section: .places,
-                    subtitle: "Remote Control",
-                    symbol: "display"
-                )
-            )
         }
         // The Help menu's two pages. Everything navigable is findable, and a
         // privacy policy nobody can locate is the same as not having one.

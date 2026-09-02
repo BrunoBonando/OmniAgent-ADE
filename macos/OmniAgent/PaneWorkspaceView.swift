@@ -1531,7 +1531,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         if let card = filmstripItems[sessionID] {
             card.title = containers[sessionID]?.header.title ?? ""
             card.detail = filmstripDetail(for: sessionID)
-            card.viewerNames = remoteViewerNames[sessionID] ?? []
         }
         updateAccessibilityLabels()
         // The card's subtitle names its *session*, and the derived `Session N`
@@ -2123,7 +2122,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
             card.frame = item.frame
             card.title = containers[item.id]?.header.title ?? ""
             card.detail = filmstripDetail(for: item.id)
-            card.viewerNames = remoteViewerNames[item.id] ?? []
             card.status = containers[item.id]?.status
             card.isSelected = hero.contains(item.id)
         }
@@ -2137,18 +2135,6 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
     /// What a card says under the pane's name. The engine for a terminal —
     /// which agent is driving is the thing you pick a pane *by* — and what it
     /// holds for the kinds that have no engine.
-    /// Which machines are watching each pane, pane id -> machine names — the
-    /// phase 2 spec's §5, pushed in by `WorkspaceWindowController` whenever
-    /// the daemon's roster changes. Held here rather than read through a
-    /// closure so a card added later is correct without anyone re-pushing.
-    private var remoteViewerNames: [String: [String]] = [:]
-
-    func setRemoteViewerNames(_ names: [String: [String]]) {
-        guard names != remoteViewerNames else { return }
-        remoteViewerNames = names
-        for (id, card) in filmstripItems { card.viewerNames = names[id] ?? [] }
-    }
-
     private func filmstripDetail(for sessionID: String) -> String {
         guard let descriptor = descriptors[sessionID] else { return "" }
         switch descriptor.kind {

@@ -387,62 +387,28 @@ final class RemoteTakeoverPanelTests: XCTestCase {
         XCTAssertNil(controller.takeoverPanel)
     }
 
-    /// **A kick the daemon refused leaves the panel exactly where it was.**
-    ///
-    /// The popover's Disconnect used to filter the machine out of the roster
-    /// before the daemon had answered, which drove `liveConnection` to `nil`
-    /// and dismissed the panel — so a refused kick read as "they are off your
-    /// Mac" while they were still on it, and stayed wrong if the follow-up
-    /// re-read failed too.
-    func testARefusedKickLeavesThePanelExactlyWhereItWas() throws {
-        let controller = try makeController(socket: "panel-refused-kick")
-        defer { controller.close() }
-        controller.viewerLister = { $0(.success([self.air])) }
-        controller.viewerDisconnector = { _, completion in
-            completion(.failure(NSError(domain: "test", code: 1)))
-        }
-        controller.applyRemoteViewers([air])
-        XCTAssertNotNil(controller.takeoverPanel)
-
-        controller.disconnectViewer(air.viewerID)
-
-        XCTAssertNotNil(
-            controller.takeoverPanel,
-            "the daemon refused, so the machine is still driving this Mac"
-        )
-        XCTAssertNotNil(controller.liveRemoteConnection)
-    }
-
-    /// Even a kick the daemon *accepted* does not take the panel down by
-    /// itself: the roster does. The app must not predict what the daemon is
-    /// about to report.
-    func testAnAcceptedKickStillWaitsForTheRosterBeforeThePanelGoes() throws {
-        let controller = try makeController(socket: "panel-accepted-kick")
-        defer { controller.close() }
-        controller.viewerDisconnector = { _, completion in completion(.success(())) }
-        controller.applyRemoteViewers([air])
-
-        controller.disconnectViewer(air.viewerID)
-        XCTAssertNotNil(controller.takeoverPanel, "only the daemon's next roster ends the takeover")
-
-        controller.applyRemoteViewers([])
-        XCTAssertNil(controller.takeoverPanel)
-    }
-
     /// A kick that blocks makes the app's copy of `remote_control_blocked`
     /// stale — the daemon wrote it — so the controller re-reads. Without
     /// this, a later Unblock of a *different* id computed from the stale copy
     /// silently forgave this machine.
+    ///
+    /// `onBlocked` is the exact closure production wires
+    /// (`WorkspaceWindowController.syncTakeoverPanel`:
+    /// `panel.onBlocked = { remoteSharing.refreshBlockedList() }`) — calling
+    /// it directly exercises that wiring without a live socket; `Block`
+    /// actually reaching the daemon is `RemoteTakeoverPanelTests
+    /// .testBlockSendsDisconnectWithBlockingAndAsksForAReRead`'s job, at the
+    /// panel level with `SpyConnection`.
     func testAKickThatBlocksReReadsTheBlockedRowTheDaemonJustWrote() throws {
         let client = FakeSettingsClient()
         let controller = try makeController(client: client, socket: "panel-kick-blocked")
         defer { controller.close() }
-        controller.viewerDisconnector = { _, completion in completion(.success(())) }
+        controller.applyRemoteViewers([air])
         XCTAssertEqual(controller.settingsView.blockedViewerIDs, [])
 
-        // What the daemon does as part of the kick.
+        // What the daemon does as part of a real Block.
         client.seedRow("remote_control_blocked", #"["v-air"]"#)
-        controller.disconnectViewer(air.viewerID)
+        controller.takeoverPanel?.onBlocked?()
 
         XCTAssertEqual(controller.settingsView.blockedViewerIDs, ["v-air"])
     }

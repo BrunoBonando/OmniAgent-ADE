@@ -657,8 +657,7 @@ final class SessionConnection {
     /// (`RemoteSharingModel.unblock`).
     ///
     /// `block` defaults to `true`, which is what `DisconnectViewer` meant
-    /// before the field existed — phase 2's popover Disconnect keeps its
-    /// behaviour without naming it. Local-only, like `listViewers`.
+    /// before the field existed. Local-only, like `listViewers`.
     func disconnectViewer(
         viewerID: String,
         block: Bool = true,

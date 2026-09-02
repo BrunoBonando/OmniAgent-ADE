@@ -36,9 +36,6 @@ final class PaneFilmstripItemView: NSView {
     private static let labelHeight: CGFloat = 16
     private static let detailHeight: CGFloat = 14
     private static let gap: CGFloat = 9
-    /// The remote mark on the detail line, and the space after it.
-    private static let viewerGlyphSize: CGFloat = 11
-    private static let viewerGlyphGap: CGFloat = 4
     /// Where both lines of text start — the mark's column, plus the mark.
     private static var textX: CGFloat { inset + markSize + gap }
 
@@ -88,41 +85,6 @@ final class PaneFilmstripItemView: NSView {
         }
     }
 
-    /// The machines watching *this* pane right now (the phase 2 spec's §5).
-    /// While there are any, they take the detail line over from the engine:
-    /// the workspace row's count answers "how many are watching", and this is
-    /// the only place that answers "which pane" — which is the thing you need
-    /// before you decide to disconnect anyone.
-    var viewerNames: [String] = [] {
-        didSet {
-            guard viewerNames != oldValue else { return }
-            viewerGlyph.isHidden = viewerNames.isEmpty
-            needsDisplay = true
-        }
-    }
-
-    /// What the second line actually prints — the engine, or the machines
-    /// while any are watching.
-    var detailText: String {
-        viewerNames.isEmpty ? detail : viewerNames.joined(separator: ", ")
-    }
-
-    /// The remote mark that leads the line while a machine is watching. A
-    /// subview rather than something `draw` paints: an `NSImageView` tints a
-    /// template symbol and lands it the right way up in a flipped view, both
-    /// of which are fiddly by hand for a 12pt glyph.
-    private(set) var viewerGlyph: NSImageView = {
-        let view = NSImageView(
-            image: NSImage(
-                systemSymbolName: "display",
-                accessibilityDescription: "Watched from another Mac"
-            ) ?? NSImage()
-        )
-        view.contentTintColor = PaneFilmstripItemView.detailColor
-        view.isHidden = true
-        return view
-    }()
-
     var status: RemoteSessionStatus? {
         didSet {
             guard status != oldValue else { return }
@@ -145,7 +107,6 @@ final class PaneFilmstripItemView: NSView {
         layer?.cornerRadius = Self.cornerRadius
         layer?.cornerCurve = .continuous
         addSubview(mark)
-        addSubview(viewerGlyph)
         setAccessibilityRole(.button)
     }
 
@@ -168,14 +129,6 @@ final class PaneFilmstripItemView: NSView {
             y: contentTop + ((Self.labelHeight - Self.markSize) / 2).rounded(),
             width: Self.markSize,
             height: Self.markSize
-        )
-        // Under it, leading the detail line — where the engine's first letter
-        // would otherwise start.
-        viewerGlyph.frame = CGRect(
-            x: Self.textX,
-            y: contentTop + Self.labelHeight + ((Self.detailHeight - Self.viewerGlyphSize) / 2).rounded(),
-            width: Self.viewerGlyphSize,
-            height: Self.viewerGlyphSize
         )
     }
 
@@ -227,16 +180,13 @@ final class PaneFilmstripItemView: NSView {
                 .foregroundColor: Self.labelColor,
             ]
         )
-        let secondLine = detailText
+        let secondLine = detail
         guard !secondLine.isEmpty else { return }
-        // The machines start after the remote mark `layout` seats; the engine
-        // has the whole line to itself.
-        let detailIndent = viewerNames.isEmpty ? 0 : Self.viewerGlyphSize + Self.viewerGlyphGap
         (secondLine as NSString).draw(
             in: CGRect(
-                x: textX + detailIndent,
+                x: textX,
                 y: contentTop + Self.labelHeight,
-                width: max(0, width - detailIndent),
+                width: width,
                 height: Self.detailHeight
             ),
             withAttributes: [
