@@ -1,25 +1,39 @@
 #!/usr/bin/env bash
-# Bumps the native app's date-based build version (YYYY.M.D+NNN) in
-# macos/OmniAgent.xcodeproj. The version is split across two keys because
-# `2026.8.3+001` is not a legal CFBundleShortVersionString (Apple: one to
-# three period-separated integers): the date triple is MARKETING_VERSION and
-# the same-day counter is CURRENT_PROJECT_VERSION. SettingsView.swift's
-# `NativeAppVersion.current()` recombines them into the full string for the
-# About tab. Applied to every app-target build configuration that carries the
-# keys (Debug/Release/Preview); the test target and project-level configs
+# Bumps the native app's sequential MAJOR.MINOR.PATCH version in
+# macos/OmniAgent.xcodeproj. MARKETING_VERSION and CURRENT_PROJECT_VERSION
+# are always set to the same value -- a plain X.Y.Z is already a legal
+# CFBundleShortVersionString *and* CFBundleVersion, so there's no need to
+# split them the way the old date-based scheme (YYYY.M.D+NNN) did.
+#
+# Default: patch += 1 (a deploy).            1.6.234 -> 1.6.235
+# --minor: minor += 1, patch resets to 1.     1.6.234 -> 1.7.1
+# --major: major += 1, minor+patch reset.     1.6.234 -> 2.0.1
+#
+# Applied to every app-target build configuration that carries the keys
+# (Debug/Release/Preview); the test target and project-level configs
 # deliberately do not carry a user-visible version.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-XCODE_PROJECT="${1:-$ROOT_DIR/macos/OmniAgent.xcodeproj/project.pbxproj}"
+bump="patch"
+XCODE_PROJECT=""
+for arg in "$@"; do
+  case "$arg" in
+    --major) bump="major" ;;
+    --minor) bump="minor" ;;
+    *) XCODE_PROJECT="$arg" ;;
+  esac
+done
 
-python3 - "$XCODE_PROJECT" <<'PY'
-import datetime
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+XCODE_PROJECT="${XCODE_PROJECT:-$ROOT_DIR/macos/OmniAgent.xcodeproj/project.pbxproj}"
+
+python3 - "$XCODE_PROJECT" "$bump" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 xcode_project = Path(sys.argv[1])
+bump = sys.argv[2]
 EXPECTED_XCODE_CONFIGS = 3
 
 text = xcode_project.read_text()
@@ -32,12 +46,28 @@ if len(marketing) != EXPECTED_XCODE_CONFIGS or len(current) != EXPECTED_XCODE_CO
         " -- did a build configuration get added or removed?"
     )
 
-today = datetime.date.today()
-prefix = f"{today.year}.{today.month}.{today.day}"
-patch = int(current[0]) + 1 if marketing[0].strip() == prefix else 1
+# Both keys must already be the same X.Y.Z triple -- that's how the new
+# scheme is told apart from the old date-based one (where CURRENT_PROJECT_VERSION
+# was a bare daily counter like "2", not a dotted triple). Anything else means
+# this is the first bump under the new scheme: seed at 1.0.0.
+triple = r"(\d+)\.(\d+)\.(\d+)"
+mkt_match = re.fullmatch(triple, marketing[0].strip())
+cur_match = re.fullmatch(triple, current[0].strip())
+if mkt_match and cur_match and mkt_match.groups() == cur_match.groups():
+    major, minor, patch = (int(g) for g in mkt_match.groups())
+else:
+    major, minor, patch = 1, 0, 0
 
-for key, value in (("MARKETING_VERSION", prefix), ("CURRENT_PROJECT_VERSION", str(patch))):
-    text = re.sub(rf"^(\s*{key} = )[^;]*;", lambda m: f"{m.group(1)}{value};", text, flags=re.MULTILINE)
+if bump == "major":
+    major, minor, patch = major + 1, 0, 1
+elif bump == "minor":
+    minor, patch = minor + 1, 1
+else:
+    patch += 1
+
+version = f"{major}.{minor}.{patch}"
+for key in ("MARKETING_VERSION", "CURRENT_PROJECT_VERSION"):
+    text = re.sub(rf"^(\s*{key} = )[^;]*;", lambda m: f"{m.group(1)}{version};", text, flags=re.MULTILINE)
 xcode_project.write_text(text)
-print(f"{prefix}+{patch:03d}")
+print(version)
 PY

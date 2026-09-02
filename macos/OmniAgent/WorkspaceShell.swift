@@ -22,32 +22,41 @@ import AppKit
 
 // MARK: - Destinations
 
-/// The content area's destinations. Home and To Do List are the redesign's
-/// placeholder screens; `terminals` is the Desk — the pane workspace — which
+/// The content area's destinations. To Do List is still the redesign's
+/// placeholder screen; `terminals` is the Desk — the pane workspace — which
 /// no longer has a sidebar row and is reached through the sessions tree, the
 /// menu and the palette.
 enum WorkspaceDestination: String, CaseIterable {
     case home
     case todo
+    /// Usage and activity (the flow layout spec's §6), a nav row of its own
+    /// between To Do List and Search.
+    case insights
     case terminals
-    /// The in-window Settings page (2026-08-27) — reached by the gear, ⌘,
-    /// and the palette, not by a sidebar row.
+    /// The in-window Settings page (2026-08-27) — reached by the sidebar's
+    /// foot, ⌘, and the palette.
     case settings
 
     var title: String {
         switch self {
         case .home: return "Home"
         case .todo: return "To Do List"
+        case .insights: return "Insights"
         case .terminals: return "Desk"
         case .settings: return "Settings"
         }
     }
 
-    /// The palette row's second line.
+    /// The palette row's second line. "under development" is reserved for the
+    /// places that really are one — a destination with a screen says what is
+    /// on it instead.
     var subtitle: String {
         switch self {
-        case .home, .todo, .settings: return "under development"
+        case .home: return "start a session"
+        case .todo: return "under development"
+        case .insights: return "usage and activity"
         case .terminals: return "no session"
+        case .settings: return "the app's settings"
         }
     }
 
@@ -57,6 +66,7 @@ enum WorkspaceDestination: String, CaseIterable {
         switch self {
         case .home: return "house"
         case .todo: return "checklist"
+        case .insights: return "chart.bar.xaxis"
         case .terminals: return "rectangle.split.2x2"
         case .settings: return "gearshape"
         }
@@ -70,19 +80,21 @@ enum WorkspaceDestination: String, CaseIterable {
 /// `.darkAqua` with its own near-black ground, and the design specifies exact
 /// values that must not drift with the user's system accent.
 enum ShellPalette {
-    /// The sidebar's ground *below macOS 26*: a top-lit blue-black sheet, so
-    /// the column reads as glass over the flat `content` black rather than a
-    /// second slab of it. There is no Liquid Glass to ask for that far back,
-    /// and every stand-in dims rather than refracts, so this paints the look
-    /// by hand.
+    /// The review panel's ground *below macOS 26*: a top-lit blue-black sheet,
+    /// so the panel reads as glass over the ground rather than a second slab
+    /// of it. There is no Liquid Glass to ask for that far back, and every
+    /// stand-in dims rather than refracts, so this paints the look by hand.
     ///
-    /// On 26 and later the column is a real `NSGlassEffectView` wearing
-    /// `sidebarGlassTint` instead — see `NavigationSidebarView.glassHost`.
+    /// On 26 and later the panel is a real `NSGlassEffectView` wearing
+    /// `sidebarGlassTint` instead — see `ReviewPanelView.glassHost`. The
+    /// sidebar wore both until 2026-09-02, when the window became one
+    /// `PaneGroundView` in the blue they produced and the column stopped
+    /// painting anything of its own.
     static let sidebarGlass = NSGradient(
         colors: [srgb(28, 32, 52), srgb(13, 14, 22)]
     )!
 
-    /// The same blue, washed *over* the glass column rather than painted as
+    /// The same blue, washed *over* the glass panel rather than painted as
     /// its ground. Translucent where `sidebarGlass` is opaque: a solid
     /// gradient over Liquid Glass is paint, and hides the material it is there
     /// to tint.
@@ -97,24 +109,13 @@ enum ShellPalette {
     /// and reads slate rather than blue.
     ///
     /// So these are solved against those two readings. Measured off the built
-    /// app, the column now runs `44, 52, 87` down to `29, 32, 52` — the
-    /// design's hue and its top-lighting, and a foot that lands on
-    /// `sidebarGlass`'s own head,
-    /// sitting lighter than the flat token because it is glass and meant to
-    /// look like it. Deep navy over a bright material, and the alpha falls with
-    /// the light — the sheet shows through most where the column is dimmest.
+    /// app, the column ran `44, 52, 87` down to `29, 32, 52` — the design's
+    /// hue and its top-lighting, and a foot that lands on `sidebarGlass`'s own
+    /// head, sitting lighter than the flat token because it is glass and meant
+    /// to look like it. Those two readings are now `PaneGroundView.colors`, the
+    /// whole window's ground. Deep navy over a bright material, and the alpha
+    /// falls with the light — the sheet shows through most where it is dimmest.
     static let sidebarGlassTint = [srgb(30, 38, 84, 0.70), srgb(6, 9, 30, 0.52)]
-
-    /// The line down the column's trailing edge — where the sidebar stops and
-    /// the pane black starts.
-    ///
-    /// Grey rather than a lighter step of the column's blue, which would read
-    /// as the column's own edge rather than as a border between two things.
-    /// It is not the glass sheet's rim either: that rim exists, and measured
-    /// `64, 65, 71` at its brightest against the pane black, which is present
-    /// without being a separation. This is drawn on every OS — below macOS 26
-    /// there is no sheet and so no rim at all.
-    static let sidebarEdge = srgb(107, 107, 107)
 
     static let ink = srgb(240, 240, 244)
     static let inkNav = srgb(176, 176, 186)
@@ -165,6 +166,18 @@ enum ShellPalette {
     static let cardFillHover = NSColor(white: 1, alpha: 0.085)
     static let cardStroke = NSColor(white: 1, alpha: 0.09)
     static let cardStrokeHover = NSColor(white: 1, alpha: 0.2)
+    /// `ContentCardView`'s fill — a shade under `cardFill`, because this one
+    /// is a whole page's ground rather than a card sitting on a page, and the
+    /// same 4% over that much of the window reads as a second grey slab
+    /// instead of a lift off the ground.
+    static let contentCardFill = NSColor(white: 1, alpha: 0.035)
+    /// The content card's own colour: an indigo wash over its Liquid Glass,
+    /// top-lit like the ground but a hue off it, so the card reads as its own
+    /// tinted pane rather than a lighter patch of the same navy. Translucent
+    /// for the reason `sidebarGlassTint` is — paint over glass hides the
+    /// material. The theme, when there is one (Bruno, 2026-09-02), swaps this
+    /// pair from outside; nothing else about the card is colour.
+    static let contentCardTint = [srgb(124, 136, 255, 0.10), srgb(70, 80, 150, 0.06)]
     static let backRowFill = NSColor(white: 1, alpha: 0.03)
     static let fieldFill = NSColor(white: 1, alpha: 0.05)
     static let dashedStroke = NSColor(white: 1, alpha: 0.16)
@@ -604,11 +617,6 @@ final class ShellDotsView: NSView {
 /// under the window's title strip — the fade then starts at the window's
 /// very top edge — while its content still rests below the strip.
 final class ShellScrollView: NSScrollView {
-    /// The strip a page's fade should cover, plus the room past it in which
-    /// content finishes dissolving — generous, so the dissolve is a thing
-    /// you see, not a hairline (2026-08-28: 26pt read as nothing).
-    static let pageFade = WorkspaceTitleBarView.height + 96
-
     private let topFade: CGFloat
     private let topInset: CGFloat
     private var fadeMask: CAGradientLayer?
@@ -1092,14 +1100,23 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     }
 }
 
-/// The blue a glass column wears — the sidebar's, and the review panel's on
-/// the other side of the window. Its backing layer *is* the gradient, so the
-/// wash resizes with the sheet and there is no sublayer frame for anyone to
-/// keep in step.
+/// The wash a glass sheet wears: the review panel's blue (the sidebar's too,
+/// until 2026-09-02) by default, the content card's own indigo by
+/// `contentCardTint`. Its backing layer *is* the gradient, so the wash resizes
+/// with the sheet and there is no sublayer frame for anyone to keep in step.
 final class ShellGlassTintView: NSView {
+    /// Top stop first.
+    let colors: [NSColor]
+
+    init(colors: [NSColor] = ShellPalette.sidebarGlassTint) {
+        self.colors = colors
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
     override func makeBackingLayer() -> CALayer {
         let layer = CAGradientLayer()
-        layer.colors = ShellPalette.sidebarGlassTint.map(\.cgColor)
+        layer.colors = colors.map(\.cgColor)
         // (0.5, 1) is the top of a layer's y-up unit space — the direction
         // `NSGradient`'s -90° gave the opaque gradient this replaces.
         layer.startPoint = CGPoint(x: 0.5, y: 1)
@@ -1107,19 +1124,91 @@ final class ShellGlassTintView: NSView {
         return layer
     }
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-    }
-
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
+// MARK: - Content card
+
+/// The content column's contents, as one inset floating card: the Desk, Home,
+/// To Do List, Settings and the docked Settings panel are all children of it,
+/// and `PaneGroundView`'s gradient shows around it as the window's ground
+/// (flow-layout spec §2 — the way Wispr Flow floats its content).
+///
+/// It masks its bounds, and that is what makes the inset read as a card rather
+/// than as padding: anything a page draws past the rounded edge — a pane's
+/// glow, a scroll view's overflow — stops there instead of running out onto
+/// the ground. What is left outside it belongs to the title strip above it:
+/// the window buttons, the bar's own controls and the session name.
+final class ContentCardView: NSView {
+    /// How far the card sits inside the content column on three sides. Its
+    /// top is `WorkspaceTitleBarView.height` instead: the strip above it is
+    /// the window's chrome, not a margin.
+    static let inset: CGFloat = 12
+    static let cornerRadius: CGFloat = 14
+
+    /// The card is tinted Liquid Glass (Bruno, 2026-09-02): a sheet under
+    /// every page, wearing `ShellPalette.contentCardTint` — the same
+    /// glass-plus-wash the review panel and the sidebar's cards are built
+    /// from, so the window is one material. Below macOS 26 there is no glass
+    /// to ask for: the wash sits on the flat `contentCardFill` instead, with
+    /// the hairline the glass rim would otherwise draw. Sized in `layout`
+    /// for the reason `ReviewPanelView` gives.
+    private(set) var glassHost: NSView?
+    let glassTint = ShellGlassTintView(colors: ShellPalette.contentCardTint)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        guard let layer else { return }
+        layer.cornerRadius = Self.cornerRadius
+        layer.cornerCurve = .continuous
+        layer.masksToBounds = true
+        if let glass = WorkspaceGlass.sheet(cornerRadius: Self.cornerRadius, content: glassTint) {
+            glassHost = glass
+            addSubview(glass)
+        } else {
+            layer.backgroundColor = ShellPalette.contentCardFill.cgColor
+            layer.borderWidth = 1
+            layer.borderColor = ShellPalette.cardStroke.cgColor
+            addSubview(glassTint)
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func layout() {
+        super.layout()
+        glassHost?.frame = bounds
+        glassTint.frame = NSRect(origin: .zero, size: bounds.size)
+    }
+}
+
+/// The window's split view, with a seam that paints nothing: the sidebar and
+/// the content column both sit on the one `PaneGroundView` behind the split,
+/// and AppKit's thin divider would draw the line between two slabs that are
+/// no longer two. Vertical and thin, as `NSSplitViewController` would have
+/// made its own.
+final class GroundSplitView: NSSplitView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isVertical = true
+        dividerStyle = .thin
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override var dividerColor: NSColor { .clear }
+}
+
 // MARK: - Placeholder
 
-/// What the content half shows for a destination that has no screen yet.
-/// Home and To Do List are deliberately empty in this step of the redesign.
+/// What the content half shows for a destination that has no screen yet —
+/// To Do List, and only it: Insights stood here until its own page landed
+/// (flow-layout spec §6).
 final class WorkspacePlaceholderView: NSView {
     private let titleField = ShellFont.label(font: ShellFont.ui(16, .semibold), color: ShellPalette.ink)
     private let subtitleField = ShellFont.label(font: ShellFont.ui(12.5), color: ShellPalette.inkMuted)
@@ -1127,9 +1216,9 @@ final class WorkspacePlaceholderView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         // Paints nothing. Home and To Do List are the *same* surface the Desk
-        // is — `PaneGroundView` behind this view, running from the window's top
-        // edge — and an opaque fill here made switching destination look like
-        // switching apps.
+        // is — `ContentCardView` behind this view, whose fill is every page's
+        // ground since 2026-09-01 — and an opaque fill here made switching
+        // destination look like switching apps.
         let stack = NSStackView(views: [titleField, subtitleField])
         stack.orientation = .vertical
         stack.alignment = .centerX

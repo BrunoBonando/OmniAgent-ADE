@@ -33,6 +33,39 @@ final class HomeDropdownTests: XCTestCase {
         XCTAssertEqual(view.visibleTitlesForTesting.count, 3)
     }
 
+    /// A heading over rows the query emptied goes with them — a heading over
+    /// nothing reads as a bug.
+    func testAHeaderGoesWhenTheQueryFiltersAwayEveryRowUnderIt() {
+        let view = makeView([
+            HomeDropdown.Section(header: "Branches", rows: [
+                HomeDropdown.Row(title: "main") {},
+            ]),
+            HomeDropdown.Section(header: "Sessions", rows: [
+                HomeDropdown.Row(title: "migrate") {},
+            ]),
+        ])
+        XCTAssertEqual(view.visibleHeadersForTesting, ["Branches", "Sessions"])
+
+        view.setQueryForTesting("migr")
+        XCTAssertEqual(view.visibleHeadersForTesting, ["Sessions"])
+
+        view.setQueryForTesting("")
+        XCTAssertEqual(view.visibleHeadersForTesting, ["Branches", "Sessions"])
+    }
+
+    /// But a section that never had rows is not that case: its heading *is*
+    /// the content — the account popover's heading is the account's name — so
+    /// `allSatisfy` over no rows must not vacuously hide it.
+    func testAHeaderOverASectionWithNoRowsStaysOnScreen() {
+        let view = makeView([
+            HomeDropdown.Section(header: "Not signed in", rows: []),
+            HomeDropdown.Section(rows: [HomeDropdown.Row(title: "Sign in") {}]),
+        ])
+
+        XCTAssertEqual(view.visibleHeadersForTesting, ["Not signed in"])
+        XCTAssertEqual(view.visibleTitlesForTesting, ["Sign in"])
+    }
+
     /// The query-dependent rows (the branch picker's "Create ‘x’ from main")
     /// appear only while something is typed, and rebuild on every change —
     /// so the offered name always matches what is in the field.

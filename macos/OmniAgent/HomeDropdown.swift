@@ -67,13 +67,31 @@ enum HomeDropdown {
         /// than centred on the anchor. `nil`: the anchor's bounds.
         positioning: ((NSSize) -> NSRect)? = nil
     ) -> HomeDropdownView {
+        let content = present(from: anchor, preferredEdge: preferredEdge, positioning: positioning) { dismiss -> HomeDropdownView in
+            let view = HomeDropdownView(searchPlaceholder: searchPlaceholder, dismiss: dismiss)
+            view.sections = sections
+            return view
+        }
+        content.focusSearch()
+        return content
+    }
+
+    /// The popover alone, for content that is not the rows-and-search
+    /// dropdown — the account menu. `make` is handed the closure that closes
+    /// the popover, so the content can dismiss on a press the way the rows
+    /// do; it runs before the popover is shown, so what it returns is what
+    /// the popover is sized to.
+    @discardableResult
+    static func present<Content: NSView>(
+        from anchor: NSView,
+        preferredEdge: NSRectEdge = .minY,
+        positioning: ((NSSize) -> NSRect)? = nil,
+        make: (_ dismiss: @escaping () -> Void) -> Content
+    ) -> Content {
         current?.performClose(nil)
         let popover = NSPopover()
         current = popover
-        let content = HomeDropdownView(searchPlaceholder: searchPlaceholder) { [weak popover] in
-            popover?.performClose(nil)
-        }
-        content.sections = sections
+        let content = make { [weak popover] in popover?.performClose(nil) }
         let controller = NSViewController()
         controller.view = content
         popover.contentViewController = controller
@@ -90,7 +108,6 @@ enum HomeDropdown {
         // chip rather than over it.
         let rect = positioning?(content.fittingSize) ?? anchor.bounds
         popover.show(relativeTo: rect, of: anchor, preferredEdge: preferredEdge)
-        content.focusSearch()
         return content
     }
 }
@@ -115,10 +132,17 @@ final class HomeDropdownView: NSView, NSTextFieldDelegate {
         rowViews.filter { !$0.isHidden }.map(\.title)
     }
 
+    /// The same for the section headings, which carry text of their own — an
+    /// account popover's heading *is* the account's name, so whether it is on
+    /// screen is a fact worth asserting.
+    var visibleHeadersForTesting: [String] {
+        headerViews.filter { !$0.view.isHidden }.map(\.title)
+    }
+
     private let search = NSTextField()
     private let list = NSStackView()
     private var rowViews: [HomeDropdownRowView] = []
-    private var headerViews: [(view: NSView, rows: [HomeDropdownRowView])] = []
+    private var headerViews: [(view: NSView, title: String, rows: [HomeDropdownRowView])] = []
     private let dismiss: () -> Void
 
     init(searchPlaceholder: String, dismiss: @escaping () -> Void) {
@@ -218,7 +242,9 @@ final class HomeDropdownView: NSView, NSTextFieldDelegate {
                 let view = makeRow(row)
                 sectionRows.append(view)
             }
-            if let header { headerViews.append((header, sectionRows)) }
+            if let header, let title = section.header {
+                headerViews.append((header, title, sectionRows))
+            }
         }
         applyFilter()
     }
@@ -244,10 +270,13 @@ final class HomeDropdownView: NSView, NSTextFieldDelegate {
         for view in rowViews where !extraRowViews.contains(where: { $0 === view }) {
             view.isHidden = !query.isEmpty && !view.title.localizedCaseInsensitiveContains(query)
         }
-        // A header with every row filtered out goes too — a heading over
-        // nothing reads as a bug.
-        for (header, rows) in headerViews {
-            header.isHidden = rows.allSatisfy(\.isHidden)
+        // A header whose rows the query all filtered out goes with them — a
+        // heading over nothing reads as a bug. A section that *never had* rows
+        // is not that case: its heading is the content (the account popover's
+        // heading is the account's name), so `allSatisfy` on an empty array
+        // must not be allowed to vacuously hide it.
+        for (header, _, rows) in headerViews {
+            header.isHidden = !rows.isEmpty && rows.allSatisfy(\.isHidden)
         }
         // The query-dependent rows are rebuilt from scratch each keystroke;
         // they are few and their content is what changed.
@@ -331,4 +360,145 @@ final class HomeDropdownRowView: ShellRowView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
+// MARK: - Account menu
+
+/// The avatar's popover: who is signed in, the plan they are on with the one
+/// way up from it, then the door to the account — laid out like Flow's, whose
+/// rows are not a list of commands, which is why this is not a
+/// `HomeDropdownView` with a search field over three rows. "Log out" is
+/// deliberately not here: it lives behind Manage account (Settings ›
+/// Accounts), because it is not something anyone does every day and a menu
+/// one click from the pointer is not where it belongs (Bruno, 2026-09-02).
+final class AccountMenuView: NSView {
+    static let width: CGFloat = 340
+    /// What the plan row says. Plans do not exist yet (2026-09-02): everyone
+    /// is on Free, and "Upgrade" opens the pricing page rather than an
+    /// in-app checkout, so the menu already has the shape it will keep.
+    static let freePlanTitle = "You are on OmniAgent Free"
+    static let upgradeURL = URL(string: "https://www.omni-agent.ai/pricing")!
+
+    var onUpgrade: (() -> Void)?
+    var onManageAccount: (() -> Void)?
+    var onSignIn: (() -> Void)?
+
+    private let avatar = AccountAvatarView(diameter: 44)
+    private let nameField = ShellFont.label(font: ShellFont.ui(15, .semibold), color: ShellPalette.ink)
+    private let emailField = ShellFont.label(font: ShellFont.ui(13), color: ShellPalette.inkSecondary)
+    private let planField = ShellFont.label(font: ShellFont.ui(14, .semibold), color: ShellPalette.ink)
+    private let upgradeButton = PaneApprovalButton(title: "Upgrade", isPrimary: true, tint: ShellPalette.accent)
+    private var rows: [HomeDropdownRowView] = []
+    private let dismiss: () -> Void
+
+    init(name: String?, email: String?, picture: NSImage?, signedIn: Bool, dismiss: @escaping () -> Void) {
+        self.dismiss = dismiss
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        // Who. Signed in with no name on file, the email stands in for it
+        // rather than printing twice.
+        let title = signedIn ? (name ?? email ?? "Account") : "Not signed in"
+        avatar.apply(name: signedIn ? name : nil, picture: signedIn ? picture : nil)
+        nameField.stringValue = title
+        emailField.stringValue = email ?? ""
+        emailField.isHidden = !signedIn || email == nil || email == title
+        for field in [nameField, emailField] { field.lineBreakMode = .byTruncatingMiddle }
+        let identityText = NSStackView(views: [nameField, emailField])
+        identityText.orientation = .vertical
+        identityText.alignment = .leading
+        identityText.spacing = 3
+        let identity = NSStackView(views: [avatar, identityText])
+        identity.orientation = .horizontal
+        identity.alignment = .centerY
+        identity.spacing = 14
+        identity.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        // The cross-axis insets of a horizontal stack are advisory — measured,
+        // the row came out 6pt short — so the heights are stated: the avatar
+        // plus its insets, the pill plus its.
+        identity.heightAnchor.constraint(equalToConstant: 44 + 32).isActive = true
+
+        var sections: [NSView] = [identity]
+
+        // The plan, and the way up from it — only for an account that has one.
+        if signedIn {
+            planField.stringValue = Self.freePlanTitle
+            planField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            upgradeButton.translatesAutoresizingMaskIntoConstraints = false
+            upgradeButton.onClick = { [weak self] in
+                self?.onUpgrade?()
+                self?.dismiss()
+            }
+            let plan = NSStackView(views: [planField, upgradeButton])
+            plan.orientation = .horizontal
+            plan.alignment = .centerY
+            plan.spacing = 12
+            plan.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
+            plan.heightAnchor.constraint(equalToConstant: 26 + 28).isActive = true
+            sections.append(plan)
+        }
+
+        // The door(s). Signed out, "Sign in" comes first: it is the one
+        // thing to do; the account page still opens, and offers the same.
+        let doors = NSStackView(views: [])
+        doors.orientation = .vertical
+        doors.spacing = 1
+        // 8 + the row's own 10 puts its text on the 18pt line the sections
+        // above share.
+        doors.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        if !signedIn {
+            doors.addArrangedSubview(row("Sign in") { [weak self] in self?.onSignIn?() })
+        }
+        doors.addArrangedSubview(row("Manage account") { [weak self] in self?.onManageAccount?() })
+        for view in doors.arrangedSubviews {
+            view.widthAnchor.constraint(equalTo: doors.widthAnchor, constant: -16).isActive = true
+        }
+        sections.append(doors)
+
+        let column = NSStackView(views: [])
+        column.orientation = .vertical
+        column.spacing = 0
+        column.translatesAutoresizingMaskIntoConstraints = false
+        for (index, section) in sections.enumerated() {
+            if index > 0 { column.addArrangedSubview(ShellSeparator()) }
+            column.addArrangedSubview(section)
+        }
+        for view in column.arrangedSubviews {
+            view.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        }
+        addSubview(column)
+        NSLayoutConstraint.activate([
+            column.topAnchor.constraint(equalTo: topAnchor),
+            column.leadingAnchor.constraint(equalTo: leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: trailingAnchor),
+            column.bottomAnchor.constraint(equalTo: bottomAnchor),
+            widthAnchor.constraint(equalToConstant: Self.width),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// A dropdown row without an icon — Flow's account rows are plain text —
+    /// that closes the menu after its action, as the dropdown's own do.
+    private func row(_ title: String, action: @escaping () -> Void) -> HomeDropdownRowView {
+        let view = HomeDropdownRowView(icon: nil, title: title, isCurrent: false, isEnabled: true)
+        view.onPress = { [dismiss] in
+            action()
+            dismiss()
+        }
+        rows.append(view)
+        return view
+    }
+
+    // MARK: Test seams
+
+    var visibleTitlesForTesting: [String] { rows.map(\.title) }
+    var nameTextForTesting: String { nameField.stringValue }
+    var emailTextForTesting: String? { emailField.isHidden ? nil : emailField.stringValue }
+    /// `nil` while signed out — there is no plan row to read.
+    var planTextForTesting: String? { upgradeButton.superview == nil ? nil : planField.stringValue }
+    var avatarModeForTesting: AccountAvatarView.AvatarMode { avatar.mode }
+    func pressRowForTesting(_ title: String) { rows.first { $0.title == title }?.onPress?() }
+    func pressUpgradeForTesting() { upgradeButton.onClick?() }
 }

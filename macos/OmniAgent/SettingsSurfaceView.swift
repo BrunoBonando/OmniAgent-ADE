@@ -9,13 +9,14 @@ import AppKit
 // GitHub is connected, and the button that changes each); every other
 // section still says "Under development".
 //
-// The panel is one object in two roles (2026-08-28): the sidebar gear
-// *offers* it beside itself, tip on the gear, as the menu; a pick slides it
-// up to *dock* under the title as the page's sidebar; the gear again brings
-// it back down to pick anew. `WorkspaceWindowController` owns it and places
-// it — it floats over the content area, not inside this page — so the same
-// glass travels between the two places instead of a popup standing in for
-// it. ⌘, and the palette open the page on whatever section it was last on.
+// The panel docks under the title as the page's sidebar and is gone
+// everywhere else. `WorkspaceWindowController` owns it and places it — it
+// floats over the content area, not inside this page — so it slides into
+// place with the page rather than being rebuilt with it. The sidebar's
+// Settings row, ⌘, and the palette all open the page on whatever section it
+// was last on. (Until 2026-09-01 it had a second role: the sidebar gear
+// *offered* it beside itself, tip on the gear, as a menu. The gear went with
+// the account row — the flow layout spec's §3 — and the offer with it.)
 
 /// The Settings page's sections, in the design's order. `startsGroup` marks
 /// the gaps in the list: General…Accessibility, Customize/Model providers,
@@ -70,29 +71,18 @@ enum SettingsSection: String, CaseIterable {
 /// rows, on a rounded sheet of untinted glass, hugging its rows rather than
 /// the window's height. The picked row wears the app's accent — the blue the
 /// left menu's gradient is made of — solidly enough to read as "you are
-/// here"; offered off the page it wears none, since nothing is.
+/// here". Placed by frame (its owner slides it about), sized `frameWidth` ×
+/// `contentHeight`.
 ///
-/// The tip it wears on the gear is the session hover card's drop, as that
-/// card actually draws it: a dark rounded square turned 45°, half tucked
-/// under the card, so the half that shows is a point. (The hover card's
-/// glass-on-glass merge is behind `CommandPaletteController.glassEnabled`,
-/// which is off — and a rotated `NSGlassEffectView` inside a layout engine
-/// trips AppKit's `_nsis_frameInEngine` assertion, so it stays off here
-/// too.) Like the hover card's shell, this view keeps a `lane` on its left
-/// for the drop, and the card sits at `x = lane`. Placed by frame (its
-/// owner slides it about), sized `frameWidth` × `contentHeight`.
+/// It wore a drop on its left until 2026-09-01, pointing at the sidebar gear
+/// that offered it; the gear went with the account row (the flow layout
+/// spec's §3) and the drop — and the lane it needed — with it.
 final class SettingsSidebarView: NSView, NSTextFieldDelegate {
     /// The card's width.
     static let width: CGFloat = 220
     static let cornerRadius: CGFloat = 16
-    // The drop, in the hover card's own numbers.
-    static let dropSize: CGFloat = 13
-    static let dropCorner: CGFloat = 2
-    static var tipSpan: CGFloat { dropSize * 2.squareRoot() }
-    static let neck: CGFloat = 4
-    static var lane: CGFloat { tipSpan + neck + 1 }
-    /// The whole view: the lane and the card.
-    static var frameWidth: CGFloat { lane + width }
+    /// The whole view, which is now the card and nothing else.
+    static var frameWidth: CGFloat { width }
 
     private(set) var rows: [SidebarNavRowView] = []
     let search = NSTextField()
@@ -109,8 +99,6 @@ final class SettingsSidebarView: NSView, NSTextFieldDelegate {
     /// `minimumCardSize` for the same reason.
     private var measuredHeight: CGFloat = 120
     private let card: NSView
-    private let dropBox = NSView()
-    private let drop = NSView()
 
     override init(frame frameRect: NSRect) {
         let seed = NSSize(width: Self.width, height: 120)
@@ -193,23 +181,9 @@ final class SettingsSidebarView: NSView, NSTextFieldDelegate {
             stack.bottomAnchor.constraint(equalTo: body.bottomAnchor),
         ])
 
-        drop.wantsLayer = true
-        drop.layer?.cornerRadius = Self.dropCorner
-        drop.layer?.backgroundColor = NSColor(srgbRed: 0.12, green: 0.13, blue: 0.20, alpha: 0.92).cgColor
-        addSubview(dropBox)
-        // Above the drop, covering its inner half; the rows over the card.
+        // The rows over the card.
         addSubview(card)
         addSubview(body)
-        dropBox.addSubview(drop)
-        drop.frame = NSRect(
-            x: (Self.tipSpan - Self.dropSize) / 2,
-            y: (Self.tipSpan - Self.dropSize) / 2,
-            width: Self.dropSize,
-            height: Self.dropSize
-        )
-        drop.frameCenterRotation = 45
-        dropBox.frame = NSRect(x: 0, y: 0, width: Self.tipSpan, height: Self.tipSpan)
-        dropBox.isHidden = true
 
         // The card can never be shorter than its rows: its content pins are
         // `.required`, and an animated frame passes through every height
@@ -231,9 +205,9 @@ final class SettingsSidebarView: NSView, NSTextFieldDelegate {
     override func layout() {
         super.layout()
         card.frame = NSRect(
-            x: Self.lane,
+            x: 0,
             y: 0,
-            width: max(bounds.width - Self.lane, Self.width),
+            width: max(bounds.width, Self.width),
             height: max(bounds.height, contentHeight)
         )
         body.frame = card.frame
@@ -242,31 +216,11 @@ final class SettingsSidebarView: NSView, NSTextFieldDelegate {
     /// The height the rows on show need.
     var contentHeight: CGFloat { measuredHeight }
 
-    /// Puts the drop's centre at `y` in this view's coordinates, in the
-    /// lane, kept off the rounded corners.
-    func pointTip(at y: CGFloat) {
-        let half = Self.tipSpan / 2
-        let clamped = min(max(y, Self.cornerRadius + half), bounds.height - Self.cornerRadius - half)
-        dropBox.frame.origin = NSPoint(x: 0, y: clamped - half)
-    }
-
-    var isTipVisible: Bool {
-        get { !dropBox.isHidden }
-        set { dropBox.isHidden = !newValue }
-    }
-
-    /// Where the drop points, in this view's coordinates — for the tests.
-    var tipCenterYForTesting: CGFloat { dropBox.frame.midY }
-
-    /// `nil` lights no row: offered off the page, nothing is "here".
+    /// `nil` lights no row — nothing is "here".
     func apply(selected: SettingsSection?) {
         for (row, section) in zip(rows, SettingsSection.allCases) {
             row.apply(selected: section == selected)
         }
-    }
-
-    func focusSearch() {
-        window?.makeFirstResponder(search)
     }
 
     func clearSearch() {
@@ -301,13 +255,15 @@ final class SettingsSidebarView: NSView, NSTextFieldDelegate {
 /// The Settings page's content: the picked section's name and body in
 /// Home's centred 880pt column, clear of the docked panel on the left —
 /// from the top, though, not from a share of the height. Transparent, like
-/// Home: `PaneGroundView` behind it is the ground. The panel itself and the
+/// Home: `ContentCardView` behind it is the ground. The panel itself and the
 /// "Settings" title above it are the controller's — see `settingsPanel` and
 /// `refreshTitle`.
 final class SettingsSurfaceView: NSView {
-    /// The room the docked panel takes on the left: the title's 12pt inset,
-    /// the panel, and a gutter.
+    /// The room the docked panel takes on the left: the card's own 12pt
+    /// inset, the panel, and a gutter.
     static let panelRoom = 12 + SettingsSidebarView.width + 16
+    /// How far the section's heading sits below the card's top edge.
+    private static let headingAir: CGFloat = 104
 
     /// The picked section's name, heading its content.
     let titleField = ShellFont.label(font: ShellFont.ui(22, .semibold), color: ShellPalette.ink)
@@ -539,11 +495,10 @@ final class SettingsSurfaceView: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(column)
 
-        let scroll = ShellScrollView(
-            documentView: content,
-            topFade: ShellScrollView.pageFade,
-            topInset: WorkspaceTitleBarView.height
-        )
+        // No fade and no inset: the page starts at the content card's own edge
+        // now (flow-layout spec §2), so there is no title strip left for
+        // content to dissolve under as it scrolls away.
+        let scroll = ShellScrollView(documentView: content)
         addSubview(scroll)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.panelRoom),
@@ -551,11 +506,12 @@ final class SettingsSurfaceView: NSView {
             scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            // Past the fade band, so the heading is whole at rest.
-            column.topAnchor.constraint(
-                equalTo: content.topAnchor,
-                constant: ShellScrollView.pageFade - WorkspaceTitleBarView.height + 8
-            ),
+            // The heading's air under the card's top edge. The same air it
+            // had before the card: the page ran up under the title strip and
+            // started past the fade band, which put the heading exactly here.
+            // Stated rather than derived, since the fade it was derived from
+            // is gone.
+            column.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.headingAir),
             column.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -36),
             column.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             column.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 24),

@@ -18,6 +18,8 @@
 #   ./scripts/rebuild-app.sh                 # notarize when credentials exist
 #   ./scripts/rebuild-app.sh --no-notarize   # skip the two Apple round-trips
 #   ./scripts/rebuild-app.sh --keep-daemon   # leave the running PTY daemon up
+#   ./scripts/rebuild-app.sh --minor         # minor release: 1.6.234 -> 1.7.1
+#   ./scripts/rebuild-app.sh --major         # major release: 1.6.234 -> 2.0.1
 #
 # The PTY daemon is restarted along with the app. It is a binary inside the
 # bundle being replaced, so leaving it running means the install silently keeps
@@ -27,11 +29,14 @@ set -euo pipefail
 
 notarize=auto
 keep_daemon=no
+version_bump=patch
 for arg in "$@"; do
   case "$arg" in
     --no-notarize) notarize=no ;;
     --keep-daemon) keep_daemon=yes ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --minor) version_bump=minor ;;
+    --major) version_bump=major ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "$0: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -70,7 +75,9 @@ if ! mkdir "$lock" 2>/dev/null; then
 fi
 trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
-version="$(./scripts/bump-build-version.sh)"
+bump_flag=""
+[ "$version_bump" = patch ] || bump_flag="--$version_bump"
+version="$(./scripts/bump-build-version.sh $bump_flag)"
 ./macos/build.sh universal
 
 app="$ROOT_DIR/macos/.build/Build/Products/Release/OmniAgent.app"

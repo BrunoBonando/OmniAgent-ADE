@@ -30,14 +30,29 @@ enum PaletteAction: Equatable {
     /// the next step of it in place. The panel handles it itself and stays
     /// open — it is a button on the list, not a place to go.
     case showMore(PaletteSection)
-    /// One of the sidebar's destinations — Home, To Do List, Desk, Settings
-    /// — reachable by typing its name.
+    /// One of the sidebar's destinations — Home, To Do List, Insights, Desk,
+    /// Settings — reachable by typing its name.
     case showDestination(WorkspaceDestination)
     /// One Settings section, straight from the spotlight — the page opens
-    /// on it, the way the gear's panel would.
+    /// on it, the way the docked panel's own row would.
     case showSettingsSection(SettingsSection)
+    /// One tab of the Insights page (the flow-layout spec's §8). A row of
+    /// its own per tab, the same reasoning as the Settings sections above:
+    /// "Activity" is a place you go, and the destination row only ever
+    /// lands on the tab the page happens to be showing.
+    case showInsightsTab(InsightsTab)
     /// Opens the focused branch/session setup flow for the current workspace.
     case startBranchSession
+    /// The title bar's two popovers (the flow layout spec's §1). Rows of their
+    /// own because the bell and the avatar are 24pt controls in the window's
+    /// chrome — the standing rule says everything navigable is findable, and
+    /// these two have no other name to type.
+    case showNotifications
+    case showAccountMenu
+    /// The sidebar foot's Help row (the flow layout spec's §3), which pops
+    /// the app's Help menu — a row of its own for the same reason the two
+    /// above are: a symbol at the bottom of a column has no name to type.
+    case showHelp
     /// Settings › Accounts' one button, in its two states. Only ever one of
     /// these is a row — whichever the account makes true — because the
     /// spotlight offers what you can do now, not both halves of a toggle.
@@ -599,9 +614,9 @@ struct CommandPaletteModel: Equatable {
                 symbol: "arrow.triangle.branch"
             )
         )
-        // The sidebar's own three buttons, by name. `allCases` rather than a
-        // hand-written list: a fourth destination should appear here the day
-        // it appears in the sidebar, not the day someone remembers this.
+        // The sidebar's own destinations, by name. `allCases` rather than a
+        // hand-written list: a new destination should appear here the day it
+        // appears in the sidebar, not the day someone remembers this.
         for destination in WorkspaceDestination.allCases {
             commands.append(
                 PaletteCommand(
@@ -615,6 +630,64 @@ struct CommandPaletteModel: Equatable {
                 )
             )
         }
+        // The two tabs *inside* the Insights page — the standing rule again:
+        // the items in a page are findable as soon as the page is real.
+        // `allCases`, so a third tab appears here the day it is added.
+        for tab in InsightsTab.allCases {
+            commands.append(
+                PaletteCommand(
+                    id: "insights:\(tab.title.lowercased())",
+                    title: "Insights › \(tab.title)",
+                    detail: nil,
+                    action: .showInsightsTab(tab),
+                    keywords: "insights usage tokens sessions activity timeline",
+                    section: .places,
+                    subtitle: "Insights",
+                    symbol: "chart.bar.xaxis"
+                )
+            )
+        }
+        // The sidebar foot's other row. Settings is already a destination
+        // row above; Help is a menu, and this is the only other place its
+        // name is written down.
+        commands.append(
+            PaletteCommand(
+                id: "sidebar:help",
+                title: "Help",
+                detail: nil,
+                action: .showHelp,
+                keywords: "help support docs privacy notices",
+                section: .places,
+                subtitle: "Sidebar",
+                symbol: "questionmark.circle"
+            )
+        )
+        // The title bar's own pair, which are places in the window's chrome
+        // rather than in the sidebar — hence the "Title bar" subtitle.
+        commands.append(
+            PaletteCommand(
+                id: "titlebar:notifications",
+                title: "Notifications",
+                detail: nil,
+                action: .showNotifications,
+                keywords: "notifications bell alerts",
+                section: .places,
+                subtitle: "Title bar",
+                symbol: "bell"
+            )
+        )
+        commands.append(
+            PaletteCommand(
+                id: "titlebar:account",
+                title: "Account",
+                detail: nil,
+                action: .showAccountMenu,
+                keywords: "account profile avatar me",
+                section: .places,
+                subtitle: "Title bar",
+                symbol: "person.crop.circle"
+            )
+        )
         // Every Settings section, findable by its own name or by "settings".
         for section in SettingsSection.allCases {
             commands.append(

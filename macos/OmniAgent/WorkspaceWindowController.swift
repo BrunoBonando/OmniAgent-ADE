@@ -229,33 +229,43 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// window's, and they must all read one value.
     let updateController = UpdateController()
     /// The content half of the split: the pane workspace and the placeholder
-    /// both live here permanently, and the destination only toggles which is
-    /// hidden. Unmounting `PaneWorkspaceView` would tear down live SwiftTerm
-    /// views and their PTY attachment along with it.
-    /// The column's ground as well as its container: a `PaneGroundView` paints
-    /// the grey sheet behind the title-bar strip *and* the pane grid, so the
-    /// two are one continuous surface (the title bar itself paints nothing).
-    private let contentContainer = PaneGroundView()
+    /// both live here permanently — in `contentCard` — and the destination
+    /// only toggles which is hidden. Unmounting `PaneWorkspaceView` would tear
+    /// down live SwiftTerm views and their PTY attachment along with it.
+    /// The column paints nothing: the window's one `PaneGroundView` (the
+    /// split's container, `installSplitView`) shows through it, around the
+    /// content — the title-bar strip above the card, and the card's 12pt margin
+    /// on the other three sides (the title bar itself paints nothing) — and
+    /// through the sidebar beside it, as one sheet. The Desk and the pages sit
+    /// on `contentCard`, which floats on that ground.
+    private let contentContainer = NSView()
+    /// The inset card inside that ground, and the parent of every destination:
+    /// the Desk, the placeholder, Home, Settings and the docked Settings
+    /// panel all fill it exactly (flow-layout spec §2). Internal, not private:
+    /// the tests measure the card itself, and there is only one of it.
+    let contentCard = ContentCardView()
     private let placeholder = WorkspacePlaceholderView()
     /// Home's real screen — the placeholder now only covers To Do List.
     /// Internal, not private: the tests assert its routing.
     let homeView = HomeSurfaceView()
-    /// The in-window Settings page — the gear, ⌘, and the palette land here.
+    /// The Insights page (flow-layout spec §6): usage KPIs and charts on one
+    /// tab, the agent-activity timeline across every session on the other.
+    /// Internal, not private: the tests assert its routing and its lanes.
+    let insightsView = InsightsSurfaceView()
+    /// The in-window Settings page — the sidebar's foot, ⌘, and the palette
+    /// land here.
     let settingsView = SettingsSurfaceView()
-    /// Settings' floating panel of sections, one object in two roles: the
-    /// gear *offers* it beside itself, tip on the gear, as the menu; a pick
-    /// slides it up to *dock* under the "Settings" title as the page's
-    /// sidebar; the gear again brings it back down. Floats over the content
-    /// area, placed by frame — see `placeSettingsPanel`.
+    /// Settings' panel of sections: docked under the "Settings" title as the
+    /// page's sidebar, and gone everywhere else. Floats over the content
+    /// area, placed by frame — see `placeSettingsPanel`. (It had a third
+    /// role until 2026-09-01: the sidebar's gear *offered* it beside itself
+    /// as a menu. The gear went with the account row, and the offer with it.)
     let settingsPanel = SettingsSidebarView()
-    enum SettingsPanelPlace { case hidden, docked, offered }
+    enum SettingsPanelPlace { case hidden, docked }
     private(set) var settingsPanelPlace: SettingsPanelPlace = .hidden
-    /// Where the panel is headed, in the content area's coordinates — an
+    /// Where the panel is headed, in the content card's coordinates — an
     /// animated `frame` reads mid-flight, so the tests read this.
     private(set) var settingsPanelTarget: NSRect = .zero
-    /// While offered: a click anywhere but the panel or the gear, or Esc,
-    /// puts it back.
-    private var settingsPanelMonitor: Any?
     /// The window's drawn title bar — window buttons, the sidebar toggle, the
     /// review toggle. Replaced the `NSToolbar`, and paints nothing: it is a
     /// transparent overlay across the top of the split, so each column's own
@@ -797,12 +807,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // the window will go, instead of trusting a default.
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(
-            srgbRed: 8 / 255,
-            green: 10 / 255,
-            blue: 14 / 255,
-            alpha: 1
-        )
+        // The ground's own foot, so a live-resize sliver is the ground and
+        // not a black edge on a blue window.
+        window.backgroundColor = PaneGroundView.colors[1]
         // Not a taste: below this the pane area cannot hold one terminal worth
         // reading, and every sizing rule in `PaneWorkspaceView` assumes it can.
         // The sidebar is counted at its own floor rather than at zero, so the
@@ -999,9 +1006,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Search fires the spotlight and is deliberately not a selection —
         // the same panel ⌃Space and ⌘K raise.
         shellSidebar.onSearch = { [weak self] in self?.showCommandPalette(nil) }
-        // The gear offers the Settings panel (or puts it back): the pick is
-        // what opens the page.
-        shellSidebar.onOpenSettings = { [weak self] in self?.toggleSettingsPanel() }
+        // The foot's Settings row opens the page on whatever section it was
+        // last left on, the way ⌘, and the menu item do.
+        shellSidebar.onOpenSettings = { [weak self] in
+            guard let self else { return }
+            showSettings(section: settingsView.section)
+        }
+        // And its Help row drops the app's own Help menu on itself.
+        shellSidebar.onHelp = { [weak self] in self?.showHelpMenu() }
         // The remote live-session widget's one button (spec §6, Task 25) —
         // the widget does not end the session itself, only asks.
         shellSidebar.remoteSessionWidget.onEndSession = { [weak self] in self?.disconnectRemote() }
@@ -1058,7 +1070,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsView.onCheckForUpdates = { [weak self] in self?.updateController.checkForUpdates() }
         settingsView.onDownloadUpdate = { [weak self] in self?.updateController.downloadUpdate() }
         settingsView.onRestartUpdate = { [weak self] in self?.updateController.restartToUpdate() }
-        shellSidebar.onOpenAccount = { [weak self] in self?.showSettings(section: .accounts) }
         // The header's plus menu: a session in any listed workspace, or a
         // brand new workspace from a folder (the one flow where a chooser is
         // the whole point).
@@ -1348,13 +1359,41 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func installSplitView(on window: NSWindow) {
         workspace.translatesAutoresizingMaskIntoConstraints = false
         placeholder.translatesAutoresizingMaskIntoConstraints = false
-        contentContainer.addSubview(workspace)
-        contentContainer.addSubview(placeholder)
-        contentContainer.addSubview(homeView)
-        contentContainer.addSubview(settingsView)
+        // The card first, then the destinations inside it: the ground shows
+        // around it on three sides, and the title strip is the fourth.
+        contentContainer.addSubview(contentCard)
+        NSLayoutConstraint.activate([
+            contentCard.topAnchor.constraint(
+                equalTo: contentContainer.topAnchor,
+                constant: WorkspaceTitleBarView.height
+            ),
+            contentCard.leadingAnchor.constraint(
+                equalTo: contentContainer.leadingAnchor,
+                constant: ContentCardView.inset
+            ),
+            contentCard.trailingAnchor.constraint(
+                equalTo: contentContainer.trailingAnchor,
+                constant: -ContentCardView.inset
+            ),
+            contentCard.bottomAnchor.constraint(
+                equalTo: contentContainer.bottomAnchor,
+                constant: -ContentCardView.inset
+            ),
+        ])
+        contentCard.addSubview(workspace)
+        contentCard.addSubview(placeholder)
+        contentCard.addSubview(homeView)
+        contentCard.addSubview(insightsView)
+        contentCard.addSubview(settingsView)
+        // Picking Activity is what makes the timeline current — the page's
+        // own version of the review panel's tab-activation rule.
+        insightsView.onSelectTab = { [weak self] tab in
+            guard tab == .activity else { return }
+            self?.syncPageInsights()
+        }
         // The floating panel rides above every destination.
         settingsPanel.isHidden = true
-        contentContainer.addSubview(settingsPanel)
+        contentCard.addSubview(settingsPanel)
         settingsPanel.onSelect = { [weak self] section in self?.showSettings(section: section) }
         settingsView.onSignIn = { [weak self] in self?.signInToAccount() }
         settingsView.onLogOut = { [weak self] in self?.logOutOfAccount() }
@@ -1368,29 +1407,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             guard let self, settingsPanelPlace != .hidden else { return }
             placeSettingsPanel(settingsPanelPlace, animated: true)
         }
-        contentContainer.postsFrameChangedNotifications = true
+        // The panel is placed inside the card by frame, and it is the card's
+        // bounds `placeSettingsPanel` measures in — so the card is what it has
+        // to follow, not the column it is inset in.
+        contentCard.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(
             forName: NSView.frameDidChangeNotification,
-            object: contentContainer,
+            object: contentCard,
             queue: .main
         ) { [weak self] _ in
             guard let self, settingsPanelPlace != .hidden else { return }
             placeSettingsPanel(settingsPanelPlace, animated: false)
         }
-        // The pages (Home, Settings) reach the window's top edge and inset
-        // their own scrolling under the title strip, so their content
-        // dissolves under the toolbar; the Desk and the placeholder stop
-        // below it.
-        for view in [workspace, placeholder, homeView, settingsView] as [NSView] {
-            let isPage = view === homeView || view === settingsView
+        // Every destination fills the card exactly. Pages used to reach the
+        // window's top edge and inset their own scrolling under the title
+        // strip; the card's edge is the boundary now, so nothing runs under
+        // the strip and there is one offset — none — for all four.
+        for view in [workspace, placeholder, homeView, insightsView, settingsView] as [NSView] {
             NSLayoutConstraint.activate([
-                view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
-                view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-                view.topAnchor.constraint(
-                    equalTo: contentContainer.topAnchor,
-                    constant: isPage ? 0 : WorkspaceTitleBarView.height
-                ),
-                view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+                view.leadingAnchor.constraint(equalTo: contentCard.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: contentCard.trailingAnchor),
+                view.topAnchor.constraint(equalTo: contentCard.topAnchor),
+                view.bottomAnchor.constraint(equalTo: contentCard.bottomAnchor),
             ])
         }
 
@@ -1404,6 +1442,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let content = NSViewController()
         content.view = contentContainer
         let split = NSSplitViewController()
+        // The seam between the columns paints nothing: both sit on the one
+        // ground below, and a divider of any colour is the line between two
+        // slabs that are no longer two.
+        split.splitView = GroundSplitView()
         // A plain split item, NOT `sidebarWithViewController:`. macOS 26 draws
         // a `.sidebar` item as an inset, rounded, floating slab — the rounded
         // edges Bruno is looking at. Nothing here wanted that chrome: the
@@ -1499,8 +1541,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // leading, trailing but added AFTER split.view so it is above it.
         // `contentViewController` is a plain container now — read the split
         // through `splitController`, never by casting it back.
+        // The ground: one `PaneGroundView` under the sidebar, the strip and
+        // the content column alike, with the card the only thing floating on
+        // it (flow-layout spec §2, amended 2026-09-02).
         let container = NSViewController()
-        container.view = NSView()
+        container.view = PaneGroundView()
         container.addChild(split)
         split.view.translatesAutoresizingMaskIntoConstraints = false
         container.view.addSubview(split.view)
@@ -1531,11 +1576,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
         // Only now: the name is in the content column and the bar is the
         // overlay, so this is the first moment the two share an ancestor —
-        // activating it any earlier throws for having none.
+        // activating it any earlier throws for having none. Both ends: a long
+        // session name used to run straight under the review toggle, the bell
+        // and the avatar, since the field had a leading edge and a centre but
+        // no right-hand wall.
+        sessionTitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         NSLayoutConstraint.activate([
             sessionTitleField.leadingAnchor.constraint(
                 greaterThanOrEqualTo: titleBar.titleClearanceAnchor,
                 constant: 12
+            ),
+            sessionTitleField.trailingAnchor.constraint(
+                lessThanOrEqualTo: titleBar.trailingClearanceAnchor,
+                constant: -12
             ),
         ])
     }
@@ -1551,10 +1604,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Home has a real screen now; the placeholder covers To Do List only.
         homeView.isHidden = destination != .home
         if destination == .home { refreshHomeChips() }
+        // Insights has a real screen too, and its numbers are read on the way
+        // in — never held live, so a page nobody is looking at costs nothing.
+        insightsView.isHidden = destination != .insights
+        if destination == .insights { refreshInsights() }
         settingsView.isHidden = destination != .settings
         // The panel docks with the page and goes with it — and off the page
-        // nothing is "here": the pick is forgotten, so ⌘, and the gear's
-        // offer both start clean.
+        // nothing is "here": the pick is forgotten, so ⌘, and the sidebar's
+        // Settings row both start clean.
         if destination == .settings {
             settingsPanel.apply(selected: settingsView.section)
             // Whatever the section, the page is about to be looked at: the
@@ -1565,10 +1622,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             settingsPanel.apply(selected: nil)
         }
         placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
-        placeholder.isHidden = destination != .todo
-        if destination == .todo { placeholder.show(destination) }
-        // Home and To Do List name no session, so the bar goes blank and its
-        // review toggle goes away entirely.
+        // To Do List is the last destination with no screen of its own, so
+        // the placeholder is now its alone — Insights took its page in the
+        // flow-layout pass.
+        let isPlaceholder = destination == .todo
+        placeholder.isHidden = !isPlaceholder
+        if isPlaceholder { placeholder.show(destination) }
+        // Home, To Do List and Insights name no session, so the bar goes
+        // blank and its review toggle goes away entirely.
         refreshTitle()
         // The review panel reviews the session on screen, and Home/To Do
         // List show no session — collapsed there, and back to the session's
@@ -2945,6 +3006,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         activity.forget(paneID: focused)
         statusSeries.forget(paneID: focused)
         workspace.closePane(focused)
+        // The pane's lane goes with the pane. Both timelines are drawn from
+        // the series just forgotten, and neither redraws itself — without
+        // this a closed pane's lane sits on screen until some *other* pane
+        // reports a status. Guarded inside, so a closed panel and a page
+        // nobody is on both cost nothing.
+        syncReviewPanelInsights()
+        syncPageInsights()
     }
 
     /// ⌘S. Monaco has its own ⌘S while it holds focus, but that only fires
@@ -4177,6 +4245,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             applyDestination(destination)
         case let .showSettingsSection(section):
             showSettings(section: section)
+        case let .showInsightsTab(tab):
+            // The page first, then the tab: showing the destination is what
+            // reads the numbers, and `select` is what feeds the timeline.
+            applyDestination(.insights)
+            insightsView.select(tab)
         case .startBranchSession:
             newSession(nil)
         case .signIn:
@@ -4204,6 +4277,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             beginConnecting(to: machine)
         case .endRemoteSession:
             disconnectRemote()
+        case .showNotifications:
+            showNotifications(nil)
+        case .showAccountMenu:
+            showAccountMenu(nil)
+        case .showHelp:
+            showHelpMenu()
         case .checkForUpdates:
             updateController.checkForUpdates()
         case .downloadUpdate:
@@ -5672,15 +5751,70 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             workspace.descriptor(for: $0)?.group == group
                 && workspace.descriptor(for: $0)?.kind == .terminal
         }
-        let lanes = paneIDs.map { id in
+        reviewPanelInsights.apply(
+            lanes: insightsLanes(for: paneIDs, now: now) { id in
+                // One session's panes: the pane's own name is the whole
+                // title, since the session is the panel's subject.
+                workspace.descriptor(for: id).map(SessionOutline.paneLabel) ?? id
+            },
+            activities: paneIDs.compactMap { activity.activity(for: $0) },
+            now: now
+        )
+    }
+
+    /// The lanes a set of panes makes: each pane's recorded status series as
+    /// drawable segments, titled by the caller. Both Insights surfaces are
+    /// this call — the review panel's tab over one session's panes, the
+    /// Insights page over every session's — and they differ in nothing else.
+    private func insightsLanes(
+        for paneIDs: [String],
+        now: Double,
+        title: (String) -> String
+    ) -> [ReviewPanelInsightsView.Lane] {
+        paneIDs.map { id in
             ReviewPanelInsightsView.Lane(
                 paneID: id,
-                title: workspace.descriptor(for: id).map(SessionOutline.paneLabel) ?? id,
+                title: title(id),
                 segments: statusSeries.segments(for: id, until: now)
             )
         }
-        reviewPanelInsights.apply(
-            lanes: lanes,
+    }
+
+    /// Everything the Insights page shows, read on the way in. The usage
+    /// model is rebuilt from the recorder rather than held — the same
+    /// snapshot-per-open contract `SettingsWindowController.present` states,
+    /// for the same reason: a stale readout is a lie, and a live one is a
+    /// subscription nobody asked for.
+    private func refreshInsights() {
+        let model = UsageViewModel(store: usageRecorder.store, projectDirectory: connection)
+        insightsView.applyInsights(model.insights)
+        insightsView.applyUsage(model: model)
+        syncPageInsights()
+    }
+
+    /// The Insights page's Activity tab: the review panel's timeline over
+    /// **every** terminal pane in the window rather than one session's, lanes
+    /// named "session · pane" because a lane called "Claude 1" says nothing
+    /// once there are five sessions on the tape. Guarded exactly like its
+    /// sibling — off the page, or on the Usage tab, it costs nothing.
+    private func syncPageInsights() {
+        guard destination == .insights, insightsView.selectedTab == .activity else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        let panes = workspace.allPaneIDs.compactMap { workspace.descriptor(for: $0) }
+        // The sidebar's own naming rule, so a lane and the tree can never
+        // print two different names for one session (the derived
+        // `Session N` included).
+        var sessionLabels: [String: String] = [:]
+        for node in SessionOutline.group(panes, focusedPaneID: workspace.focusedPaneID) {
+            for session in node.sessions { sessionLabels[session.id] = session.label }
+        }
+        let paneIDs = panes.filter { $0.kind == .terminal }.map(\.sessionID)
+        insightsView.applyActivity(
+            lanes: insightsLanes(for: paneIDs, now: now) { id in
+                guard let pane = workspace.descriptor(for: id) else { return id }
+                let session = sessionLabels[pane.group] ?? pane.group
+                return "\(session) · \(SessionOutline.paneLabel(pane))"
+            },
             activities: paneIDs.compactMap { activity.activity(for: $0) },
             now: now
         )
@@ -5976,10 +6110,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             status: event.status,
             at: Date().timeIntervalSince1970 * 1000
         )
-        // The Insights tab shows this very event stream: while it is on
-        // screen, each event redraws it (guarded inside to visible+active,
-        // so a closed panel costs nothing).
+        // Both Insights surfaces show this very event stream: while either is
+        // on screen, each event redraws it (guarded inside to visible+active,
+        // so a closed panel and an unvisited page both cost nothing).
         syncReviewPanelInsights()
+        syncPageInsights()
         notifier.record(
             NotificationContext(
                 event: event,
@@ -6018,6 +6153,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     private func persistNotifications(_ entries: [NotificationEntry]) {
+        // Before the write gate, not after: the dot says what is on screen
+        // right now, and an entry recorded while the persisted row is still
+        // being read is as unread as any other.
+        titleBar.notificationsButton.isUnread = NotificationFeed.unreadCount(entries) > 0
         guard notificationsReadCompleted else { return }
         write(NotificationFeedCodec.serialize(entries), to: SettingsKey.notifications)
     }
@@ -6152,7 +6291,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // `refreshAccountSection`. That is the point on the log-out path: a
         // name left standing over a signed-out account is worse than a
         // moment of "Not signed in" over a signed-in one.
-        applyAccountRow(name: nil, pictureURL: "")
+        applyAccountIdentity(name: nil, pictureURL: "")
         if !signedIn { accountDisplayLabel = "" }
     }
 
@@ -6164,19 +6303,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private var avatarFetchesInFlight: Set<String> = []
     /// Who the chip is currently for — what a picture arriving late is
     /// checked against before it is allowed on screen.
-    private var accountRowName: String?
-    private var accountRowPictureURL = ""
+    private var accountName: String?
+    private var accountPictureURL = ""
+    /// The account's email, kept from the same `auth_account_email` read the
+    /// Settings section already makes — the account popover prints it, and a
+    /// second read of a row this one already has in hand would be one more
+    /// place for the two to disagree.
+    private var accountEmail: String?
 
-    /// Hands the sidebar's account chip its identity, and fetches the
-    /// picture behind `pictureURL` when there is one and it is not cached.
+    /// Hands the title bar's avatar — the one place the account shows since
+    /// the sidebar's chip was removed (the flow layout spec's §3) — its
+    /// identity, and fetches the picture behind `pictureURL` when there is
+    /// one and it is not cached.
     /// An empty URL, an unparseable one, or bytes that are not an image all
-    /// leave the chip on its initials-or-glyph avatar — a complete state
+    /// leave the avatar on its initials-or-glyph circle — a complete state
     /// rather than a placeholder, so nothing here needs to fail loudly.
-    private func applyAccountRow(name: String?, pictureURL: String) {
+    private func applyAccountIdentity(name: String?, pictureURL: String) {
         let url = pictureURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        accountRowName = name
-        accountRowPictureURL = url
-        shellSidebar.accountRow.apply(name: name, picture: avatarCache[url])
+        accountName = name
+        accountPictureURL = url
+        titleBar.accountButton.apply(name: name, picture: avatarCache[url])
         guard avatarCache[url] == nil, !url.isEmpty, !avatarFetchesInFlight.contains(url),
               let parsed = URL(string: url)
         else { return }
@@ -6188,10 +6334,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 self.avatarFetchesInFlight.remove(url)
                 guard let image else { return }
                 self.avatarCache[url] = image
-                // The chip may have moved on while the bytes were in flight
+                // The avatar may have moved on while the bytes were in flight
                 // — a log-out, or a different account signed in behind it.
-                guard self.accountRowPictureURL == url else { return }
-                self.shellSidebar.accountRow.apply(name: self.accountRowName, picture: image)
+                guard self.accountPictureURL == url else { return }
+                self.titleBar.accountButton.apply(name: self.accountName, picture: image)
             }
         }.resume()
     }
@@ -6228,6 +6374,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let signedIn = signedInRaw == "true"
             settingsStore.get(SettingsKey.authAccountEmail) { [weak self] emailResult in
                 guard let self, case .success(let email) = emailResult else { return }
+                accountEmail = signedIn ? email : nil
                 settingsStore.get(SettingsKey.authGithubLogin) { [weak self] githubResult in
                     guard let self, case .success(let githubLogin) = githubResult else { return }
                     settingsView.applyAccount(email: email, signedIn: signedIn, githubLogin: githubLogin)
@@ -6246,7 +6393,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                                 .first { !$0.isEmpty }
                             accountDisplayLabel = signedIn ? (display ?? "") : ""
-                            applyAccountRow(
+                            applyAccountIdentity(
                                 name: signedIn ? display : nil,
                                 pictureURL: signedIn ? (picture ?? "") : ""
                             )
@@ -6255,6 +6402,117 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 }
             }
         }
+    }
+
+    // MARK: - Title bar popovers (flow layout §4)
+
+    /// The bell. `HomeDropdown` rather than an `NSMenu` for the reason every
+    /// other popover in this app is one: the rows are the app's own, in its
+    /// own palette, and a system menu here would read as somebody else's
+    /// chrome bolted to the strip.
+    @objc func showNotifications(_ sender: Any?) {
+        presentNotifications()
+    }
+
+    /// The twin `showNotifications` calls, returning the view it presented so
+    /// a test can read the rows without a popover it cannot open.
+    @discardableResult
+    func presentNotifications() -> HomeDropdownView {
+        let now = Date().timeIntervalSince1970 * 1000
+        // ponytail: HomeDropdownView does not scroll; 20 newest until it does.
+        let entries = Array(notifier.entries.prefix(20))
+        var sections: [HomeDropdown.Section] = []
+        if entries.isEmpty {
+            sections.append(
+                HomeDropdown.Section(
+                    header: "Notifications",
+                    rows: [HomeDropdown.Row(title: "No notifications yet", isEnabled: false) {}]
+                )
+            )
+        } else {
+            sections.append(
+                HomeDropdown.Section(
+                    header: "Notifications",
+                    rows: entries.map { entry in
+                        HomeDropdown.Row(
+                            icon: Self.statusDot(entry.status),
+                            title: [
+                                entry.sessionLabel ?? entry.title,
+                                NotificationFeed.subtitle(for: entry.status),
+                                NotificationFeed.relativeTime(entry.createdAt, now: now),
+                            ].joined(separator: " · ")
+                        ) { [weak self] in
+                            self?.run(.focusPane(sessionID: entry.sessionID))
+                        }
+                    }
+                )
+            )
+            sections.append(
+                HomeDropdown.Section(rows: [
+                    HomeDropdown.Row(
+                        icon: HomeDropdown.symbol("checkmark.circle"),
+                        title: "Mark all as read"
+                    ) { [weak self] in self?.notifier.markAllRead() },
+                    HomeDropdown.Row(
+                        icon: HomeDropdown.symbol("trash"),
+                        title: "Clear all"
+                    ) { [weak self] in self?.notifier.clear() },
+                ])
+            )
+        }
+        let view = HomeDropdown.show(
+            sections,
+            searchPlaceholder: "Search notifications…",
+            from: titleBar.notificationsButton
+        )
+        // Seeing the feed is what makes it read — the same rule the web
+        // panel kept. After presenting, so the rows above still show which
+        // ones were new when they were built.
+        notifier.markAllRead()
+        return view
+    }
+
+    /// `circle.fill` in the status's own dot colour. Baked into the image
+    /// rather than left to the row: `HomeDropdownRowView` tints every
+    /// template icon with the shell's ink, and a status dot in the wrong
+    /// colour says nothing at all.
+    private static func statusDot(_ status: RemoteSessionStatus) -> NSImage? {
+        guard let base = HomeDropdown.symbol("circle.fill") else { return nil }
+        let tinted = NSImage(size: base.size, flipped: false) { rect in
+            base.draw(in: rect)
+            ShellDotsView.color(for: status).set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.isTemplate = false
+        return tinted
+    }
+
+    /// The avatar. Who is signed in, the plan they are on and the way up
+    /// from it, then the door to the account (`AccountMenuView`). No "Log
+    /// out": that is behind Manage account, where Settings › Accounts keeps
+    /// it — not something anyone does every day (Bruno, 2026-09-02). Signed
+    /// out, the plan row goes and "Sign in" leads.
+    @objc func showAccountMenu(_ sender: Any?) {
+        presentAccountMenu()
+    }
+
+    @discardableResult
+    func presentAccountMenu() -> AccountMenuView {
+        let email = accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let menu = HomeDropdown.present(from: titleBar.accountButton) { dismiss in
+            AccountMenuView(
+                name: accountName,
+                email: email.flatMap { $0.isEmpty ? nil : $0 },
+                picture: avatarCache[accountPictureURL],
+                signedIn: settingsView.accountSignedIn,
+                dismiss: dismiss
+            )
+        }
+        menu.onUpgrade = { NSWorkspace.shared.open(AccountMenuView.upgradeURL) }
+        menu.onManageAccount = { [weak self] in self?.showSettings(section: .accounts) }
+        menu.onSignIn = { [weak self] in self?.signInToAccount() }
+        return menu
     }
 
     /// "Sign in…" on the Accounts section, and the spotlight's row for it:
@@ -6584,6 +6842,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         shellSidebar.updateWidget.apply(state)
         homeView.applyUpdateState(state)
         settingsView.applyUpdateState(state)
+        // The foot's Settings row wears the dot while there is an update to
+        // *take* — Settings › General is where taking it also lives. A check
+        // in flight or a failure is not something waiting for the user.
+        switch state {
+        case .available, .readyToRestart:
+            shellSidebar.settingsRow.isBadged = true
+        case .idle, .checking, .updating, .failed:
+            shellSidebar.settingsRow.isBadged = false
+        }
     }
 
     /// The Check for Updates… command -- the OmniAgent menu, the Settings
@@ -6880,6 +7147,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     @objc func showThirdPartyNotices(_ sender: Any?) { run(.openLegal(.thirdPartyNotices)) }
 
+    /// The Help menu itself, dropped on the sidebar's Help row — the row and
+    /// the spotlight's "Help" are the same act. `NSApp.helpMenu` is built by
+    /// `AppDelegate`, so under the test host there is none and this is a
+    /// no-op rather than a crash.
+    ///
+    /// With the sidebar collapsed that row is inside a hidden split item, and
+    /// a menu popped from a hidden view appears in the window's bottom-left
+    /// corner or not at all — so the spotlight's "Help", which works whatever
+    /// the sidebar is doing, falls back to the title bar's account button.
+    func showHelpMenu() {
+        guard let menu = NSApp.helpMenu else { return }
+        let row = shellSidebar.helpRow
+        guard row.isHiddenOrHasHiddenAncestor else {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: row.bounds.maxY), in: row)
+            return
+        }
+        // The bar's buttons are unflipped, so `y: 0` is the button's bottom
+        // edge — the menu falls out of the title bar rather than over it.
+        let button = titleBar.accountButton
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: button)
+    }
+
     /// Settings, opened on a particular section.
     func showSettings(section: SettingsSection) {
         if section == .remote {
@@ -6904,40 +7193,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Task 20, spec §8: "Cap at the most recent 2 000 rows."
     private static let activityHistoryLimit = 2000
 
-    /// The gear: offers the panel beside itself, or — offered already —
-    /// puts it back where it came from (docked on Settings, gone elsewhere).
-    func toggleSettingsPanel() {
-        if settingsPanelPlace == .offered {
-            collapseSettingsPanel()
-        } else {
-            // Lit only on the page, where a section really is on screen.
-            settingsPanel.apply(selected: destination == .settings ? settingsView.section : nil)
-            settingsPanel.clearSearch()
-            placeSettingsPanel(.offered, animated: true)
-            settingsPanel.focusSearch()
-        }
-    }
-
-    private func collapseSettingsPanel() {
-        settingsPanel.clearSearch()
-        placeSettingsPanel(destination == .settings ? .docked : .hidden, animated: true)
-    }
-
-    /// Slides the panel to `place`. Docked: under the "Settings" title's
-    /// left edge, just below the strip. Offered: beside the gear, the drop
-    /// on it, the body rising from the gear's foot — clamped to the content
-    /// area, so it never leaves the app. Hidden: fades where it is, and
-    /// measures nothing — the first call comes from `installSplitView`,
-    /// before there is a window to measure in.
+    /// Slides the panel to `place`. Docked: 12pt inside the content card's
+    /// top-left corner. Hidden: fades where it is, and measures nothing — the
+    /// first call comes from `installSplitView`, before there is a window to
+    /// measure in.
     private func placeSettingsPanel(_ place: SettingsPanelPlace, animated: Bool) {
         let wasHidden = settingsPanelPlace == .hidden
         settingsPanelPlace = place
-        if place == .offered { startSettingsPanelMonitor() } else { stopSettingsPanelMonitor() }
         let panel = settingsPanel
         let duration = 0.32
 
         if place == .hidden {
-            panel.isTipVisible = false
             settingsPanelTarget = panel.frame
             guard animated, !ShellMotion.reduced, !panel.isHidden else {
                 panel.isHidden = true
@@ -6955,58 +7221,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             return
         }
 
-        contentContainer.layoutSubtreeIfNeeded()
-        let room = contentContainer.bounds
+        contentCard.layoutSubtreeIfNeeded()
+        let room = contentCard.bounds
         let size = NSSize(width: SettingsSidebarView.frameWidth, height: panel.contentHeight)
-        let corner = SettingsSidebarView.cornerRadius
-        let span = SettingsSidebarView.tipSpan
-        let lane = SettingsSidebarView.lane
 
-        let frame: NSRect
-        if place == .docked {
-            // The card's left edge under the title's; the lane hangs left of it.
-            frame = NSRect(
-                x: sessionTitleField.frame.minX - lane,
-                y: room.maxY - WorkspaceTitleBarView.height - 10 - size.height,
-                width: size.width,
-                height: size.height
-            )
-            panel.isTipVisible = false
-        } else {
-            // The drop's tip 6pt off the sidebar's edge, on the gear's centre.
-            let gear = shellSidebar.accountRow.gear
-            let gearMidY = contentContainer.convert(gear.bounds, from: gear).midY
-            var offered = NSRect(
-                x: 6,
-                y: gearMidY - corner - span / 2,
-                width: size.width,
-                height: size.height
-            )
-            // 6, not 8: the gear's centre sits 32pt up, and the panel's foot
-            // lands at 6.8 — a bigger margin lifts it and, through the corner
-            // clamp, drags the drop off the gear.
-            //
-            // The floor always wins (2026-09-01, Remote's ninth row): with
-            // enough sections the *unfiltered* panel is taller than the room
-            // between the gear and the title bar, while a typed query's
-            // shorter one is not — so a ceiling clamp applied unconditionally
-            // moved the foot between the two (breaking "the panel keeps its
-            // foot" below) and, applied after the floor with no shared floor
-            // of its own, could push the foot below `room.minY` entirely.
-            // Skipping the ceiling clamp whenever it would fight the floor
-            // keeps the foot at the same gear-anchored position regardless of
-            // row count, and lets a panel too tall for the room overflow the
-            // top a few points instead — reachable and still finds the gear,
-            // where a moving foot or a floor breach did not.
-            offered.origin.y = max(offered.origin.y, room.minY + 6)
-            let ceiling = room.maxY - WorkspaceTitleBarView.height - 8 - size.height
-            if ceiling >= room.minY + 6 {
-                offered.origin.y = min(offered.origin.y, ceiling)
-            }
-            frame = offered
-            panel.pointTip(at: gearMidY - offered.minY)
-            panel.isTipVisible = true
-        }
+        // 12pt inside the content card's top-left corner (spec §2). It used to
+        // measure from the column and hang under the title strip; the card is
+        // the page's boundary now, so it measures from the card's own edges.
+        let frame = NSRect(
+            x: ContentCardView.inset,
+            y: room.maxY - ContentCardView.inset - size.height,
+            width: size.width,
+            height: size.height
+        )
         settingsPanelTarget = frame
 
         if wasHidden {
@@ -7029,39 +7256,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         }
     }
 
-    private func startSettingsPanelMonitor() {
-        guard settingsPanelMonitor == nil else { return }
-        settingsPanelMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .keyDown]
-        ) { [weak self] event in
-            guard let self, settingsPanelPlace == .offered else { return event }
-            if event.type == .keyDown {
-                guard event.keyCode == 53 else { return event }  // Esc
-                collapseSettingsPanel()
-                return nil
-            }
-            if event.window === window {
-                let gear = shellSidebar.accountRow.gear
-                let onPanel = settingsPanel.bounds.contains(settingsPanel.convert(event.locationInWindow, from: nil))
-                let onGear = gear.bounds.contains(gear.convert(event.locationInWindow, from: nil))
-                if onPanel || onGear { return event }
-            }
-            collapseSettingsPanel()
-            return event
-        }
-    }
-
-    /// The content area's bounds and coordinate space — for the tests,
-    /// since the container itself is private.
-    var settingsPanelRoomForTesting: NSRect { contentContainer.bounds }
-    func settingsPanelRoomConvert(_ rect: NSRect, from view: NSView) -> NSRect {
-        contentContainer.convert(rect, from: view)
-    }
-
-    private func stopSettingsPanelMonitor() {
-        if let settingsPanelMonitor { NSEvent.removeMonitor(settingsPanelMonitor) }
-        settingsPanelMonitor = nil
-    }
+    /// The room the panel is placed in — the content card's bounds, which is
+    /// the space `settingsPanelTarget` is measured in.
+    var settingsPanelRoomForTesting: NSRect { contentCard.bounds }
 
     // MARK: - Inspector (Task 6b-2)
 

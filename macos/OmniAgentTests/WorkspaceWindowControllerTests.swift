@@ -1510,6 +1510,199 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNotNil(controller.titleBar.superview, "the bar is installed, not just built")
     }
 
+    /// The content is one inset floating card on the column's ground
+    /// (flow-layout spec §2): 12pt off the leading, trailing and bottom edges,
+    /// the title strip above it, and every destination a child of it filling
+    /// it exactly. The session name is the one thing left outside — it belongs
+    /// to the strip, above the card.
+    func testTheContentIsOneInsetCardHoldingEveryDestination() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 900), display: true)
+        window.layoutIfNeeded()
+
+        let card = controller.contentCard
+        let column = try XCTUnwrap(card.superview)
+        XCTAssertEqual(card.frame.minX, ContentCardView.inset, accuracy: 0.5)
+        XCTAssertEqual(column.bounds.maxX - card.frame.maxX, ContentCardView.inset, accuracy: 0.5)
+        // The column is unflipped, so the low y is the bottom edge.
+        XCTAssertEqual(card.frame.minY, ContentCardView.inset, accuracy: 0.5)
+        XCTAssertEqual(
+            column.bounds.maxY - card.frame.maxY,
+            WorkspaceTitleBarView.height,
+            accuracy: 0.5,
+            "the strip above it, not a margin"
+        )
+        XCTAssertEqual(card.layer?.cornerRadius, ContentCardView.cornerRadius)
+        // Tinted glass, its own colour off the ground: the wash is the token
+        // a theme will later swap, hosted on a Liquid Glass sheet where there
+        // is one, and it fills the card either way.
+        XCTAssertEqual(card.glassTint.colors, ShellPalette.contentCardTint)
+        XCTAssertEqual(card.glassTint.frame.size, card.bounds.size, "the wash fills the card")
+        if #available(macOS 26.0, *) {
+            XCTAssertNotNil(card.glassHost, "on 26 and later the card is a glass sheet")
+            XCTAssertEqual(card.glassHost?.frame, card.bounds)
+        }
+
+        let placeholder = try XCTUnwrap(
+            card.subviews.compactMap { $0 as? WorkspacePlaceholderView }.first,
+            "the To Do List placeholder is a child of the card"
+        )
+        let pages: [NSView] = [
+            controller.workspaceView, controller.homeView, controller.insightsView,
+            controller.settingsView, placeholder,
+        ]
+        for page in pages {
+            XCTAssertTrue(page.superview === card, "\(type(of: page)) hangs off the card")
+            XCTAssertEqual(page.frame, card.bounds, "and fills it, at no offset of its own")
+        }
+        XCTAssertTrue(controller.settingsPanel.superview === card, "and the docked panel floats in it")
+        XCTAssertTrue(
+            controller.sessionTitleField.superview === column,
+            "while the session name stays in the strip, outside the card"
+        )
+    }
+
+    /// The session's name stops at the top-right cluster instead of drawing
+    /// under it. The field had a leading edge and a centre and no right-hand
+    /// wall, so a long name ran straight through the bell and the avatar.
+    func testALongSessionNameStopsShortOfTheTitleBarsControls() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        let window = try XCTUnwrap(controller.window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1400, height: 900), display: true)
+
+        controller.sessionTitleField.stringValue = String(repeating: "A", count: 200)
+        window.layoutIfNeeded()
+
+        let root = try XCTUnwrap(window.contentView)
+        // The alignment rect, not the frame: an `NSTextField`'s frame is a
+        // couple of points wider than the box its constraints are pinned to.
+        let field = controller.sessionTitleField
+        let name = field.convert(field.alignmentRect(forFrame: field.bounds), to: root)
+        let bell = controller.titleBar.notificationsButton.convert(
+            controller.titleBar.notificationsButton.bounds, to: root
+        )
+        XCTAssertGreaterThan(name.width, 0, "the name is on screen at all")
+        XCTAssertLessThanOrEqual(name.maxX, bell.minX - 12, "and stops 12pt short of the bell")
+        XCTAssertEqual(controller.sessionTitleField.lineBreakMode, .byTruncatingTail)
+    }
+
+    /// Insights is a real page now (flow-layout spec §6), so it shows its own
+    /// screen and every other destination — the To Do placeholder it used to
+    /// borrow included — goes away under it.
+    func testInsightsShowsItsOwnPageRatherThanThePlaceholder() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.applyDestination(.insights)
+
+        XCTAssertFalse(controller.insightsView.isHidden)
+        XCTAssertTrue(controller.homeView.isHidden)
+        XCTAssertTrue(controller.workspaceView.isHidden)
+        XCTAssertTrue(controller.settingsView.isHidden)
+        let placeholder = try XCTUnwrap(
+            controller.contentCard.subviews.compactMap { $0 as? WorkspacePlaceholderView }.first
+        )
+        XCTAssertTrue(placeholder.isHidden, "the placeholder is To Do List's alone now")
+        // Showing the page is what reads the numbers.
+        XCTAssertEqual(controller.insightsView.kpiCards.count, 3)
+        for card in controller.insightsView.kpiCards {
+            XCTAssertNotEqual(card.valueField.stringValue, InsightsSurfaceView.placeholderValue)
+        }
+
+        controller.applyDestination(.home)
+        XCTAssertTrue(controller.insightsView.isHidden)
+    }
+
+    /// The Activity tab is the review panel's timeline over every session:
+    /// fed on the way in, and again on each status event while it is the tab
+    /// on screen — with lanes named "session · pane", since a lane called
+    /// "Shell 1" says nothing once five sessions share the tape.
+    func testAStatusEventFeedsTheInsightsPagesActivityTimeline() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        controller.sessionEnsurer = { _ in }
+        controller.sessionKiller = { _ in }
+        controller.showWindow(nil)
+        controller.applyRestoredPanes(
+            WorkspaceRestoration.plan(
+                fromLayout: PersistedLayoutCodec.serialize([
+                    PersistedTab(project: "alpha", engine: .shell, cwd: "/a", id: "sess-a", group: "g1", groupLabel: "Build"),
+                    PersistedTab(project: "beta", engine: .shell, cwd: "/b", id: "sess-b", group: "g2", groupLabel: "Ship"),
+                ])
+            )
+        )
+
+        controller.recordNotification(
+            for: SessionStatusEvent(id: "sess-a", status: .thinking, notify: false, engine: "shell")
+        )
+        XCTAssertTrue(
+            controller.insightsView.activity.lanes.isEmpty,
+            "an unvisited page is fed nothing"
+        )
+
+        controller.applyDestination(.insights)
+        XCTAssertTrue(
+            controller.insightsView.activity.lanes.isEmpty,
+            "and neither is the Usage tab"
+        )
+
+        controller.insightsView.select(.activity)
+        XCTAssertEqual(
+            controller.insightsView.activity.lanes.map(\.paneID),
+            ["sess-a", "sess-b"],
+            "every session's terminals, not just the one on the Desk"
+        )
+        XCTAssertEqual(
+            controller.insightsView.activity.lanes.map(\.title),
+            ["Build · Shell 1", "Ship · Shell 1"]
+        )
+        XCTAssertEqual(
+            controller.insightsView.activity.lanes.first?.segments.map(\.status),
+            [.thinking]
+        )
+
+        // And the stream keeps redrawing it while it is the tab on screen.
+        controller.recordNotification(
+            for: SessionStatusEvent(id: "sess-b", status: .toolExecution, notify: false, engine: "shell")
+        )
+        XCTAssertEqual(
+            controller.insightsView.activity.lanes.last?.segments.map(\.status),
+            [.toolExecution]
+        )
+    }
+
+    /// Closing a pane takes its lane with it. `destroyPane` forgets the
+    /// pane's status series, but nothing redraws itself — without the
+    /// refresh the closed pane's lane sat on the page until some other pane
+    /// happened to report.
+    func testClosingAPaneTakesItsLaneOffTheInsightsPage() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.sessionKiller = { _ in }
+        controller.showWindow(nil)
+        let closing = try XCTUnwrap(controller.workspaceView.focusedPaneID)
+        controller.recordNotification(
+            for: SessionStatusEvent(id: closing, status: .thinking, notify: false, engine: "shell")
+        )
+
+        controller.applyDestination(.insights)
+        controller.insightsView.select(.activity)
+        XCTAssertEqual(controller.insightsView.activity.lanes.map(\.paneID), [closing])
+
+        controller.closePane(nil)
+
+        XCTAssertTrue(
+            controller.insightsView.activity.lanes.isEmpty,
+            "a closed pane's lane must not outlive it"
+        )
+    }
+
     /// The bar names the session on screen, and names nothing anywhere else —
     /// no app name, no fallback. The review toggle goes with it: gone, not
     /// greyed out, since a disabled control invites a click that cannot work.
@@ -1534,6 +1727,30 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
     }
 
+    /// One ground, not two: the window's content view is the `PaneGroundView`,
+    /// under the sidebar and the content column alike, the column itself paints
+    /// nothing, and the seam between the two is painted with nothing — so the
+    /// card is the only thing floating on the sheet (flow-layout spec §2,
+    /// amended 2026-09-02).
+    func testTheSidebarAndTheContentColumnShareOneGround() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        XCTAssertTrue(
+            controller.window?.contentViewController?.view is PaneGroundView,
+            "the ground is the window's, behind the split"
+        )
+        let column = try XCTUnwrap(controller.contentCard.superview)
+        XCTAssertFalse(column is PaneGroundView, "the column paints nothing of its own")
+        XCTAssertNil(column.layer?.backgroundColor)
+        let split = try XCTUnwrap(controller.splitController)
+        XCTAssertTrue(split.splitView is GroundSplitView)
+        XCTAssertEqual(split.splitView.dividerColor, .clear, "no seam between the two")
+        XCTAssertTrue(split.splitView.isVertical, "columns side by side, as AppKit's own would be")
+        XCTAssertEqual(split.splitView.dividerStyle, .thin)
+    }
+
     /// The session title label is a subview of the content column, so it is
     /// carried by the column's own collapse animation and cannot drift from it.
     func testTheSessionNameRidesTheContentColumnSoItCannotDriftFromIt() throws {
@@ -1542,10 +1759,16 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.showWindow(nil)
 
         let sessionLabel = controller.sessionTitleField
-        let contentContainer = try XCTUnwrap(controller.workspaceView.superview)
+        // The column, not the card: the card is inset inside it and the name
+        // rides the column itself, in the strip above the card.
+        let contentContainer = try XCTUnwrap(controller.contentCard.superview)
         XCTAssertTrue(
             sessionLabel.isDescendant(of: contentContainer),
             "the session label is part of the content column, so it is carried by its animation"
+        )
+        XCTAssertFalse(
+            sessionLabel.isDescendant(of: controller.contentCard),
+            "and it is above the card, not inside it — the strip is the window's chrome"
         )
 
         // Riding the column has one sharp edge: collapse the sidebar and the
@@ -2244,18 +2467,219 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         defer { controller.close() }
 
         let buttons = controller.titleBar.controlsForTesting.compactMap { $0 as? WorkspaceTitleBarButton }
-        XCTAssertEqual(buttons.count, 2, "the sidebar and review toggles")
+        XCTAssertEqual(buttons.count, 3, "the sidebar and review toggles, and the bell")
         XCTAssertEqual(
             buttons.map(\.action),
             [
                 #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:)),
                 #selector(WorkspaceWindowController.toggleReviewPanel(_:)),
+                #selector(WorkspaceWindowController.showNotifications(_:)),
             ]
         )
         XCTAssertFalse(
             controller.splitController?
                 .responds(to: #selector(WorkspaceWindowController.toggleWorkspaceSidebar(_:))) ?? true,
             "NSSplitViewController must not answer this selector first"
+        )
+    }
+
+    // MARK: - The title bar's top-right cluster (flow layout §1)
+
+    /// Right to left: the account at the trailing edge, then the bell, then
+    /// the review toggle. `controlsForTesting` is in layout order, and being
+    /// in it at all is what keeps a control's clicks out of the window drag.
+    func testTheAccountAndTheBellSitAtTheTrailingEndOfTheBar() {
+        let controller = makeController()
+        defer { controller.close() }
+        let controls = controller.titleBar.controlsForTesting
+
+        XCTAssertIdentical(controls.last, controller.titleBar.accountButton)
+        XCTAssertIdentical(controls.dropLast().last, controller.titleBar.notificationsButton)
+        XCTAssertEqual(
+            (controls.dropLast(2).last as? WorkspaceTitleBarButton)?.action,
+            #selector(WorkspaceWindowController.toggleReviewPanel(_:)),
+            "the review toggle is the innermost of the three"
+        )
+    }
+
+    /// The bell's unread mark: absent while nothing is waiting, and never
+    /// left standing once the feed has been read.
+    func testTheBellWearsItsDotOnlyWhileSomethingIsUnread() {
+        let bell = WorkspaceTitleBarButton(
+            symbol: "bell",
+            label: "Notifications",
+            action: #selector(WorkspaceWindowController.showNotifications(_:))
+        )
+        XCTAssertNil(bell.unreadDot, "a button nobody has marked carries no extra layer")
+
+        bell.isUnread = true
+        XCTAssertEqual(bell.unreadDot?.isHidden, false)
+
+        bell.isUnread = false
+        XCTAssertEqual(bell.unreadDot?.isHidden, true)
+    }
+
+    /// The feed drives the dot wherever the entries change — an arriving
+    /// approval lights it, reading the feed puts it out.
+    func testTheFeedLightsAndClearsTheBell() {
+        let controller = makeController()
+        defer { controller.close() }
+        XCTAssertFalse(controller.titleBar.notificationsButton.isUnread)
+
+        controller.notifier.restore([notificationEntry(id: "n1")])
+        XCTAssertTrue(controller.titleBar.notificationsButton.isUnread)
+
+        controller.notifier.markAllRead()
+        XCTAssertFalse(controller.titleBar.notificationsButton.isUnread)
+    }
+
+    /// The account moved to the title bar, so the same `auth_*` rows that
+    /// name the sidebar chip have to reach the avatar up there too.
+    func testTheAccountRowsReachTheTitleBarsAvatar() {
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: [
+            "auth_signed_in": "true",
+            "auth_account_email": "bruno@bonando.com",
+            "auth_account_name": "Bruno Bonando",
+            "auth_github_login": "",
+            "auth_account_picture": "",
+        ]))
+        defer { controller.close() }
+
+        controller.refreshAccountSection()
+
+        XCTAssertEqual(controller.titleBar.accountButton.modeForTesting, .initials("BB"))
+    }
+
+    /// An empty feed says so, in one dead row — and offers no "Clear all"
+    /// for a list with nothing in it.
+    func testTheBellsPopoverSaysSoWhenThereIsNothingInTheFeed() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        let dropdown = controller.presentNotifications()
+
+        XCTAssertEqual(dropdown.visibleTitlesForTesting, ["No notifications yet"])
+    }
+
+    /// One entry, one row — named by its session, what happened and how long
+    /// ago — over the two rows that act on the whole list. Opening the feed
+    /// is what marks it read.
+    func testTheBellsPopoverListsTheFeedAndReadsIt() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.notifier.restore([
+            notificationEntry(id: "n1", sessionLabel: "Build", status: .awaitingApproval),
+        ])
+
+        let dropdown = controller.presentNotifications()
+
+        XCTAssertEqual(dropdown.visibleTitlesForTesting.count, 3, "the entry and the two list actions")
+        let row = try XCTUnwrap(dropdown.visibleTitlesForTesting.first)
+        XCTAssertTrue(row.hasPrefix("Build · Needs your approval. · "), row)
+        XCTAssertEqual(
+            Array(dropdown.visibleTitlesForTesting.dropFirst()),
+            ["Mark all as read", "Clear all"]
+        )
+        XCTAssertEqual(controller.notifier.unreadCount, 0, "seeing the feed reads it")
+        XCTAssertFalse(controller.titleBar.notificationsButton.isUnread)
+    }
+
+    /// The feed keeps 40 entries; the popover does not scroll, so it shows the
+    /// 20 newest and no more.
+    func testTheBellsPopoverShowsOnlyTheTwentyNewestEntries() {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.notifier.restore((0..<25).map { notificationEntry(id: "n\($0)") })
+
+        let dropdown = controller.presentNotifications()
+
+        XCTAssertEqual(
+            dropdown.visibleTitlesForTesting.count,
+            22,
+            "twenty entries over the two list actions"
+        )
+        XCTAssertEqual(
+            Array(dropdown.visibleTitlesForTesting.suffix(2)),
+            ["Mark all as read", "Clear all"]
+        )
+    }
+
+    /// Signed out: no plan to be on, no email over an account that does not
+    /// exist, and "Sign in" leading the doors.
+    func testTheAccountMenuOffersSignInWhileSignedOut() {
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: [
+            "auth_signed_in": "false",
+            "auth_account_email": "bruno@bonando.com",
+            "auth_account_name": "Bruno Bonando",
+            "auth_github_login": "",
+            "auth_account_picture": "",
+        ]))
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.refreshAccountSection()
+
+        let menu = controller.presentAccountMenu()
+
+        XCTAssertEqual(menu.nameTextForTesting, "Not signed in")
+        XCTAssertNil(menu.emailTextForTesting)
+        XCTAssertNil(menu.planTextForTesting, "no plan row over an account that does not exist")
+        XCTAssertEqual(menu.visibleTitlesForTesting, ["Sign in", "Manage account"])
+    }
+
+    /// Signed in: who, the plan they are on with the way up from it, and the
+    /// door to the account — and no "Log out", which lives behind that door
+    /// (Settings › Accounts) rather than one click from the avatar.
+    func testTheAccountMenuNamesTheAccountAndItsPlanWithoutLogOut() {
+        let controller = makeController(settingsClient: FakeSettingsClient(rows: [
+            "auth_signed_in": "true",
+            "auth_account_email": "bruno@bonando.com",
+            "auth_account_name": "Bruno Bonando",
+            "auth_github_login": "",
+            "auth_account_picture": "",
+        ]))
+        defer { controller.close() }
+        controller.showWindow(nil)
+        controller.refreshAccountSection()
+
+        let menu = controller.presentAccountMenu()
+
+        XCTAssertEqual(menu.nameTextForTesting, "Bruno Bonando")
+        XCTAssertEqual(menu.emailTextForTesting, "bruno@bonando.com")
+        XCTAssertEqual(menu.avatarModeForTesting, .initials("BB"))
+        XCTAssertEqual(menu.planTextForTesting, AccountMenuView.freePlanTitle)
+        XCTAssertEqual(menu.visibleTitlesForTesting, ["Manage account"], "and nothing that logs out")
+
+        var upgrades = 0
+        menu.onUpgrade = { upgrades += 1 }
+        menu.pressUpgradeForTesting()
+        XCTAssertEqual(upgrades, 1, "the pill is the menu's one primary action")
+
+        controller.presentAccountMenu().pressRowForTesting("Manage account")
+        XCTAssertEqual(controller.destination, .settings)
+        XCTAssertEqual(controller.settingsView.section, .accounts, "Manage account is the Accounts page")
+    }
+
+    /// One entry, ready to be dropped into a controller's feed.
+    private func notificationEntry(
+        id: String,
+        sessionLabel: String? = nil,
+        status: RemoteSessionStatus = .awaitingApproval
+    ) -> NotificationEntry {
+        NotificationEntry(
+            id: id,
+            sessionID: "sess-a",
+            project: "alpha",
+            projectLabel: "Alpha",
+            cwd: "/a",
+            engine: "shell",
+            status: status,
+            title: "Shell 1",
+            sessionLabel: sessionLabel,
+            createdAt: Date().timeIntervalSince1970 * 1000,
+            read: false
         )
     }
 
@@ -2317,9 +2741,30 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.destination, .settings)
         XCTAssertEqual(controller.settingsView.section, .accounts)
 
+        // The Insights tabs: the page, then the tab on it.
+        controller.run(.showInsightsTab(.activity))
+        XCTAssertEqual(controller.destination, .insights)
+        XCTAssertEqual(controller.insightsView.selectedTab, .activity)
+        controller.run(.showInsightsTab(.usage))
+        XCTAssertEqual(controller.insightsView.selectedTab, .usage)
+
         controller.run(.selectWorkspace(id: "alpha"))
         XCTAssertEqual(controller.selectedProjectID, "alpha")
         XCTAssertEqual(controller.destination, .terminals, "a workspace opens on the Desk")
+
+        // The title bar's two popovers, from the spotlight: the same methods
+        // the bell and the avatar send up the responder chain.
+        controller.run(.showNotifications)
+        XCTAssertEqual(
+            controller.presentNotifications().visibleTitlesForTesting,
+            ["No notifications yet"],
+            "the bell's row opens the feed"
+        )
+        controller.run(.showAccountMenu)
+        XCTAssertTrue(
+            controller.presentAccountMenu().visibleTitlesForTesting.contains("Manage account"),
+            "and the account's row opens the account"
+        )
 
         // Settings › Accounts' button, from the spotlight: the same two
         // methods the page's own button calls. Both external effects are
@@ -2554,42 +2999,14 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         controller.palette.dismiss()
     }
 
-    // MARK: - The sidebar's account chip
+    // MARK: - The account avatar
 
-    /// The chip is a button, and it opens the one page that manages the
-    /// account it shows.
-    func testPressingTheAccountChipOpensSettingsAccounts() throws {
-        let controller = makeController()
-        defer { controller.close() }
-        controller.showWindow(nil)
-
-        try XCTUnwrap(controller.shellSidebar.accountRow.accountButton.onPress)()
-
-        XCTAssertEqual(controller.destination, .settings)
-        XCTAssertEqual(controller.settingsView.section, .accounts)
-    }
-
-    /// Who the chip says is signed in comes from the `auth_*` rows: the
-    /// display name when there is one, and its initials on the avatar.
-    func testTheAccountChipShowsTheNameAndInitialsFromTheRows() {
-        let controller = makeController(settingsClient: FakeSettingsClient(rows: [
-            "auth_signed_in": "true",
-            "auth_account_email": "bruno@bonando.com",
-            "auth_account_name": "Bruno Bonando",
-            "auth_github_login": "",
-            "auth_account_picture": "",
-        ]))
-        defer { controller.close() }
-
-        controller.refreshAccountSection()
-
-        XCTAssertEqual(controller.shellSidebar.accountRow.accountLabel, "Bruno Bonando")
-        XCTAssertEqual(controller.shellSidebar.accountRow.avatarModeForTesting, .initials("BB"))
-    }
-
-    /// No name on the account: the email stands in — and no account at all
-    /// puts the chip back to its placeholder, whatever the stale rows say.
-    func testTheAccountChipFallsBackToTheEmailAndToNotSignedIn() {
+    /// No name on the account: the email stands in, and its first letter is
+    /// what the circle wears — and no account at all puts the avatar back to
+    /// its generic glyph, whatever the stale rows say. (The sidebar chip this
+    /// used to assert on is gone; the title bar's avatar is the one place the
+    /// account shows.)
+    func testTheAvatarFallsBackToTheEmailAndToTheGenericGlyph() {
         let rows = [
             "auth_signed_in": "true",
             "auth_account_email": "bruno@bonando.com",
@@ -2600,7 +3017,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let controller = makeController(settingsClient: FakeSettingsClient(rows: rows))
         defer { controller.close() }
         controller.refreshAccountSection()
-        XCTAssertEqual(controller.shellSidebar.accountRow.accountLabel, "bruno@bonando.com")
+        XCTAssertEqual(controller.titleBar.accountButton.modeForTesting, .initials("B"))
 
         var signedOut = rows
         signedOut["auth_signed_in"] = "false"
@@ -2608,8 +3025,7 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         let out = makeController(settingsClient: FakeSettingsClient(rows: signedOut))
         defer { out.close() }
         out.refreshAccountSection()
-        XCTAssertEqual(out.shellSidebar.accountRow.accountLabel, "Not signed in")
-        XCTAssertEqual(out.shellSidebar.accountRow.avatarModeForTesting, .glyph)
+        XCTAssertEqual(out.titleBar.accountButton.modeForTesting, .glyph)
     }
 
     // MARK: - Session outline
@@ -2978,7 +3394,9 @@ final class WorkspaceWindowControllerTests: XCTestCase {
 
         let filled = split.splitView.convert(split.splitView.bounds, to: content)
         XCTAssertEqual(filled, content.bounds, "the split fills the window with the column gone")
-        let column = try XCTUnwrap(controller.workspaceView.superview)
+        // The column itself, which is the ground: the card inside it keeps its
+        // 12pt of air off that edge, and the ground is what fills it.
+        let column = try XCTUnwrap(controller.contentCard.superview)
         XCTAssertEqual(
             column.convert(column.bounds, to: content).minX,
             0,

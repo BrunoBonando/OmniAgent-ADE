@@ -451,10 +451,10 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
         self.makeSurface = makeSurface
         super.init(frame: .zero)
         // No ground of its own, in either mode: the sheet the panes sit on is
-        // `PaneGroundView`, the content column behind this view, so it runs
-        // unbroken from the window's top edge through the title-bar strip and
-        // out around the panes. Anything opaque here would cut that off at the
-        // grid's edge — and on the canvas it would hide the ground entirely.
+        // `ContentCardView`, the inset card this view fills, whose fill reads
+        // as a lift over `PaneGroundView`'s gradient around it. Anything opaque
+        // here would cut that off at the grid's edge — and on the canvas it
+        // would hide the card entirely.
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -5280,25 +5280,27 @@ final class PaneHeaderButton: NSView {
 
 /// One draggable seam. Frames follow the pointer on every mouse event; the PTY
 /// resize behind them is coalesced by `PaneResizeCoalescer`.
-/// The ground everything in the content column sits on: a top-lit dark grey
-/// sheet behind the title-bar strip, the pane grid and the gaps between panes
-/// alike, so it reads as one continuous surface from the window's top edge
-/// down rather than as a slab that starts where the panes do.
+/// The ground the whole window sits on: one top-lit blue sheet behind the
+/// sidebar, the title-bar strip and the content column alike, so the column
+/// and the content read as one surface with `ContentCardView` floating on it —
+/// the way Wispr Flow's window is one ground with a card on it (flow-layout
+/// spec §2, amended 2026-09-02). The sidebar paints nothing of its own.
 ///
-/// It is the content column's container view (`contentContainer` in
-/// `WorkspaceWindowController`) rather than anything inside the grid, which is
-/// the whole point — `PaneWorkspaceView` starts below the title bar, so a
-/// ground painted there could never reach the top edge the sidebar's glass
-/// reaches.
+/// It is the window's content view (`installSplitView` in
+/// `WorkspaceWindowController`) rather than anything inside the split, which
+/// is the whole point — a ground painted per column is two slabs however
+/// closely their stops match, and the seam between them shows.
 ///
-/// Panes stay opaque on top of it (`PaneContainerView.paneBackgroundColor`) —
-/// a terminal theme with any transparency washes its own text out — so this is
-/// what is seen in the grid inset and the divider gaps, which is where the eye
-/// reads depth from.
+/// The blue is the one the sidebar's glass column wore until 2026-09-02,
+/// measured off the built app (`ShellPalette.sidebarGlassTint` over `.regular`
+/// glass): `44, 52, 87` down to `29, 32, 52`. Panes stay opaque on top of it
+/// (`PaneContainerView.paneBackgroundColor`) — a terminal theme with any
+/// transparency washes its own text out — so this is what is seen in the grid
+/// inset and the divider gaps, which is where the eye reads depth from.
 final class PaneGroundView: NSView {
     static let colors = [
-        NSColor(srgbRed: 36 / 255, green: 38 / 255, blue: 45 / 255, alpha: 1),
-        NSColor(srgbRed: 15 / 255, green: 16 / 255, blue: 20 / 255, alpha: 1),
+        NSColor(srgbRed: 44 / 255, green: 52 / 255, blue: 87 / 255, alpha: 1),
+        NSColor(srgbRed: 29 / 255, green: 32 / 255, blue: 52 / 255, alpha: 1),
     ]
 
     init() {

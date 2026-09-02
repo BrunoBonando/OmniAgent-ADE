@@ -901,7 +901,7 @@ final class PaneWorkspaceViewTests: XCTestCase {
         XCTAssertGreaterThan(near, far + 0.05, "and it fades on the way down")
     }
 
-    /// The ground under the panes is a lit grey sheet, not a flat slab, and
+    /// The ground under the panes is a lit blue sheet, not a flat slab, and
     /// which end the light is at is the whole point — a gradient's unit space
     /// is y-up, and whether that survives depends on the view's flippedness —
     /// so it is rendered rather than reasoned about, anchored by a marker at
@@ -941,7 +941,8 @@ final class PaneWorkspaceViewTests: XCTestCase {
         let top = pixel(rows[rows.count / 10])
         let bottom = pixel(rows[rows.count - rows.count / 20])
         XCTAssertGreaterThan(top.brightnessComponent, bottom.brightnessComponent + 0.02, "lit from the top")
-        XCTAssertGreaterThan(top.brightnessComponent, 0.1, "and grey, not the near-black it used to be")
+        XCTAssertGreaterThan(top.brightnessComponent, 0.1, "and lit, not the near-black it used to be")
+        XCTAssertGreaterThan(top.blueComponent, top.redComponent, "the sidebar's blue, now the whole window's")
     }
 
     /// The bar wears the agent's status as a *dark* wash, and only while the
