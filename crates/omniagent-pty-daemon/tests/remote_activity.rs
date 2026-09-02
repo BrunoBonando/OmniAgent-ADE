@@ -239,8 +239,15 @@ fn parse_row(summary: &str) -> (String, Vec<String>) {
             // words and ASCII punctuation, plus exactly two non-ASCII
             // characters of their own: `·` between a pane, its session and
             // its workspace, and `…` after a truncated brain query.
+            //
+            // `?` is excluded from that ASCII (fix round 5), and it is the
+            // half of this check that catches the *sanitized* mistake. No
+            // template contains a question mark, and `?` is precisely what
+            // the sanitizer leaves behind — so a value that was cleaned but
+            // never wrapped shows up here, where the ASCII rule alone would
+            // wave it through: `HOSTILE` sanitizes to pure ASCII.
             assert!(
-                chars[i].is_ascii() || chars[i] == '·' || chars[i] == '…',
+                (chars[i].is_ascii() && chars[i] != '?') || chars[i] == '·' || chars[i] == '…',
                 "U+{:04X} ({:?}) is outside every field and is not one of the row \
                  format's own characters — an interpolated value that skipped \
                  `display_field`? — in {summary:?}",
@@ -1222,6 +1229,38 @@ async fn a_right_to_left_machine_name_cannot_displace_the_relay_asserted_ip() {
     // is `Cf` and never survives sanitization.
     assert_eq!(opened.summary.matches('\u{2068}').count(), 2);
     assert_eq!(opened.summary.matches('\u{2069}').count(), 2);
+}
+
+/// Fix round 5: **the guard's own hole, pinned.**
+///
+/// `parse_row` catches a raw interpolation because a hostile value is full of
+/// non-ASCII. It very nearly missed the *sanitized* one: `HOSTILE` sanitizes
+/// to pure ASCII, so an arm that cleaned a value and then interpolated it
+/// without wrapping — the mistake a new `MessageKind` invites, because the
+/// sanitizer is the function whose name sounds right — would have emitted a
+/// zero-field row that the guard nodded through. Excluding `?` from the
+/// template's alphabet closes it, and this test is what stops the exclusion
+/// being quietly relaxed later by someone tidying up.
+///
+/// Asserted by *failing* the guard on purpose, since a guard nobody has seen
+/// reject anything is a guard nobody knows works.
+#[test]
+fn the_guard_rejects_a_row_whose_value_was_sanitized_but_never_wrapped() {
+    // Exactly what `format!("Browsed {}", sanitize_display_text(hostile))`
+    // would have produced: no delimiters, and pure ASCII.
+    let unwrapped = "Browsed Air?1.2.3.4??Disconnected??3m 00s";
+    let rejected = std::panic::catch_unwind(|| parse_row(unwrapped)).is_err();
+    assert!(
+        rejected,
+        "a sanitized-but-unwrapped value must not pass as template text: {unwrapped:?}"
+    );
+
+    // And the guard is not simply rejecting everything: the wrapped form of
+    // the same value passes, with its `?`s inside the field where they
+    // belong.
+    let (template, fields) = parse_row(&format!("Browsed {}", q("Air?1.2.3.4??Disconnected")));
+    assert_eq!(template, "Browsed {}");
+    assert_eq!(fields, vec!["Air?1.2.3.4??Disconnected".to_string()]);
 }
 
 /// The isolates only hold because a field cannot contain one. U+2068/U+2069

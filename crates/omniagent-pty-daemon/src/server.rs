@@ -1,4 +1,6 @@
-use crate::activity::{append, display_field, ActivityContext, ActivityEntry, ActivityLog};
+use crate::activity::{
+    append, display_field, display_field_bounded, ActivityContext, ActivityEntry, ActivityLog,
+};
 use crate::connections::{
     ActivityFeed, AssertedIdentity, ConnectionRegistry, LeaseHolder, PresenceFeed, ViewerIdentity,
 };
@@ -1107,7 +1109,7 @@ where
                     // currently distrust is delimited". The parentheses are
                     // this template's own words, kept for how the row reads.
                     "Connected from {} ({})",
-                    display_field(&sanitize_machine_name(&machine_name)),
+                    machine_name_field(&machine_name),
                     display_field(asserted.ip.as_deref().unwrap_or("unknown IP"))
                 ),
                 Some(identity_detail(asserted)),
@@ -1881,28 +1883,47 @@ impl Drop for ActivityGuard {
 /// for.
 ///
 /// **What this function is not, since fix round 4.** It is no longer what
-/// keeps the opening row honest: the caller wraps its result in
-/// [`display_field`], and *that* is what makes the name's extent
-/// unambiguous. It could not have been this function's job — U+02BA
-/// MODIFIER LETTER DOUBLE PRIME is `\p{Lm}` and renders as `"`, so the
-/// round 2 claim in this very doc that "a quoted name can never contain a
-/// quote" was false, and U+A78F and U+1427 are letters that render as `·`.
-/// What survives here is a bound (this one tighter than the shared default:
-/// a machine name has no business being as long as a filesystem path) and
-/// the fallback for a name that is empty or nothing but spaces.
-fn sanitize_machine_name(raw: &str) -> String {
+/// keeps the opening row honest: [`display_field_bounded`] wraps the name in
+/// the row's own delimiters, and *that* is what makes its extent
+/// unambiguous. It could not have been a sanitizer's job — U+02BA MODIFIER
+/// LETTER DOUBLE PRIME is `\p{Lm}` and renders as `"`, so the round 2 claim
+/// that "a quoted name can never contain a quote" was false, and U+A78F and
+/// U+1427 are letters that render as `·`. What is left here is a bound
+/// (tighter than the shared default: a machine name has no business being as
+/// long as a filesystem path) and the fallback for a name that is empty or
+/// nothing but whitespace.
+///
+/// **It returns the finished field, not the cleaned text** (fix round 5).
+/// Round 4 left this returning a bare `String` that the call site then
+/// wrapped, which is the same shape as the mistake round 5 closed in
+/// `activity.rs` — a value cleaned in one place and delimited in another,
+/// with nothing joining the two. Now there is one call and no intermediate
+/// value to forget to wrap, and `server.rs` cannot reach a sanitizer at all.
+///
+/// **Trimming happens before sanitizing**, not after (fix round 5). The
+/// other way round, a name of `" \u{308}Air"` sanitized to itself unchanged
+/// — the combining mark is not *leading*, because a space precedes it, so
+/// the no-leading-mark rule left it alone — and then the trim removed that
+/// space, handing back a string that began with a combining mark after all.
+/// Both the rule and the idempotence `activity.rs` documents, broken by the
+/// order of two lines. `display_field`'s own second pass repaired it in
+/// practice, so nothing shipped wrong, but an invariant that holds only
+/// because something downstream re-establishes it is not an invariant.
+fn machine_name_field(raw: &str) -> String {
     /// Tighter than `activity`'s shared bound — a name, not a path.
     const MAX_LEN: usize = 64;
-    let cleaned = crate::activity::sanitize_display_text_bounded(raw, MAX_LEN);
-    let trimmed = cleaned.trim();
+    let trimmed = raw.trim();
     if trimmed.is_empty() {
         // Only reachable for a genuinely empty or all-whitespace name: a
         // name of nothing but disallowed codepoints sanitizes to a run of
         // `?`, which is deliberately *not* smoothed into a plausible-looking
-        // fallback (fix round 2).
-        return "Unknown Mac".to_string();
+        // fallback (fix round 2). Sanitizing never turns a non-space into a
+        // space, so "the sanitized name is blank" and "the raw name is
+        // blank" are the same condition — which is what lets the trim move
+        // in front of the sanitize without changing which names fall back.
+        return display_field("Unknown Mac");
     }
-    trimmed.to_string()
+    display_field_bounded(trimmed, MAX_LEN)
 }
 
 /// Persists every entry to `remote-activity.jsonl` and pushes the batch to
@@ -2328,6 +2349,22 @@ async fn send_frame(writer: &SharedWriter, frame: Frame) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The cleaned name inside the field [`machine_name_field`] returns, so
+    /// the tests below go on asserting about the name itself rather than
+    /// about the delimiters (which `tests/remote_activity.rs` pins
+    /// end-to-end, and which this shim checks the exact shape of on the way
+    /// through — spelled out here, not asked of `display_field`).
+    fn sanitize_machine_name(raw: &str) -> String {
+        let field = machine_name_field(raw);
+        field
+            .strip_prefix("\"\u{2068}")
+            .and_then(|rest| rest.strip_suffix("\u{2069}\""))
+            .unwrap_or_else(|| {
+                panic!("machine_name_field returned something that is not a field: {field:?}")
+            })
+            .to_string()
+    }
+
     /// The property every `sanitize_machine_name` test below leans on, so a
     /// failure names the actual offending codepoint instead of failing a
     /// `contains` check on the one character the test author happened to
@@ -2508,29 +2545,40 @@ mod tests {
     }
 
     /// A mark leading a name has no base character of its own inside the
-    /// field, so a renderer paints it on the delimiter the caller's
-    /// `display_field` puts in front of it.
+    /// field, so a renderer paints it on the delimiter in front of it.
+    ///
+    /// **The spaced case is the one that was actually broken** (fix round 5):
+    /// with the trim running *after* the sanitize, `" \u{308}Air"` sanitized
+    /// to itself — the mark is not leading while a space precedes it — and
+    /// the trim then removed the space, handing back a name that began with
+    /// a combining mark after all. Both spellings must land on the same
+    /// answer, and the unspaced one alone never proved that.
     #[test]
     fn sanitize_machine_name_never_begins_with_a_combining_mark() {
         assert_eq!(sanitize_machine_name("\u{308}Air"), "?Air");
+        assert_eq!(sanitize_machine_name(" \u{308}Air"), "?Air");
+        assert_eq!(sanitize_machine_name("\t\u{308}\u{308}Air "), "??Air");
     }
 
     /// Fix round 4: sanitizing an already-sanitized name changes nothing.
-    /// The machine-name path relies on it — this function sanitizes under
-    /// its own 64-character bound and `display_field` sanitizes again on the
-    /// way into the row — and a second pass that mangled the first's own
-    /// truncation marker would corrupt exactly the longest names.
+    /// The layout-sourced fields rely on it — `ActivityContext` sanitizes
+    /// once at construction and `display_field` sanitizes again on the way
+    /// into the row — and a second pass that mangled the first's own
+    /// truncation marker would corrupt exactly the longest values. Checked
+    /// here through the public surface: a name that has already been through
+    /// this path comes back out of it unchanged.
     #[test]
     fn sanitize_machine_name_is_idempotent_including_its_truncation_marker() {
         for raw in [
             "Bruno's MacBook Pro",
             "Björns MacBook",
             "\u{ff08}\u{2022}\u{202e}",
+            " \u{308}Air",
             &"x".repeat(500),
         ] {
             let once = sanitize_machine_name(raw);
             assert_eq!(
-                crate::activity::sanitize_display_text(&once),
+                sanitize_machine_name(&once),
                 once,
                 "a second pass changed {once:?}"
             );

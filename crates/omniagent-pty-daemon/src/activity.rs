@@ -267,15 +267,20 @@ const MAX_CONSECUTIVE_MARKS: usize = 2;
 /// character it can emit — an allowed one, `?`, [`TRUNCATION_MARKER`] — is
 /// one it admits, the mark cap is already met, and the length is already
 /// under the bound.
-pub(crate) fn sanitize_display_text(raw: &str) -> String {
+fn sanitize_display_text(raw: &str) -> String {
     sanitize_display_text_bounded(raw, MAX_DISPLAY_CHARS)
 }
 
 /// [`sanitize_display_text`] under a caller-chosen bound —
-/// `sanitize_machine_name` (`server.rs`) holds a self-reported machine name
-/// to a tighter one than a filesystem path needs.
-pub(crate) fn sanitize_display_text_bounded(raw: &str, max_chars: usize) -> String {
-    debug_assert!(max_chars >= 1, "a bound of zero leaves nowhere to truncate");
+/// [`display_field_bounded`] holds a self-reported machine name to a tighter
+/// one than a filesystem path needs.
+///
+/// Private, like [`sanitize_display_text`] itself (fix round 5): sanitizing
+/// is half of building a field, and half of building a field is exactly the
+/// mistake worth making unavailable. Outside this pair of functions the only
+/// way to put a value in a row is [`display_field`].
+fn sanitize_display_text_bounded(raw: &str, max_chars: usize) -> String {
+    assert!(max_chars >= 1, "a bound of zero leaves nowhere to truncate");
     let mut out = String::new();
     let mut chars = raw.chars();
     // Starting the run *at* the cap is what stops a sanitized string from
@@ -347,7 +352,22 @@ const FIELD_QUOTE: char = '"';
 /// and the app drawing the delimiters. That is a wire-format change across
 /// two languages, not a formatting rule.)
 pub(crate) fn display_field(raw: &str) -> String {
-    let sanitized = sanitize_display_text(raw);
+    display_field_bounded(raw, MAX_DISPLAY_CHARS)
+}
+
+/// [`display_field`] under a caller-chosen bound, for the one value that
+/// wants a tighter one than a filesystem path does: a self-reported machine
+/// name (`server.rs`'s `machine_name_field`).
+///
+/// This exists so that `server.rs` never needs the sanitizer (fix round 5).
+/// Before it, `sanitize_machine_name` reached across for
+/// `sanitize_display_text_bounded` and did its own wrapping at the call site
+/// — which is precisely the shape of the mistake this round closed on the
+/// other side, a value sanitized by hand and then interpolated. There is now
+/// no way to sanitize a value without wrapping it, from anywhere outside
+/// this module.
+pub(crate) fn display_field_bounded(raw: &str, max_chars: usize) -> String {
+    let sanitized = sanitize_display_text_bounded(raw, max_chars);
     let mut out = String::with_capacity(sanitized.len() + 8);
     out.push(FIELD_QUOTE);
     out.push(FIRST_STRONG_ISOLATE);
