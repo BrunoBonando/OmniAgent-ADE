@@ -135,6 +135,7 @@ fn protected_rows_are_refused_on_both_get_and_set() {
         "relay_device_token",
         "remote_control_blocked",
         "auth_account_email",
+        "engine_search_path",
     ] {
         let get = frame(
             MessageKind::GetSetting,
@@ -157,12 +158,15 @@ fn protected_rows_are_refused_on_both_get_and_set() {
 }
 
 /// The protected settings rows (phase 3 spec §3 and §12 invariant 2). This is
-/// the whole security argument in five keys: a remote client that could write
+/// the whole security argument in six keys: a remote client that could write
 /// `remote_sharing` or `relay_device_token` would be granting itself access,
 /// one that could write `remote_control_blocked` would be unblocking itself,
-/// and one that could *read* `auth_*` would be walking off with the host's
-/// credentials. The `auth_` case is a prefix on purpose — the sixth key below
-/// does not exist today, and is protected anyway.
+/// one that could *read* `auth_*` would be walking off with the host's
+/// credentials, and one that could read or write `engine_search_path`
+/// (Task 28 fix round 1) would learn the host's directory layout or plant an
+/// attacker binary path ahead of the real one. The `auth_` case is a prefix
+/// on purpose — the seventh key below does not exist today, and is
+/// protected anyway.
 #[test]
 fn protected_keys_are_the_ones_that_would_grant_more_access() {
     for key in [
@@ -172,6 +176,12 @@ fn protected_keys_are_the_ones_that_would_grant_more_access() {
         "auth_signed_in",
         "auth_account_email",
         "auth_anything_added_later",
+        // Fix round 1: a remote client that could read this Mac's own
+        // login-shell PATH would learn its directory layout for free, and
+        // one that could write it would plant an attacker path ahead of
+        // the real engine binaries for every future session on this
+        // machine — local and remote alike.
+        "engine_search_path",
     ] {
         assert!(protected_setting_key(key), "{key} must be protected");
     }
@@ -469,6 +479,7 @@ async fn a_lease_holder_can_neither_read_nor_write_a_protected_row() {
         "relay_device_token",
         "remote_control_blocked",
         "auth_signed_in",
+        "engine_search_path",
     ] {
         let get = client
             .round_trip(MessageKind::GetSetting, serde_json::json!({"key": key}))

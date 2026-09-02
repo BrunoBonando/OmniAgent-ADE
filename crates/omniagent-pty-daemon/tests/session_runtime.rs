@@ -419,3 +419,96 @@ fn an_absolute_path_bypasses_resolution_entirely_the_local_case_unchanged() {
     });
     assert!(result.is_ok(), "{:?}", result.err());
 }
+
+// MARK: - `host_search_path` (Task 28 fix round 1): `HostState` reports
+// engine availability from `EngineLauncher.searchPath`, the app's own
+// login-shell PATH — the one place that actually reaches an nvm/asdf
+// install, which lives under a versioned subdirectory no fixed list can
+// name. Resolving against the fixed list alone reintroduced this fix's own
+// "reports available, then fails to launch" bug one layer down; these tests
+// pin that `create_session_with_search_path`'s `host_search_path` closes it.
+
+/// Writes a tiny executable shell script at `dir/name` and returns `dir`'s
+/// path as a string — a stand-in for an nvm/asdf `bin` directory holding
+/// exactly one engine, deliberately outside every fixed-list location and
+/// outside this test process's own inherited `PATH`.
+fn write_fake_engine_bin(dir: &std::path::Path, name: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir.to_string_lossy().into_owned()
+}
+
+/// The positive case: a bare name unreachable through the fixed list or this
+/// process's own inherited `PATH` resolves — and launches — once its
+/// directory is offered as `host_search_path`, exactly as the app publishes
+/// its login-shell `PATH` to the `engine_search_path` settings row.
+#[test]
+fn a_bare_name_reachable_only_through_the_login_shell_path_resolves_and_launches() {
+    let temp = tempfile::tempdir().unwrap();
+    let nvm_style_bin = write_fake_engine_bin(temp.path(), "totally-fake-nvm-engine");
+
+    let registry = SessionRegistry::new();
+    let without_search_path = registry.create_session(CreateSession {
+        id: "nvm-engine-no-search-path".into(),
+        command: vec!["totally-fake-nvm-engine".into()],
+        cwd: None,
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        transcript_path: None,
+    });
+    assert!(
+        without_search_path.is_err(),
+        "a location outside the fixed list must NOT resolve without host_search_path — \
+         otherwise this test is not proving what it claims to"
+    );
+
+    let with_search_path = registry.create_session_with_search_path(
+        CreateSession {
+            id: "nvm-engine-with-search-path".into(),
+            command: vec!["totally-fake-nvm-engine".into()],
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+            transcript_path: None,
+        },
+        Some(&nvm_style_bin),
+    );
+    assert!(with_search_path.is_ok(), "{:?}", with_search_path.err());
+}
+
+/// `host_search_path` is what the *daemon's own settings row* carries
+/// (`server.rs`'s `ENGINE_SEARCH_PATH_KEY`), never the wire request's own
+/// `env["PATH"]` — proven by handing the client a `PATH` that names the real
+/// binary's directory while `host_search_path` names a different, empty one:
+/// resolution must still fail, because only `host_search_path` is trusted.
+#[test]
+fn the_clients_own_env_path_is_still_never_trusted_even_with_a_search_path_present() {
+    let temp = tempfile::tempdir().unwrap();
+    let real_bin = write_fake_engine_bin(temp.path(), "totally-fake-nvm-engine");
+    let empty = tempfile::tempdir().unwrap();
+
+    let registry = SessionRegistry::new();
+    let result = registry.create_session_with_search_path(
+        CreateSession {
+            id: "client-path-ignored".into(),
+            command: vec!["totally-fake-nvm-engine".into()],
+            cwd: None,
+            // The client's own PATH names exactly where the binary lives —
+            // if this were consulted, resolution would succeed for the
+            // wrong reason.
+            env: HashMap::from([("PATH".to_string(), real_bin)]),
+            cols: 80,
+            rows: 24,
+            transcript_path: None,
+        },
+        Some(&empty.path().to_string_lossy()),
+    );
+    assert!(
+        result.is_err(),
+        "the client's own env[\"PATH\"] must never be consulted, even alongside a real host_search_path"
+    );
+}

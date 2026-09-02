@@ -376,6 +376,20 @@ final class PaneWorkspaceView: NSView, NSMenuItemValidation {
 
     let resizeCoalescer = PaneResizeCoalescer()
 
+    /// Whether this Mac is currently driving another (2026-09-01 remote
+    /// environment sharing spec §4/§6, Task 28 fix round 3). Set by
+    /// `WorkspaceWindowController.syncTakeoverPanel` — the one place every
+    /// other "does this pane know we are driving" reading is kept in sync
+    /// (spec §4, Task 26's sidebar cards). Read by `PaneContainerView
+    /// .makeAppViewIfNeeded` so an App view's composer, built while a
+    /// takeover is already live (or built fresh once the host's own layout
+    /// repopulates the grid after one starts), starts with its attach
+    /// button correctly disabled from the first frame.
+    var isDrivingRemote = false
+    /// The machine being driven, for the attach button's disabled tooltip —
+    /// `nil` when not driving or the name is not yet known.
+    var drivingHostName: String?
+
     /// Raised when a pane wants to exist or stop existing — the window
     /// controller owns session lifecycle, this view owns layout and identity.
     var onRequestNewPane: (() -> Void)?
@@ -2725,6 +2739,12 @@ final class PaneContainerView: NSView, NSDraggingSource {
         // thing rather than the one place it happens. The header's title
         // label is the same story, and does the same thing.
         view.translatesAutoresizingMaskIntoConstraints = true
+        // Built while a takeover is already live (the App view mode toggled
+        // on mid-share) must not default to "not driving" until the next
+        // `syncTakeoverPanel` sweep happens to touch it (Task 28 fix
+        // round 3) — read the workspace's own current reading directly.
+        view.isDrivingRemote = workspace?.isDrivingRemote ?? false
+        view.drivingHostName = workspace?.drivingHostName
         view.onSubmit = { [weak self] text in
             // Not `sendInput(text + "\r")`: a half-typed line sitting in the
             // TUI would be sent with it. This clears the input, sends the

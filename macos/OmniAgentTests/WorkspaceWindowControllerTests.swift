@@ -1007,6 +1007,31 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         )
     }
 
+    // MARK: - Engine search path (2026-09-01 remote environment sharing
+    // spec §4/§6, Task 28 fix round 1)
+
+    /// `HostState` reports engine availability from `EngineLauncher
+    /// .searchPath` (the login-shell PATH); the daemon needs that exact
+    /// same string to resolve a bare engine name a remote viewer sends, or
+    /// the two disagree again — an engine reported available, then failing
+    /// to launch. Construction publishes it, off the `prewarm()` completion.
+    func testConstructionPublishesThisMachinesSearchPathToTheLocalDaemon() throws {
+        let controller = makeEmptyController()
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+
+        // `prewarm()`'s completion is dispatched, not synchronous — pump
+        // until it lands rather than asserting on the very next line.
+        let deadline = Date().addingTimeInterval(2)
+        while !writes.contains(where: { $0.0 == SettingsKey.engineSearchPath }), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+
+        let write = try XCTUnwrap(writes.first { $0.0 == SettingsKey.engineSearchPath })
+        XCTAssertEqual(write.1, EngineLauncher.searchPath)
+    }
+
     // MARK: - Sessions
 
     func testStartingASessionPutsItsPaneInABrandNewGroupWithTheLowestFreeName() throws {

@@ -258,6 +258,46 @@ final class PaneAppView: NSView {
     /// the same way `PaneWorkspaceView`'s own `occlusionObserver` is: torn
     /// down and, if there is a new window, rebuilt against it.
     private var keyWindowObservers: [NSObjectProtocol] = []
+    /// A stored property (rather than a local in `configureComposer`, its
+    /// only pre-existing user) so `isDrivingRemote`'s `didSet` can reach it.
+    private let attachButton = PaneAppView.composerButton(symbol: "paperclip", accessibility: "Attach a file")
+
+    /// Attaching a file browses `NSOpenPanel` — this Mac's own disk, the
+    /// wrong machine's filesystem while this Mac is driving another (Task
+    /// 28 fix round 3, 2026-09-01 remote environment sharing spec §4/§6):
+    /// the composer sends its text into the *host's* PTY (`onSubmit`,
+    /// wired by `PaneContainerView`), so a path chosen from this Mac's own
+    /// disk would be handed to a remote agent as if it meant something
+    /// there. Disabled rather than routed through the remote folder
+    /// browser: an attachment needs to name a *file*, and that browser
+    /// exists specifically to keep files un-choosable — there is no
+    /// file-read RPC in this system, deliberately (`RemoteFolderBrowser`'s
+    /// own doc). Set once, at this view's construction
+    /// (`PaneContainerView.makeAppViewIfNeeded`), from `PaneWorkspaceView
+    /// .isDrivingRemote` — the window controller's own reading, kept
+    /// current by `syncTakeoverPanel`. Never swept onto an already-built
+    /// view later: every `isDrivingRemote` transition goes through
+    /// `swapConnection`, which closes every pane first
+    /// (`resetForAccountSwitch`), so there is never an existing `PaneAppView`
+    /// for a later transition to reach.
+    var isDrivingRemote = false {
+        didSet {
+            attachButton.isEnabled = !isDrivingRemote
+            attachButton.toolTip = isDrivingRemote
+                ? "Attachments aren't available while driving \(drivingHostName ?? "another Mac")"
+                : "Attach a file"
+        }
+    }
+    /// The machine being driven, for the disabled tooltip above — refreshed
+    /// independently of `isDrivingRemote` itself since the name can arrive
+    /// (or change) after driving has already started.
+    var drivingHostName: String? {
+        didSet {
+            guard isDrivingRemote else { return }
+            attachButton.toolTip = "Attachments aren't available while driving \(drivingHostName ?? "another Mac")"
+        }
+    }
+
     /// Internal rather than `private` so the composer tests can read and set
     /// the draft directly.
     let composerField: HomeComposerField = {
@@ -420,6 +460,17 @@ final class PaneAppView: NSView {
     /// whatever the walk happens to match.
     var glowContainerForTesting: CALayer? { composerGlow }
 
+    /// The attach button's disabled state and tooltip while driving (Task 28
+    /// fix round 3) — `attachButton` itself stays `private` since nothing
+    /// but its own `isDrivingRemote`/`drivingHostName` should ever touch it.
+    var isAttachButtonEnabledForTesting: Bool { attachButton.isEnabled }
+    var attachButtonToolTipForTesting: String? { attachButton.toolTip }
+    /// Fires the same `@objc` action a real click sends, so
+    /// `chooseAttachment`'s own guard is exercised rather than only the
+    /// button's visual `isEnabled` — an `NSButton` still calls its action on
+    /// a stale click even while disabled.
+    func chooseAttachmentForTesting() { chooseAttachment() }
+
     /// Where keyboard focus should land when this view is the pane's active
     /// content — the composer, so typing starts a message rather than
     /// requiring a click first.
@@ -506,9 +557,14 @@ final class PaneAppView: NSView {
         // exactly the "not a soft halo" failure mode.
         composerGlass.layer?.masksToBounds = false
 
-        let attachButton = Self.composerButton(symbol: "paperclip", accessibility: "Attach a file")
         attachButton.target = self
         attachButton.action = #selector(chooseAttachment)
+        // `isDrivingRemote`'s `didSet` (below) does not run for a stored
+        // property's own initial value, only on a later assignment — the
+        // plain tooltip has to be set explicitly here, once, rather than
+        // relying on a `didSet` that never fires before the first real
+        // transition.
+        attachButton.toolTip = "Attach a file"
 
         let sendButton = Self.composerButton(symbol: "arrow.up", accessibility: "Send")
         sendButton.target = self
@@ -1034,6 +1090,11 @@ final class PaneAppView: NSView {
     }
 
     @objc private func chooseAttachment() {
+        // Belt-and-braces beside `attachButton.isEnabled`: a disabled
+        // `NSButton` still fires its action from an already-in-flight
+        // click or a stale keyboard equivalent, and `NSOpenPanel` would
+        // show this Mac's own disk regardless of what sent it here.
+        guard !isDrivingRemote else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false

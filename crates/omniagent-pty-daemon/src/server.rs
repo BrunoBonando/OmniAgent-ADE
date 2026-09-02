@@ -145,6 +145,25 @@ pub const REMOTE_SHARING_KEY: &str = "remote_sharing";
 /// writes are a human action apart.
 pub const BLOCKED_VIEWERS_KEY: &str = "remote_control_blocked";
 
+/// This machine's own login-shell `PATH` (Task 28 fix round 1), written by
+/// the app once `EngineLauncher.loginShellPath()` resolves it — the exact
+/// same string `HostState` already reports engine availability from
+/// (`EngineLauncher.searchPath`). `session.rs`'s `resolve_engine_binary`
+/// reads it (via `create_session_with_search_path`) to resolve a remote
+/// viewer's bare engine name against locations a fixed list cannot name,
+/// `nvm`/`asdf` chief among them — without this row, an engine `HostState`
+/// honestly reports as available could still fail to launch, moving this
+/// fix's own bug one layer down instead of closing it.
+///
+/// **Protected** (see [`protected_setting_key`]): this row is never reached
+/// by a remote `GetSetting`/`SetSetting` at all. Letting a remote viewer
+/// *read* it would hand over the host's own directory layout for free;
+/// letting one *write* it would let a driving viewer plant an attacker
+/// path ahead of the real `claude`/`codex`/`copilot` that this machine's
+/// own local sessions — and every future driver — would then exec without
+/// warning, long after that viewer disconnects.
+pub const ENGINE_SEARCH_PATH_KEY: &str = "engine_search_path";
+
 /// The viewer ids currently blocked. An unreadable store, a missing row or
 /// unparsable JSON all mean "nobody is blocked": this list only ever *adds*
 /// refusals, so failing open here refuses nothing that the trust boundary in
@@ -384,7 +403,10 @@ pub const AUTH_ACCOUNT_EMAIL_KEY: &str = "auth_account_email";
 pub fn protected_setting_key(key: &str) -> bool {
     matches!(
         key,
-        REMOTE_SHARING_KEY | crate::relay::DEVICE_TOKEN_KEY | BLOCKED_VIEWERS_KEY
+        REMOTE_SHARING_KEY
+            | crate::relay::DEVICE_TOKEN_KEY
+            | BLOCKED_VIEWERS_KEY
+            | ENGINE_SEARCH_PATH_KEY
     ) || key.starts_with(AUTH_KEY_PREFIX)
 }
 
@@ -1222,7 +1244,17 @@ where
             MessageKind::CreateSession => {
                 let create = decode_payload!(CreateSession);
                 let id = create.id.clone();
-                match registry.create_session(create) {
+                // This machine's own login-shell `PATH` (fix round 1),
+                // never the wire request's — see `ENGINE_SEARCH_PATH_KEY`'s
+                // doc for why a client-supplied one would reopen the exact
+                // bug this closes. An unreadable store is `None`, the same
+                // "resolve against the fixed list only" a caller with
+                // nothing to offer already gets.
+                let host_search_path = lock_store(&settings)
+                    .ok()
+                    .and_then(|store| store.get_setting(ENGINE_SEARCH_PATH_KEY).ok().flatten());
+                match registry.create_session_with_search_path(create, host_search_path.as_deref())
+                {
                     Ok(_) => {
                         send_json(
                             &writer,

@@ -870,7 +870,35 @@ impl SessionRegistry {
         Self::default()
     }
 
+    /// Every existing caller — every test in this crate included. Resolves
+    /// a bare `command[0]` against this machine's own inherited `PATH` and
+    /// fixed lookup list only (`resolve_engine_binary`'s doc), with no
+    /// login-shell `PATH` to check nvm/asdf install locations against. The
+    /// one production caller that has one to offer is `server.rs`'s
+    /// `CreateSession` dispatch, which calls
+    /// [`Self::create_session_with_search_path`] instead.
     pub fn create_session(&self, request: CreateSession) -> Result<Arc<ManagedSession>> {
+        self.create_session_with_search_path(request, None)
+    }
+
+    /// Fix round 1 (2026-09-01 remote environment sharing spec §4/§6): same
+    /// as [`Self::create_session`], but `host_search_path` — this
+    /// machine's own login-shell `PATH`, the settings row
+    /// `engine_search_path` written by the app after
+    /// `EngineLauncher.loginShellPath()` resolves it — is available to
+    /// `resolve_engine_binary` for a bare `command[0]`. `HostState`
+    /// reports engine availability from that exact same login-shell `PATH`
+    /// (`EngineLauncher.searchPath`); resolving a launch against anything
+    /// narrower would let the two disagree again; `host_search_path` is
+    /// **never** taken from the wire request itself (`CreateSession` has no
+    /// such field, deliberately — a client-supplied search path is the
+    /// exact bug this exists to close, moved rather than fixed) — it is
+    /// read from this daemon's own settings store by the caller.
+    pub fn create_session_with_search_path(
+        &self,
+        request: CreateSession,
+        host_search_path: Option<&str>,
+    ) -> Result<Arc<ManagedSession>> {
         {
             let mut state = self
                 .state
@@ -889,7 +917,7 @@ impl SessionRegistry {
             }
         }
 
-        let spawned = spawn_session(&request);
+        let spawned = spawn_session(&request, host_search_path);
         let (session, mut reader, mut transcript) = match spawned {
             Ok(spawned) => spawned,
             Err(error) => {
@@ -1095,19 +1123,37 @@ fn strip_inherited_agent_identity(command: &mut CommandBuilder) {
 /// this Mac resolves the name itself, using only what actually exists on
 /// its own disk.
 ///
-/// **Why not spawn a login shell.** `EngineLauncher.loginShellPath()` on
-/// the Swift side runs `$SHELL -ilc 'printf %s "$PATH"'` once per app
-/// launch and caches the result — fine for a foreground app the user is
-/// watching start up. This function runs synchronously inside a
-/// session-create RPC; a slow or hung login shell (an rc chain that touches
-/// the network, or — with no controlling terminal under launchd — one that
-/// never returns at all, exactly the failure `loginShellPath()`'s own
-/// timeout exists to survive) would stall every terminal a viewer tries to
-/// open on this machine. A fixed list of directories has no process to
-/// hang.
+/// **`host_search_path` (fix round 1).** The fixed list below has no entry
+/// that can name an `nvm`/`asdf` install — those live under a *versioned*
+/// subdirectory (`~/.nvm/versions/node/v22.4.0/bin`, `~/.asdf/shims`) no
+/// fixed path can spell, and are exactly where `npm install -g` puts
+/// `claude`/`codex`/`copilot` most often. Checking only the fixed list
+/// while `HostState` reports availability from `EngineLauncher.searchPath`
+/// — the app's own login-shell `PATH`, which *does* reach those —
+/// reintroduced this fix's own bug one layer down: an honestly-reported
+/// "available" that then fails to launch. So `host_search_path` — that
+/// exact same login-shell `PATH`, published by the app to the
+/// `engine_search_path` settings row and threaded in by
+/// `SessionRegistry::create_session_with_search_path` — is checked
+/// **first**, ahead of the daemon's own inherited `PATH` and the fixed
+/// list, both kept as the fallback for whenever the app has not published
+/// the row yet (a very first launch) or a caller (every test in this
+/// crate) has none to offer.
 ///
-/// **Why the daemon's own inherited `PATH` almost never has these.** It
-/// runs as a `LaunchAgent` (`macos/embed-daemon.sh`'s production plist),
+/// **Why not spawn a login shell here instead.** `EngineLauncher
+/// .loginShellPath()` on the Swift side runs `$SHELL -ilc 'printf %s
+/// "$PATH"'` once per app launch and caches the result — fine for a
+/// foreground app the user is watching start up. This function runs
+/// synchronously inside a session-create RPC; a slow or hung login shell
+/// (an rc chain that touches the network, or — with no controlling
+/// terminal under launchd — one that never returns at all, exactly the
+/// failure `loginShellPath()`'s own timeout exists to survive) would stall
+/// every terminal a viewer tries to open on this machine. Reading a
+/// settings row the app already resolved has no process to hang; this
+/// function still never spawns one itself.
+///
+/// **Why the daemon's own inherited `PATH` almost never has these either.**
+/// It runs as a `LaunchAgent` (`macos/embed-daemon.sh`'s production plist),
 /// which ships with **no `EnvironmentVariables` key at all** — deliberately,
 /// so the daemon computes its data paths from its own runtime `$HOME`
 /// rather than one baked into the plist at build time (see that script's
@@ -1115,10 +1161,13 @@ fn strip_inherited_agent_identity(command: &mut CommandBuilder) {
 /// `EnvironmentVariables` is `/usr/bin:/bin:/usr/sbin:/sbin` plus session
 /// variables such as `HOME` — none of the places Homebrew, `cargo`,
 /// `nvm`/`bun`, or `pip --user` actually install a CLI. Checked anyway,
-/// first, because it costs nothing and covers an unusual setup (a
+/// second, because it costs nothing and covers an unusual setup (a
 /// hand-edited plist, a future build that does set `PATH`).
-fn resolve_engine_binary(name: &str) -> Option<PathBuf> {
+fn resolve_engine_binary(name: &str, host_search_path: Option<&str>) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = host_search_path {
+        candidates.extend(std::env::split_paths(path));
+    }
     if let Ok(path_var) = std::env::var("PATH") {
         candidates.extend(std::env::split_paths(&path_var));
     }
@@ -1152,7 +1201,10 @@ fn is_executable_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
+fn spawn_session(
+    request: &CreateSession,
+    host_search_path: Option<&str>,
+) -> Result<SpawnedSession> {
     let engine = infer_engine(&request.command);
     let pair = NativePtySystem::default()
         .openpty(PtySize {
@@ -1172,7 +1224,7 @@ fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
         let resolved = if program.starts_with('/') {
             program.clone()
         } else {
-            resolve_engine_binary(program)
+            resolve_engine_binary(program, host_search_path)
                 .map(|path| path.to_string_lossy().into_owned())
                 .ok_or_else(|| anyhow!("{program} is not installed on this Mac"))?
         };

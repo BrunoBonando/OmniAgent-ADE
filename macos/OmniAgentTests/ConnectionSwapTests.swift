@@ -293,6 +293,120 @@ final class ConnectionSwapTests: XCTestCase {
         XCTAssertEqual(other.disconnects, 1, "every other machine is closed as before")
     }
 
+    // MARK: - A session's cwd never guesses this Mac's own disk (Task 28 fix
+    // round 2, 2026-09-01 remote environment sharing spec §4/§6)
+
+    /// The local case's last resort — this Mac's own home directory — is a
+    /// guess about a machine the host has never described. `portable_pty`
+    /// accepts a bad `cwd` silently whenever a directory of that same name
+    /// happens to exist on the host too (the common case for one person's
+    /// own two Macs sharing a username), so nothing downstream would ever
+    /// say this went wrong. While driving, with nothing recorded,
+    /// `startingDirectory`/`workspaceRoot` answer `nil` instead of guessing.
+    func testStartingDirectoryNeverGuessesThisMacsHomeWhileDrivingWithNothingKnown() async throws {
+        let (controller, _, remote) = try makeController()
+        defer { controller.close() }
+        XCTAssertEqual(
+            controller.startingDirectory(for: nil),
+            FileManager.default.homeDirectoryForCurrentUser.path,
+            "the local case is unchanged"
+        )
+
+        controller.remoteConnectionProvider = { _ in remote }
+        try await controller.connectRemote(to: studio)
+
+        XCTAssertNil(controller.startingDirectory(for: nil))
+        XCTAssertNil(controller.workspaceRoot())
+    }
+
+    /// The fix is "never guess", not "never answer": a real host workspace
+    /// still resolves correctly while driving.
+    func testStartingDirectoryStillResolvesARealHostWorkspaceWhileDriving() async throws {
+        let (controller, _, remote) = try makeController()
+        defer { controller.close() }
+        controller.remoteConnectionProvider = { _ in remote }
+        try await controller.connectRemote(to: studio)
+
+        controller.projectLister = { completion in
+            completion(.success([
+                BrainProjectSummary(id: "host-project", label: "Host Project", path: "/Users/host/Project"),
+            ]))
+        }
+        controller.refreshProjectLabels()
+
+        XCTAssertEqual(controller.workspaceDirectory(for: "host-project"), "/Users/host/Project")
+        XCTAssertEqual(
+            controller.startingDirectory(
+                for: PaneDescriptor(sessionID: "p", group: "g", project: "host-project")
+            ),
+            "/Users/host/Project"
+        )
+    }
+
+    /// Home's Chat scratch folder is this Mac's own
+    /// `~/Documents/OmniAgent/Chats` — meaningless on a host that has never
+    /// heard of it. While driving it must not resolve at all, rather than
+    /// answering with a real folder that happens to exist on the host for a
+    /// completely unrelated reason.
+    func testHomeChatWorkspaceDoesNotResolveToThisMacsOwnFolderWhileDriving() async throws {
+        let (controller, _, remote) = try makeController()
+        defer { controller.close() }
+        XCTAssertEqual(
+            controller.workspaceDirectory(for: HomeChatWorkspace.id),
+            HomeChatWorkspace.directory,
+            "the local case is unchanged"
+        )
+
+        controller.remoteConnectionProvider = { _ in remote }
+        try await controller.connectRemote(to: studio)
+
+        XCTAssertNil(controller.workspaceDirectory(for: HomeChatWorkspace.id))
+    }
+
+    // MARK: - The App view composer's attach button follows the swap
+    // (Task 28 fix round 3)
+
+    /// End to end, both directions: `swapConnection` closes every pane
+    /// (`resetForAccountSwitch`) before `syncTakeoverPanel` ever runs, so no
+    /// `PaneAppView` survives the swap itself to be told about afterwards —
+    /// the real question is whether one built *after* the swap, from the
+    /// window's own reading at that moment, gets it right. It does, both
+    /// ways.
+    func testTheAppViewComposersAttachButtonReadsTheCurrentDrivingStateAtConstruction() async throws {
+        let (controller, _, remote) = try makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        controller.remoteConnectionProvider = { _ in remote }
+        try await controller.connectRemote(to: studio)
+
+        // A pane built (from the host's own panes, in production) while
+        // driving is already the answer.
+        controller.newTerminalPane(nil)
+        let drivingPaneID = try XCTUnwrap(controller.workspaceView.allPaneIDs.first)
+        let drivingContainer = try XCTUnwrap(controller.workspaceView.container(for: drivingPaneID))
+        drivingContainer.viewMode = .app
+        let drivingAppView = try XCTUnwrap(drivingContainer.appView)
+        XCTAssertFalse(drivingAppView.isAttachButtonEnabledForTesting, "built while driving")
+        XCTAssertEqual(
+            drivingAppView.attachButtonToolTipForTesting,
+            "Attachments aren't available while driving Mac Studio"
+        )
+
+        controller.disconnectRemote()
+
+        // A pane built afterwards, back on this Mac's own environment, is
+        // not held to the takeover's own reading.
+        controller.newTerminalPane(nil)
+        let localPaneID = try XCTUnwrap(
+            controller.workspaceView.allPaneIDs.first { $0 != drivingPaneID }
+        )
+        let localContainer = try XCTUnwrap(controller.workspaceView.container(for: localPaneID))
+        localContainer.viewMode = .app
+        let localAppView = try XCTUnwrap(localContainer.appView)
+        XCTAssertTrue(localAppView.isAttachButtonEnabledForTesting, "back on this Mac's own environment")
+    }
+
     // MARK: - Helpers
 
     /// A window on a local unix socket that does not exist and a remote

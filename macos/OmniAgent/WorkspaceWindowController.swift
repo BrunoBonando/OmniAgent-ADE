@@ -1302,8 +1302,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             self?.showRemoteViewers(forWorkspace: id)
         }
         // Asking the login shell for its PATH spawns a shell; do it now, off
-        // the main thread, so the first terminal does not wait for it.
-        EngineLauncher.prewarm()
+        // the main thread, so the first terminal does not wait for it. Once
+        // resolved, published to this Mac's own daemon
+        // (`SettingsKey.engineSearchPath`, Task 28 fix round 1) so a remote
+        // viewer's driven session can find an nvm/asdf-installed engine the
+        // daemon's own fixed lookup list cannot name —
+        // `resolve_engine_binary` (session.rs) reads this exact row. The
+        // completion fires on a background queue; hop to main before
+        // touching `write(_:to:machineLocal:)`'s per-window cache.
+        EngineLauncher.prewarm { [weak self] in
+            DispatchQueue.main.async {
+                self?.write(EngineLauncher.searchPath, to: SettingsKey.engineSearchPath, machineLocal: true)
+            }
+        }
         for pane in panes { addPane(pane, startSession: false) }
         selectInitialWorkspaceIfNeeded(animated: false)
         reloadOutline()
@@ -2261,8 +2272,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // the *project* — and that fallback is "the first pane in this
         // project", so the outline's per-session "+" opened its new terminal in
         // whichever sibling session happened to come first.
+        // `startingDirectory` is `nil` only while driving with nothing
+        // recorded — `""` here, not a guess, for the same reason
+        // `newSession` passes it through unresolved: `createSession`
+        // re-derives it identically and refuses visibly once this pane
+        // exists to report it on (Task 28 fix round 2).
         let cwd = inherited.isEmpty
-            ? startingDirectory(for: workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) })
+            ? (startingDirectory(for: workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }) ?? "")
             : inherited
         return addPane(
             RestoredPane(
@@ -2416,15 +2432,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @objc func newSession(_ sender: Any?) {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
+        // `workspaceRoot()` is `nil` only while driving with nothing
+        // recorded (Task 28 fix round 2) — passed through as `""` rather
+        // than guessed here: `createSession` re-derives the same way and
+        // refuses visibly once the pane exists to report it on, the same
+        // path an uninstalled engine already fails through.
         startSession(
-            inDirectory: workspaceRoot(),
+            inDirectory: workspaceRoot() ?? "",
             project: current?.project ?? selectedProjectID ?? ""
         )
     }
 
     /// The folder a new session starts in: the open workspace's own directory,
     /// falling back to the focused pane's when no workspace is selected.
-    func workspaceRoot() -> String {
+    /// `nil` only while driving with nothing recorded — see
+    /// `startingDirectory(for:)`'s own doc.
+    func workspaceRoot() -> String? {
         let current = workspace.focusedPaneID.flatMap { workspace.descriptor(for: $0) }
         if let folder = workspaceDirectory(for: current?.project ?? selectedProjectID) {
             return folder
@@ -2437,7 +2460,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// been told about yet.
     @objc func openWorkspaceFolder(_ sender: Any?) {
         guard workspace.terminalPaneCount < PaneWorkspaceView.maxTerminals else { return }
-        chooseSessionDirectory(startingAt: workspaceRoot()) { [weak self] chosen in
+        // Only a *starting point* for browsing, never a session's cwd — the
+        // sheet's own explicit choice is what actually gets added, so "/"
+        // when nothing else is known is a navigable seed, not a guess
+        // anyone acts on unseen (`chooseSessionDirectory`'s own fallback
+        // handles this identically for the case that reaches it as a
+        // literal path rather than `nil`).
+        chooseSessionDirectory(startingAt: workspaceRoot() ?? "/") { [weak self] chosen in
             guard let self, let chosen else { return }
             // The chosen folder *is* the workspace. This used to hand the new
             // session `current?.project` — the focused pane's workspace — so
@@ -5317,6 +5346,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // and the cards must catch up on that transition too.
         shellSidebar.statsRow.isDrivingRemote = isDrivingRemote
         shellSidebar.claudeLimits.isDrivingRemote = isDrivingRemote
+        // The App view composer's attach button (Task 28 fix round 3): the
+        // workspace's own reading is what `PaneContainerView
+        // .makeAppViewIfNeeded` consults for a pane's App view built while
+        // this is already the answer — no sweep of already-built ones is
+        // needed here, unlike `sharingIsLive` above: every `isDrivingRemote`
+        // transition goes through `swapConnection`, and
+        // `resetForAccountSwitch` closes every pane (`workspace.closePane`)
+        // as part of that same call, before this line ever runs — there is
+        // no `PaneAppView` left standing for a sweep to reach.
+        workspace.isDrivingRemote = isDrivingRemote
+        workspace.drivingHostName = remoteSharing.activeRemoteSession?.machineName
         // `liveConnection` **alone**, and never `isSharing` with it.
         //
         // `isSharing` is this app's cached copy of a row the daemon reads
@@ -8244,7 +8284,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Read off the built argv rather than off `engine`, so engines that
         // ignore the conversation id never arm the fallback.
         if command.contains("--resume") { resumeSpawns[sessionID] = Date() }
-        let cwd = startingDirectory(for: descriptor)
+        // `startingDirectory` is `nil` only while driving with nothing the
+        // host has told us about (Task 28 fix round 2) — this Mac's own
+        // home directory would be a guess `portable_pty` accepts silently
+        // whenever a directory of that same name happens to exist on the
+        // host too (the common case for one person's own two Macs), so the
+        // session would start there with nothing anywhere saying so. A
+        // visible refusal, on the exact path an uninstalled engine already
+        // fails through above, is strictly better than that.
+        guard let cwd = startingDirectory(for: descriptor) else {
+            let host = remoteSharing.activeRemoteSession?.machineName ?? "the other Mac"
+            let message = "Couldn't tell which folder to start this session in on \(host)"
+            endEnsure(sessionID)
+            applySessionStatus(message, for: sessionID)
+            reportSessionFailure(message, for: sessionID)
+            return
+        }
         connection.createSession(
             CreateSessionRequest(
                 id: sessionID,
@@ -8288,7 +8343,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         surface.feed(Data(text.utf8), isSnapshot: false)
     }
 
-    /// The directory a pane's process starts in.
+    /// The directory a pane's process starts in, or `nil` when nothing
+    /// honest can be said about one (only reachable while driving — see
+    /// below).
     ///
     /// A terminal belongs to its workspace, so the workspace's folder is the
     /// answer unless the pane already sits *inside* it — a pane that was in
@@ -8296,12 +8353,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// older layout does not. Without that rule a workspace opened today
     /// inherits last week's home directory and every agent starts in the wrong
     /// tree.
-    func startingDirectory(for descriptor: PaneDescriptor?) -> String {
+    ///
+    /// **While driving, with nothing recorded** (Task 28 fix round 2,
+    /// 2026-09-01 remote environment sharing spec §4/§6): the local case's
+    /// last resort, this Mac's own home directory, is answered `nil`
+    /// instead. `portable_pty::CommandBuilder::as_command()` treats a `cwd`
+    /// that does not exist *on the spawning machine* as absent and falls
+    /// back to the daemon's own home — silently, with no error anywhere —
+    /// so on two Macs sharing a username (the common case for one person's
+    /// own machines) this Mac's home directory string is not obviously
+    /// wrong on the host: it exists there too, just as somebody else's real
+    /// folder. A session would start there with nothing anywhere saying so,
+    /// which reads as "the agent is confused about my project" rather than
+    /// a bug with a cause. `createSession` turns `nil` into a visible
+    /// refusal instead.
+    func startingDirectory(for descriptor: PaneDescriptor?) -> String? {
         let carried = descriptor?.cwd ?? ""
         guard let folder = workspaceDirectory(for: descriptor?.project) else {
-            return carried.isEmpty
-                ? FileManager.default.homeDirectoryForCurrentUser.path
-                : carried
+            if !carried.isEmpty { return carried }
+            guard !isDrivingRemote else { return nil }
+            return FileManager.default.homeDirectoryForCurrentUser.path
         }
         return WorkspaceWindowController.isInside(carried, folder) ? carried : folder
     }
@@ -8320,8 +8391,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard let id else { return nil }
         // Home's Chat scratch workspace is not in the brain — it is a fixed
         // folder under Documents, resolved here so anything asking "where
-        // would this run?" gets a real answer for it too.
-        if id == HomeChatWorkspace.id { return HomeChatWorkspace.directory }
+        // would this run?" gets a real answer for it too. Not while driving
+        // (Task 28 fix round 2): that folder is this Mac's own, and the
+        // host has never heard of it — falling through to the ordinary
+        // "nothing recorded" path below lets `startingDirectory` decide
+        // honestly instead of silently rooting a session in a folder that
+        // happens to exist on the host for a completely different reason.
+        if id == HomeChatWorkspace.id, !isDrivingRemote { return HomeChatWorkspace.directory }
         if let path = workspaces.first(where: { $0.id == id })?.path, !path.isEmpty {
             return path
         }
@@ -8446,7 +8522,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// workspace, not a twin; an unknown one takes the id the brain would
     /// mint for it (`roots::project_id_for`: the basename).
     private func pickHomeFolder() {
-        chooseSessionDirectory(startingAt: homeDirectory() ?? workspaceRoot()) { [weak self] chosen in
+        // A browsing seed only, same reasoning as `openWorkspaceFolder`'s
+        // own `?? "/"`: nothing is added or started until the sheet's Add
+        // fires with an explicit choice.
+        chooseSessionDirectory(startingAt: homeDirectory() ?? workspaceRoot() ?? "/") { [weak self] chosen in
             guard let self, let chosen else { return }
             let id = workspaces.first { $0.path == chosen }?.id ?? (chosen as NSString).lastPathComponent
             homePendingFolder = BrainProjectSummary(id: id, label: id, path: chosen)

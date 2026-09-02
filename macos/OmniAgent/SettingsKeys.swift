@@ -192,4 +192,22 @@ enum SettingsKey {
     /// no-change suppression, since the app having last written `"[]"` is no
     /// evidence that the row on disk still is.
     static let remoteControlBlocked = "remote_control_blocked"
+
+    /// **A contract with the Rust daemon, written by the app, never sent
+    /// on the wire per-request** — Task 28 fix round 1 (2026-09-01 remote
+    /// environment sharing spec §4/§6). This machine's own login-shell
+    /// `PATH` (`EngineLauncher.searchPath`, resolved once by
+    /// `EngineLauncher.prewarm()` and published here on every prewarm
+    /// completion, local and never through `connection` — see
+    /// `write(_:to:machineLocal:)`'s own reasoning for why a row that
+    /// describes *this* Mac always targets `localConnection`). Read
+    /// directly by `session.rs`'s `resolve_engine_binary` — the same
+    /// login-shell `PATH` `HostState` already reports engine availability
+    /// from, so the two can no longer disagree about what a bare engine
+    /// name resolves to. Protected: the daemon refuses this key to a
+    /// remote `GetSetting`/`SetSetting` outright
+    /// (`protected_setting_key`), so a driving viewer can neither read
+    /// this Mac's directory layout nor plant a path ahead of the real
+    /// engine binaries.
+    static let engineSearchPath = "engine_search_path"
 }
