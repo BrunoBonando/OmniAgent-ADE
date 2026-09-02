@@ -354,12 +354,101 @@ final class HomeViewTests: XCTestCase {
     }
 
     /// A full layout pass at a real window size, over the real pane ground,
-    /// neither throws nor collapses. Drops a PNG when `PANE_RENDER_DIR` is
-    /// set (`TEST_RUNNER_PANE_RENDER_DIR=/tmp/panes ./macos/build.sh test`).
+    /// neither throws nor collapses — at a wide window and at a small laptop
+    /// one, since the column is no longer a fixed lane but the card's own
+    /// width less its margins. Drops a PNG when `PANE_RENDER_DIR` is set
+    /// (`TEST_RUNNER_PANE_RENDER_DIR=/tmp/panes ./macos/build.sh test`).
     func testTheHomeScreenLaysOutOffscreen() throws {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 1280, height: 1900))
-        let ground = PaneGroundView()
+        for (width, height, name) in [
+            (CGFloat(1280), CGFloat(1900), "home"),
+            (CGFloat(1000), CGFloat(700), "home-narrow"),
+        ] {
+            let home = makeHome()
+            let laid = layOut(home, width: width, height: height)
+            defer { laid.window.close() }
+            XCTAssertEqual(home.shell.titleField.stringValue, "Home")
+            XCTAssertFalse(home.hasAmbiguousLayout, "ambiguous at \(width)×\(height)")
+
+            let bitmap = try XCTUnwrap(
+                laid.container.bitmapImageRepForCachingDisplay(in: laid.container.bounds)
+            )
+            laid.container.cacheDisplay(in: laid.container.bounds, to: bitmap)
+            XCTAssertGreaterThan(bitmap.size.width, 0)
+            saveRenderForInspection(bitmap, named: name)
+        }
+    }
+
+    /// Up next and What's new are one row, not two sections: the same row
+    /// stack holds both halves, and `fillEqually` gives their cards the same
+    /// width — with the same height, pinned card-to-card, so neither ends
+    /// shorter than its neighbour.
+    func testUpNextAndWhatsNewShareARow() throws {
         let home = makeHome()
+        let laid = layOut(home, width: 1280, height: 1900)
+        defer { laid.window.close() }
+
+        let upNextHalf = try XCTUnwrap(home.upNextCard.superview)
+        let whatsNewHalf = try XCTUnwrap(home.whatsNewCard.superview)
+        let row = try XCTUnwrap(upNextHalf.superview as? NSStackView)
+        XCTAssertTrue(whatsNewHalf.superview === row, "both halves hang off one row")
+        XCTAssertEqual(row.orientation, .horizontal)
+        XCTAssertEqual(row.spacing, 16)
+        XCTAssertEqual(row.distribution, .fillEqually)
+
+        XCTAssertEqual(home.upNextCard.frame.width, home.whatsNewCard.frame.width, accuracy: 0.5)
+        XCTAssertEqual(home.upNextCard.frame.height, home.whatsNewCard.frame.height, accuracy: 0.5)
+        // Both cards start at the same y — pinned card-to-card, so a header
+        // that grew on one side could not drop its card below its neighbour.
+        XCTAssertEqual(
+            home.upNextCard.convert(home.upNextCard.bounds, to: home).minY,
+            home.whatsNewCard.convert(home.whatsNewCard.bounds, to: home).minY,
+            accuracy: 0.5
+        )
+        XCTAssertGreaterThan(home.upNextCard.frame.width, 0)
+        XCTAssertNotEqual(
+            upNextHalf.frame.minX, whatsNewHalf.frame.minX,
+            "side by side, not stacked"
+        )
+    }
+
+    /// The user's own work sits above the marketing cards: the 2-up Up next
+    /// / What's new row comes before "Extend your experience", and the gaps
+    /// are the ones the design asks for — 32 between the sections, 40 before
+    /// the footer.
+    func testTheHighlightsRowComesBeforeExtendYourExperience() throws {
+        let home = makeHome()
+        let laid = layOut(home, width: 1280, height: 1900)
+        defer { laid.window.close() }
+
+        let half = try XCTUnwrap(home.upNextCard.superview)
+        let highlights = try XCTUnwrap(half.superview)
+        let column = try XCTUnwrap(highlights.superview as? NSStackView)
+        let sections = column.arrangedSubviews
+        let highlightsIndex = try XCTUnwrap(sections.firstIndex(of: highlights))
+        let extendIndex = try XCTUnwrap(
+            sections.firstIndex { section in
+                allLabels(in: section).contains("Extend your experience")
+            }
+        )
+        XCTAssertLessThan(highlightsIndex, extendIndex, "the user's own work first")
+
+        XCTAssertEqual(column.customSpacing(after: highlights), 32, accuracy: 0.5)
+        // The section after Extend's header is its card row, and that is what
+        // holds the 40 before the footer.
+        XCTAssertLessThan(extendIndex + 1, sections.count, "Extend's header has a card row under it")
+        let extendRow = sections[extendIndex + 1]
+        XCTAssertEqual(column.customSpacing(after: extendRow), 40, accuracy: 0.5)
+    }
+
+    /// The screen laid out inside a window, over the real pane ground —
+    /// what every layout assertion here needs before it can read a frame.
+    private func layOut(
+        _ home: HomeSurfaceView,
+        width: CGFloat,
+        height: CGFloat
+    ) -> (container: NSView, window: NSWindow) {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let ground = PaneGroundView()
         ground.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(ground)
         container.addSubview(home)
@@ -378,15 +467,10 @@ final class HomeViewTests: XCTestCase {
             defer: false
         )
         window.isReleasedWhenClosed = false
-        defer { window.close() }
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = container
         container.layoutSubtreeIfNeeded()
-
-        let bitmap = try XCTUnwrap(container.bitmapImageRepForCachingDisplay(in: container.bounds))
-        container.cacheDisplay(in: container.bounds, to: bitmap)
-        XCTAssertGreaterThan(bitmap.size.width, 0)
-        saveRenderForInspection(bitmap, named: "home")
+        return (container, window)
     }
 
     /// The repo's render-drop seam: a PNG per named render when the runner

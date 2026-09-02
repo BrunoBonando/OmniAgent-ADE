@@ -26,7 +26,11 @@ final class CommandPaletteTests: XCTestCase {
                 .map(\.id),
             [
                 "session:new-branch",
-                "destination:home", "destination:todo", "destination:terminals", "destination:settings",
+                "destination:home", "destination:todo", "destination:insights",
+                "destination:terminals", "destination:settings",
+                "insights:usage", "insights:activity",
+                "sidebar:help",
+                "titlebar:notifications", "titlebar:account",
                 "settings:general", "settings:accounts", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "settings:accounts:signin", "settings:accounts:github:connect",
@@ -397,7 +401,32 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(rows.first?.action, .openLegal(.privacyPolicy))
     }
 
-    func testTheSidebarsThreeDestinationsAreRowsWithTheirOwnIcons() {
+    /// The standing rule reaching the window chrome: the bell and the avatar
+    /// are 24pt controls with no name printed anywhere, so the spotlight is
+    /// the only other way to name them.
+    func testTheTitleBarsBellAndAvatarAreSpotlightRows() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil
+        )
+
+        let bell = try XCTUnwrap(commands.first { $0.id == "titlebar:notifications" })
+        XCTAssertEqual(bell.title, "Notifications")
+        XCTAssertEqual(bell.symbol, "bell")
+        XCTAssertEqual(bell.subtitle, "Title bar")
+        XCTAssertEqual(bell.keywords, "notifications bell alerts")
+        XCTAssertEqual(bell.action, .showNotifications)
+        XCTAssertEqual(bell.section, .places)
+
+        let account = try XCTUnwrap(commands.first { $0.id == "titlebar:account" })
+        XCTAssertEqual(account.title, "Account")
+        XCTAssertEqual(account.symbol, "person.crop.circle")
+        XCTAssertEqual(account.subtitle, "Title bar")
+        XCTAssertEqual(account.keywords, "account profile avatar me")
+        XCTAssertEqual(account.action, .showAccountMenu)
+        XCTAssertEqual(account.section, .places)
+    }
+
+    func testTheSidebarsDestinationsAreRowsWithTheirOwnIcons() {
         let commands = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil
         )
@@ -405,16 +434,68 @@ final class CommandPaletteTests: XCTestCase {
             if case .showDestination = $0.action { return true } else { return false }
         }
 
-        XCTAssertEqual(destinations.map(\.title), ["Home", "To Do List", "Desk", "Settings"])
+        XCTAssertEqual(
+            destinations.map(\.title), ["Home", "To Do List", "Insights", "Desk", "Settings"]
+        )
         XCTAssertEqual(destinations.map(\.subtitle), [
+            "start a session",
             "under development",
-            "under development",
+            "usage and activity",
             "no session",
-            "under development",
+            "the app's settings",
         ])
         XCTAssertEqual(destinations.first?.action, .showDestination(.home))
         // Their own icons, not the Actions section's ⌘.
-        XCTAssertEqual(destinations.map(\.icon), ["house", "checklist", "rectangle.split.2x2", "gearshape"])
+        XCTAssertEqual(destinations.map(\.icon), [
+            "house", "checklist", "chart.bar.xaxis", "rectangle.split.2x2", "gearshape",
+        ])
+    }
+
+    /// The Insights page's two tabs are rows of their own (the flow layout
+    /// spec's §8) — the destination row lands on whichever tab the page is
+    /// showing, so "Activity" needs a name to type.
+    func testTheInsightsTabsAreSpotlightRows() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil
+        )
+
+        let usage = try XCTUnwrap(commands.first { $0.id == "insights:usage" })
+        let activity = try XCTUnwrap(commands.first { $0.id == "insights:activity" })
+        XCTAssertEqual([usage.title, activity.title], ["Insights › Usage", "Insights › Activity"])
+        XCTAssertEqual([usage.action, activity.action], [
+            .showInsightsTab(.usage), .showInsightsTab(.activity),
+        ])
+        for row in [usage, activity] {
+            XCTAssertEqual(row.symbol, "chart.bar.xaxis")
+            XCTAssertEqual(row.subtitle, "Insights")
+            XCTAssertEqual(row.keywords, "insights usage tokens sessions activity timeline")
+            XCTAssertEqual(row.section, .places)
+        }
+
+        // And they answer to what someone would actually type.
+        var model = CommandPaletteModel(commands: commands)
+        model.update(query: "timeline")
+        XCTAssertEqual(
+            model.matches.map(\.id).filter { $0.hasPrefix("insights:") },
+            ["insights:usage", "insights:activity"]
+        )
+    }
+
+    /// The sidebar's foot in the spotlight: Settings is already a destination
+    /// row, Help is a menu with nowhere else its name is written (the
+    /// standing rule, and the flow layout spec's §8).
+    func testTheSidebarsHelpRowIsASpotlightRow() throws {
+        let commands = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil
+        )
+
+        let help = try XCTUnwrap(commands.first { $0.id == "sidebar:help" })
+        XCTAssertEqual(help.title, "Help")
+        XCTAssertEqual(help.symbol, "questionmark.circle")
+        XCTAssertEqual(help.subtitle, "Sidebar")
+        XCTAssertEqual(help.keywords, "help support docs privacy notices")
+        XCTAssertEqual(help.action, .showHelp)
+        XCTAssertEqual(help.section, .places)
     }
 
     func testATerminalsLiveTitleIsSearchableAndShownWhenTheNameHidesIt() {

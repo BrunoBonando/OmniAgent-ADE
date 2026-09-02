@@ -22,32 +22,41 @@ import AppKit
 
 // MARK: - Destinations
 
-/// The content area's destinations. Home and To Do List are the redesign's
-/// placeholder screens; `terminals` is the Desk — the pane workspace — which
+/// The content area's destinations. To Do List is still the redesign's
+/// placeholder screen; `terminals` is the Desk — the pane workspace — which
 /// no longer has a sidebar row and is reached through the sessions tree, the
 /// menu and the palette.
 enum WorkspaceDestination: String, CaseIterable {
     case home
     case todo
+    /// Usage and activity (the flow layout spec's §6), a nav row of its own
+    /// between To Do List and Search.
+    case insights
     case terminals
-    /// The in-window Settings page (2026-08-27) — reached by the gear, ⌘,
-    /// and the palette, not by a sidebar row.
+    /// The in-window Settings page (2026-08-27) — reached by the sidebar's
+    /// foot, ⌘, and the palette.
     case settings
 
     var title: String {
         switch self {
         case .home: return "Home"
         case .todo: return "To Do List"
+        case .insights: return "Insights"
         case .terminals: return "Desk"
         case .settings: return "Settings"
         }
     }
 
-    /// The palette row's second line.
+    /// The palette row's second line. "under development" is reserved for the
+    /// places that really are one — a destination with a screen says what is
+    /// on it instead.
     var subtitle: String {
         switch self {
-        case .home, .todo, .settings: return "under development"
+        case .home: return "start a session"
+        case .todo: return "under development"
+        case .insights: return "usage and activity"
         case .terminals: return "no session"
+        case .settings: return "the app's settings"
         }
     }
 
@@ -57,6 +66,7 @@ enum WorkspaceDestination: String, CaseIterable {
         switch self {
         case .home: return "house"
         case .todo: return "checklist"
+        case .insights: return "chart.bar.xaxis"
         case .terminals: return "rectangle.split.2x2"
         case .settings: return "gearshape"
         }
@@ -165,6 +175,11 @@ enum ShellPalette {
     static let cardFillHover = NSColor(white: 1, alpha: 0.085)
     static let cardStroke = NSColor(white: 1, alpha: 0.09)
     static let cardStrokeHover = NSColor(white: 1, alpha: 0.2)
+    /// `ContentCardView`'s fill — a shade under `cardFill`, because this one
+    /// is a whole page's ground rather than a card sitting on a page, and the
+    /// same 4% over that much of the window reads as a second grey slab
+    /// instead of a lift off the ground.
+    static let contentCardFill = NSColor(white: 1, alpha: 0.035)
     static let backRowFill = NSColor(white: 1, alpha: 0.03)
     static let fieldFill = NSColor(white: 1, alpha: 0.05)
     static let dashedStroke = NSColor(white: 1, alpha: 0.16)
@@ -604,11 +619,6 @@ final class ShellDotsView: NSView {
 /// under the window's title strip — the fade then starts at the window's
 /// very top edge — while its content still rests below the strip.
 final class ShellScrollView: NSScrollView {
-    /// The strip a page's fade should cover, plus the room past it in which
-    /// content finishes dissolving — generous, so the dissolve is a thing
-    /// you see, not a hairline (2026-08-28: 26pt read as nothing).
-    static let pageFade = WorkspaceTitleBarView.height + 96
-
     private let topFade: CGFloat
     private let topInset: CGFloat
     private var fadeMask: CAGradientLayer?
@@ -1116,10 +1126,47 @@ final class ShellGlassTintView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 }
 
+// MARK: - Content card
+
+/// The content column's contents, as one inset floating card: the Desk, Home,
+/// To Do List, Settings and the docked Settings panel are all children of it,
+/// and `PaneGroundView`'s gradient shows around it as the window's ground
+/// (flow-layout spec §2 — the way Wispr Flow floats its content).
+///
+/// It masks its bounds, and that is what makes the inset read as a card rather
+/// than as padding: anything a page draws past the rounded edge — a pane's
+/// glow, a scroll view's overflow — stops there instead of running out onto
+/// the ground. What is left outside it belongs to the title strip above it:
+/// the window buttons, the bar's own controls and the session name.
+final class ContentCardView: NSView {
+    /// How far the card sits inside the content column on three sides. Its
+    /// top is `WorkspaceTitleBarView.height` instead: the strip above it is
+    /// the window's chrome, not a margin.
+    static let inset: CGFloat = 12
+    static let cornerRadius: CGFloat = 14
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        guard let layer else { return }
+        layer.cornerRadius = Self.cornerRadius
+        layer.cornerCurve = .continuous
+        layer.masksToBounds = true
+        layer.backgroundColor = ShellPalette.contentCardFill.cgColor
+        layer.borderWidth = 1
+        layer.borderColor = ShellPalette.cardStroke.cgColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
 // MARK: - Placeholder
 
-/// What the content half shows for a destination that has no screen yet.
-/// Home and To Do List are deliberately empty in this step of the redesign.
+/// What the content half shows for a destination that has no screen yet —
+/// To Do List, and only it: Insights stood here until its own page landed
+/// (flow-layout spec §6).
 final class WorkspacePlaceholderView: NSView {
     private let titleField = ShellFont.label(font: ShellFont.ui(16, .semibold), color: ShellPalette.ink)
     private let subtitleField = ShellFont.label(font: ShellFont.ui(12.5), color: ShellPalette.inkMuted)
@@ -1127,9 +1174,9 @@ final class WorkspacePlaceholderView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         // Paints nothing. Home and To Do List are the *same* surface the Desk
-        // is — `PaneGroundView` behind this view, running from the window's top
-        // edge — and an opaque fill here made switching destination look like
-        // switching apps.
+        // is — `ContentCardView` behind this view, whose fill is every page's
+        // ground since 2026-09-01 — and an opaque fill here made switching
+        // destination look like switching apps.
         let stack = NSStackView(views: [titleField, subtitleField])
         stack.orientation = .vertical
         stack.alignment = .centerX

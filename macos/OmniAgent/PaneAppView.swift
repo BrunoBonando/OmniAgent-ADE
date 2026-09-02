@@ -206,7 +206,7 @@ final class PaneAppView: NSView {
     ///
     /// `nil` before macOS 26 — there is no glass to ask for and every
     /// stand-in dims rather than refracts, so, like every other caller of
-    /// this helper (`SidebarAccountRowView` is the closest analogue: a
+    /// this helper (`SidebarSystemStatsView` is the closest analogue: a
     /// small, always-visible card, not an optional backdrop that can just be
     /// left out), the fallback is a plain flat card: `ShellPalette.fieldFill`
     /// over a `hairlineStrong` stroke. Deliberately not `.hudWindow` — that
