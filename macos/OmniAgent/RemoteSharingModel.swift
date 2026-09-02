@@ -73,6 +73,21 @@ final class RemoteSharingModel {
     /// §3 "The lease"), so the roster is the lease, and this is the roster's
     /// first entry.
     private(set) var liveConnection: RemoteConnectionInfo?
+    /// The machine **this** Mac is driving right now, or `nil` outside a
+    /// takeover — the viewer half of §6/§10 (Task 25), the opposite
+    /// direction from `liveConnection` above. `SidebarRemoteSessionWidget`
+    /// reads it for the host name and the elapsed-time clock; the End
+    /// remote session palette row and every "Connect to ‹machine›" row's
+    /// `isEnabled` read it to enforce "no chaining in the UI" (spec §3) —
+    /// belt-and-braces over the daemon's own structural refusal
+    /// (`remote_chaining.rs`), not a substitute for it.
+    ///
+    /// Set by `WorkspaceWindowController.connectRemote`/`disconnectRemote`
+    /// directly (`beganDriving`/`endedDriving`) rather than derived from a
+    /// push: unlike `liveConnection`, there is no daemon roster for "who is
+    /// this Mac driving" — the fact lives only in this window's own
+    /// `isDrivingRemote`.
+    private(set) var activeRemoteSession: RemoteSessionInfo?
     /// Fires whenever either row actually changes — the menu bar icon and
     /// Settings › Remote both redraw off this rather than polling.
     var onChange: (() -> Void)?
@@ -196,6 +211,28 @@ final class RemoteSharingModel {
         let live = viewers.first.map(RemoteConnectionInfo.init(viewer:))
         guard live != liveConnection else { return }
         liveConnection = live
+        onChange?()
+    }
+
+    /// `WorkspaceWindowController.connectRemote` calls this the moment the
+    /// swap happens — before the far end has answered anything, because the
+    /// UI-side "no chaining" gate (§3) has to close the instant a takeover
+    /// *begins*, not once it finishes connecting. `since` is this window's
+    /// own clock, not the daemon's: the widget's elapsed time counts up
+    /// locally (Task 25's brief), so it has to start from the same moment
+    /// the gate closes.
+    func beganDriving(_ machineName: String, since: Date = Date()) {
+        activeRemoteSession = RemoteSessionInfo(machineName: machineName, since: since)
+        onChange?()
+    }
+
+    /// `disconnectRemote()`'s counterpart — reopens every "Connect to
+    /// ‹machine›" row and takes the widget down. A no-op when nothing was
+    /// active, so a stray second call (an error-path unwind racing the
+    /// explicit End button) never fires `onChange` for nothing.
+    func endedDriving() {
+        guard activeRemoteSession != nil else { return }
+        activeRemoteSession = nil
         onChange?()
     }
 
@@ -352,6 +389,22 @@ final class RemoteSharingModel {
             return false
         }
         return enabled
+    }
+}
+
+/// The machine this Mac is driving right now — `RemoteSharingModel
+/// .activeRemoteSession`'s value type. `since` is this window's own clock
+/// (`beganDriving`'s default), read locally on every tick rather than
+/// carried from the daemon, so the widget's elapsed time keeps counting
+/// through a reconnect blip instead of resetting to zero the moment a fresh
+/// `HelloAck` lands.
+struct RemoteSessionInfo: Equatable {
+    let machineName: String
+    let since: Date
+
+    init(machineName: String, since: Date = Date()) {
+        self.machineName = machineName
+        self.since = since
     }
 }
 

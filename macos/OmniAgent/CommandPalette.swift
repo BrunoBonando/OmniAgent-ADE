@@ -103,6 +103,17 @@ enum PaletteAction: Equatable {
     /// beside the globe opens, reached by name instead. A row only while
     /// somebody is actually watching, since an empty list is a dead end.
     case showRemoteViewers(workspaceID: String)
+    /// **Connect to ‹machine›** (2026-09-01 remote environment sharing spec
+    /// §6/§10, Task 24/25) — swaps this window onto that machine's daemon
+    /// through the connect ceremony. Disabled (`PaletteCommand.isEnabled`)
+    /// for the entire time another session is already live
+    /// (`RemoteSessionPicker.canConnect`); see that type's doc comment for
+    /// why this is belt-and-braces over the daemon's own structural refusal
+    /// rather than the guarantee itself.
+    case connectRemoteMachine(deviceID: String)
+    /// **End remote session** — present only while `activeRemoteSession !=
+    /// nil` (spec §10); swaps this window back onto its own daemon.
+    case endRemoteSession
     /// An informational row with nothing to run ("No matches…") — a
     /// no-op rather than reusing an unrelated action for "does nothing".
     case noop
@@ -312,6 +323,13 @@ struct PaletteCommand: Equatable {
     /// Its own line under the title, as in Spotlight, rather than a suffix
     /// dimmed inside one.
     let subtitle: String?
+    /// Whether Return or a click actually runs `action`. `true` for every
+    /// row that existed before 2026-09-02 — the palette had no disabled rows
+    /// until **Connect to ‹machine›** needed one (spec §3, Task 25): shown
+    /// so it stays findable and explains itself (`subtitle` carries the
+    /// reason), but inert, the same "announced but disabled" shape
+    /// `WorkspacesHeaderMenus.plus` already draws for its own remote item.
+    let isEnabled: Bool
 
     init(
         id: String,
@@ -321,7 +339,8 @@ struct PaletteCommand: Equatable {
         keywords: String? = nil,
         section: PaletteSection = .places,
         subtitle: String? = nil,
-        symbol: String? = nil
+        symbol: String? = nil,
+        isEnabled: Bool = true
     ) {
         self.id = id
         self.title = title
@@ -331,6 +350,7 @@ struct PaletteCommand: Equatable {
         self.section = section
         self.subtitle = subtitle
         self.symbol = symbol
+        self.isEnabled = isEnabled
     }
 
     /// What the row draws: its own icon when it has one, its section's
@@ -444,7 +464,13 @@ struct CommandPaletteModel: Equatable {
         /// nobody is. Decides whether Terminate/Block are rows at all.
         liveRemoteMachine: String? = nil,
         /// How many machines are blocked, for the blocked-list row's detail.
-        blockedMachineCount: Int = 0
+        blockedMachineCount: Int = 0,
+        /// The machine **this** Mac is driving right now (Task 25,
+        /// `RemoteSharingModel.activeRemoteSession`) — the opposite
+        /// direction from `liveRemoteMachine` above. Non-`nil` disables
+        /// every **Connect to ‹machine›** row (`RemoteSessionPicker
+        /// .canConnect`'s reasoning) and adds **End remote session**.
+        activeRemoteSession: RemoteSessionInfo? = nil
     ) -> [PaletteCommand] {
         // `uniquingKeysWith:` rather than `uniqueKeysWithValues:`, matching
         // the already-fixed call site in `WorkspaceWindowController`'s
@@ -526,6 +552,45 @@ struct CommandPaletteModel: Equatable {
                     )
                 )
             }
+        }
+        // Connect to ‹machine› (spec §6/§10, Task 24/25): swaps this window
+        // onto that machine's daemon through the connect ceremony — a
+        // different action from the rows just above, which open one shared
+        // *pane* without disturbing this window's own environment.
+        // Disabled, with the reason as the subtitle, for the entire time a
+        // session is already live — `RemoteSessionPicker`'s own doc comment
+        // explains why this is belt-and-braces rather than the guarantee.
+        for machine in remoteMachines {
+            let disabledReason = activeRemoteSession.map { "End the session with \($0.machineName) first" }
+            commands.append(
+                PaletteCommand(
+                    id: "remote-connect:\(machine.deviceID)",
+                    title: "Connect to \(machine.name)",
+                    detail: nil,
+                    action: .connectRemoteMachine(deviceID: machine.deviceID),
+                    keywords: "connect remote takeover drive machine \(machine.name)",
+                    section: .places,
+                    subtitle: disabledReason ?? "Take over \(machine.name)",
+                    symbol: "desktopcomputer.and.arrow.down",
+                    isEnabled: activeRemoteSession == nil
+                )
+            )
+        }
+        // End remote session — present only while this Mac is driving one
+        // (spec §10's own "present only while a session is live").
+        if let activeRemoteSession {
+            commands.append(
+                PaletteCommand(
+                    id: "remote:end-session",
+                    title: "End remote session",
+                    detail: activeRemoteSession.machineName,
+                    action: .endRemoteSession,
+                    keywords: "end remote session disconnect stop driving \(activeRemoteSession.machineName)",
+                    section: .places,
+                    subtitle: "Return to this Mac's own environment",
+                    symbol: "arrow.uturn.backward"
+                )
+            )
         }
         // Walked once, emitted per kind: the outline's project/session order
         // survives inside each section, and the sections come out in the

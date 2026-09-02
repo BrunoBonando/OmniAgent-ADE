@@ -2181,6 +2181,32 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertGreaterThan(sidebar.statsRow.frame.height, 0, "the gauges are still there")
     }
 
+    // MARK: - Remote live-session card (2026-09-01 remote environment sharing spec §6, Task 25)
+
+    /// The column's order, down: remote session → update → limits — one
+    /// stack of cards, the remote session card uppermost since it is the
+    /// most urgent fact about this window right now.
+    func testTheRemoteSessionCardSitsAboveTheUpdateCardWhichSitsAboveTheLimitsCard() {
+        let sidebar = makeSidebar()
+        sidebar.remoteSessionWidget.apply(RemoteSessionInfo(machineName: "Mac Studio", since: Date()))
+        sidebar.updateWidget.apply(.available(version: "1.8.0"))
+        sidebar.layoutSubtreeIfNeeded()
+        func minY(_ view: NSView) -> CGFloat { view.convert(view.bounds, to: sidebar).minY }
+
+        XCTAssertGreaterThan(minY(sidebar.remoteSessionWidget), minY(sidebar.updateWidget))
+        XCTAssertGreaterThan(minY(sidebar.updateWidget), minY(sidebar.claudeLimits))
+    }
+
+    /// Hidden — and hidden *properly*, dropped from the stack's layout —
+    /// for the entire time nobody is being driven: `SidebarUpdateWidgetView`'s
+    /// own reasoning, pinned here for its neighbour.
+    func testTheRemoteSessionCardIsHiddenUntilASessionIsLive() {
+        let sidebar = makeSidebar()
+        XCTAssertTrue(sidebar.remoteSessionWidget.isHidden)
+        sidebar.remoteSessionWidget.apply(RemoteSessionInfo(machineName: "Mac Studio", since: Date()))
+        XCTAssertFalse(sidebar.remoteSessionWidget.isHidden)
+    }
+
     private func makeLimitsCard() -> SidebarClaudeLimitsView {
         let card = SidebarClaudeLimitsView()
         card.frame = NSRect(

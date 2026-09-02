@@ -477,6 +477,38 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
+    /// **Connect to ‹machine›** and **End remote session** (spec §6/§10,
+    /// Task 24/25): one row per online machine, findable and enabled while
+    /// idle; **End remote session** appears only while this Mac is driving
+    /// one. The disabling half (`isEnabled == false`, subtitle carries the
+    /// reason) is pinned in `RemoteChainingTests`, which is where the
+    /// standing "no chaining in the UI" property lives — this test is only
+    /// that the rows exist at all, findable by name, with the standing
+    /// rule's symbol and keywords.
+    func testConnectAndEndRemoteSessionAreSpotlightRows() throws {
+        let idle = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil,
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio", workspaces: [])]
+        )
+        let connect = try XCTUnwrap(idle.first { $0.id == "remote-connect:d1" })
+        XCTAssertEqual(connect.title, "Connect to Mac Studio")
+        XCTAssertEqual(connect.action, .connectRemoteMachine(deviceID: "d1"))
+        XCTAssertEqual(connect.symbol, "desktopcomputer.and.arrow.down")
+        XCTAssertTrue(connect.isEnabled)
+        XCTAssertTrue(connect.keywords?.contains("Mac Studio") == true)
+        XCTAssertNil(idle.first { $0.id == "remote:end-session" }, "nothing to end yet")
+
+        let driving = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil,
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio", workspaces: [])],
+            activeRemoteSession: RemoteSessionInfo(machineName: "Mac Studio", since: .now)
+        )
+        let end = try XCTUnwrap(driving.first { $0.id == "remote:end-session" })
+        XCTAssertEqual(end.title, "End remote session")
+        XCTAssertEqual(end.action, .endRemoteSession)
+        XCTAssertEqual(end.detail, "Mac Studio")
+    }
+
     /// Settings › Remote's activity history (spec §8, §10, Task 20) — a
     /// place inside the section, always a row like the blocked list beside
     /// it: "nothing has happened here" is still an answer somebody types

@@ -1019,6 +1019,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // The gear offers the Settings panel (or puts it back): the pick is
         // what opens the page.
         shellSidebar.onOpenSettings = { [weak self] in self?.toggleSettingsPanel() }
+        // The remote live-session widget's one button (spec §6, Task 25) —
+        // the widget does not end the session itself, only asks.
+        shellSidebar.remoteSessionWidget.onEndSession = { [weak self] in self?.disconnectRemote() }
         // Self-update: the widget is the only thing the updater talks through,
         // and the controller is the only thing that knows the state.
         shellSidebar.updateWidget.onDownload = { [weak self] in
@@ -1694,6 +1697,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             switch state {
             case .connected:
                 applyConnectionStatus(nil)
+                // Step 3 → 4 of the connect ceremony (spec §6): `.connected`
+                // is only ever reached on a real `HelloAck` — see
+                // `SessionConnection.handle(_:)`'s own `.helloAck` branch —
+                // so the lease is genuinely granted by the time this runs.
+                // The loaded-handler is armed *before*
+                // `restoreAccountStateIfNeeded()` below, so it is in place
+                // before the `getSetting(layout)` round trip it is waiting
+                // on can possibly complete.
+                if let ceremony = connectCeremony, isDrivingRemote {
+                    ceremony.helloAcknowledged()
+                    connectCeremonyLoadedHandler = { [weak self, weak ceremony] in
+                        guard let self, let ceremony, self.connectCeremony === ceremony else { return }
+                        ceremony.environmentLoaded()
+                        self.finishConnectCeremony()
+                    }
+                }
                 // Nothing is restored while the login window is up: that
                 // daemon serves the empty root, and restoring "nothing" there
                 // would bootstrap a pane and write a layout row for the next
@@ -1729,13 +1748,46 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 }
                 didConnect = true
                 presentOnboardingIfNeeded()
-                let work = pendingConnectedWork
-                pendingConnectedWork.removeAll()
-                for body in work {
-                    body()
+                // Gated on `!isDrivingRemote` (Task 23/25's carried item
+                // C.2): every real caller of `runWhenConnected` queues work
+                // that is about *this* Mac's own local connection coming up
+                // (`RemoteSharingModel.configure`, the app's launch-time
+                // readiness signal) — draining it on the *remote* `.connected`
+                // as well would run that work a second time, against the
+                // wrong daemon, for no caller that ever asked for it. The
+                // local `.connected` this queue is actually for still fires,
+                // untouched, the moment `disconnectRemote()` swaps back.
+                if !isDrivingRemote {
+                    let work = pendingConnectedWork
+                    pendingConnectedWork.removeAll()
+                    for body in work {
+                        body()
+                    }
                 }
             case .connecting:
                 applyConnectionStatus("Connecting")
+                // Steps 1 → 2 → 3 of the connect ceremony. Today's transport
+                // gives the app exactly one pre-`HelloAck` signal — this one
+                // — so both `webSocketOpened()` and `dataChannelOpened()`
+                // fire from it; see their doc comments in
+                // `RemoteConnectCeremony` for why that is a real, if
+                // currently un-splittable, pair of milestones rather than a
+                // synthetic one.
+                //
+                // A `.connecting` that is not the *first* one for this
+                // ceremony is a fresh dial `SessionConnection`'s own backoff
+                // started on its own, with no button pressed — the
+                // reconnect-retry carried item (spec §6): a non-terminal
+                // refusal ("in use by ‹machine›") leaves `shouldReconnect`
+                // true, so the transport keeps redialling by itself, and
+                // `retry()` here is what puts the ceremony's own steps back
+                // in step with it rather than leaving a stale failure card up
+                // through a redial that is quietly succeeding.
+                if let ceremony = connectCeremony, isDrivingRemote {
+                    if ceremony.step != .dialling { ceremony.retry() }
+                    ceremony.webSocketOpened()
+                    ceremony.dataChannelOpened()
+                }
             case .disconnected:
                 applyConnectionStatus("Reconnecting")
                 // Every "this session is up" belief died with the socket. If
@@ -1816,7 +1868,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             usageRecorder.recordExit(sessionID: event.id, at: Date().timeIntervalSince1970 * 1000)
         }
         connection.onError = { [weak self] error in
-            self?.applyConnectionStatus(error.localizedDescription)
+            guard let self else { return }
+            applyConnectionStatus(error.localizedDescription)
+            // The failing step of the connect ceremony (spec §6): shown
+            // with the daemon's own message, never a generic one. A `Hello`
+            // refusal carries its machine-readable code too
+            // (`SessionConnectionError.helloRefused`) — passed straight
+            // through so the overlay can tell "in use by ‹machine›" (keeps
+            // dialling on its own) from "update OmniAgent on ‹machine›"
+            // (does not) without re-parsing the sentence a daemon is free to
+            // reword.
+            if let ceremony = connectCeremony, isDrivingRemote {
+                if case let .helloRefused(code, message) = error as? SessionConnectionError {
+                    ceremony.failed(.init(message: message, code: code))
+                } else {
+                    ceremony.failed(.init(message: error.localizedDescription))
+                }
+            }
         }
         // Task 6c restart-loss reporting: a reconnect's automatic reattach
         // came back "session not found" — the daemon restarted and forgot
@@ -1839,8 +1907,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // with no panel yet built (a race with the roster that creates one)
         // is simply not shown live; the durable file is unaffected either
         // way, and Settings › Remote › Activity reads that back.
+        //
+        // `onRemoteViewers`/`onRemoteActivity` are HOST-side pushes, but
+        // this closure is installed on **whichever connection is active** —
+        // including, for the whole span of a takeover, the machine being
+        // driven. Only the daemon's own local-only rule for these two kinds
+        // (spec §12.3) prevents that remote daemon from ever actually
+        // sending one — which is exactly the kind of guarantee this
+        // codebase's own standing principle says not to rely on alone (a
+        // remote-reachable message becomes remote-reachable "deliberately,
+        // with a test", never merely by not being refused). So this Mac's
+        // own roster and activity feed must not update from whatever a
+        // remote daemon says, even if it should never say it: guarded here,
+        // defensively, rather than trusted to the far end saying no.
         connection.onRemoteActivity = { [weak self] entries in
-            self?.takeoverPanel?.appendActivity(entries)
+            guard let self, !isDrivingRemote else { return }
+            takeoverPanel?.appendActivity(entries)
         }
     }
 
@@ -3528,6 +3610,130 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Set for exactly as long as `isDrivingRemote` is true.
     private var parkedLocalEnvironment: LocalEnvironment?
 
+    // MARK: - The connect ceremony (spec §6, Task 24)
+
+    /// The ceremony currently on screen, or `nil` outside a takeover dial.
+    /// Not `private`: a test drives it directly rather than synthesising
+    /// clicks on the overlay it is shown through.
+    ///
+    /// `installConnectionHandlers`'s `onStateChange`/`onError` forward to
+    /// this — in *addition* to their ordinary work, never in place of it —
+    /// whenever it is set and `isDrivingRemote`. One set of real events
+    /// drives both the restore machinery and the ceremony's four steps,
+    /// which is what keeps a synthetic delay from ever sneaking in: nothing
+    /// here has a timer of its own.
+    ///
+    /// **Never awaited by `connectRemote` itself.** `connectRemote` swaps
+    /// and returns the moment the swap happens — `ConnectionSwapTests`
+    /// depends on that timing, dialling connections that never actually
+    /// reach `.connected` in a test — so the ceremony has to be driven as a
+    /// side effect of the ordinary connection pushes, not by making the
+    /// `async` function wait on them.
+    private(set) var connectCeremony: RemoteConnectCeremony?
+    /// The glass the ceremony above is shown through, mounted over the
+    /// window's content view for as long as `connectCeremony` is set.
+    private var connectCeremonyView: RemoteConnectCeremonyOverlayView?
+    /// Which machine `connectCeremony` is for — kept apart from the
+    /// ceremony's own `machineName` (a display string) so **Try again**
+    /// after a failure that happened *before* `connectRemote` ever swapped
+    /// (already driving, the machine went offline, self-drive) can call
+    /// `connectRemote` a second time rather than reconnecting a transport
+    /// that was never swapped in to begin with.
+    private var connectCeremonyMachine: RemoteMachine?
+    /// Fires once, the first time `applyRestoredPanes` completes after this
+    /// connect — the ceremony's "Loading environment…" step reads the same
+    /// fact `layoutReadCompleted` gates: the saved layout has actually come
+    /// back and been turned into panes. Set inside `installConnectionHandlers`'s
+    /// `.connected` case, before `restoreAccountStateIfNeeded()` is called,
+    /// so it is in place before the `getSetting(layout)` round trip it is
+    /// waiting on can possibly complete; cleared the moment it fires.
+    private var connectCeremonyLoadedHandler: (() -> Void)?
+
+    /// The user-facing entry point for a takeover: presents the ceremony
+    /// over this window, then calls `connectRemote(to:)`. Every "Connect to
+    /// ‹machine›" affordance in the app (the palette's row today; the
+    /// sidebar and picker per spec §3, once Task 29 gives them a "Connect
+    /// to" surface of their own) runs through here rather than calling
+    /// `connectRemote` directly, so the ceremony is never skipped.
+    @MainActor
+    func beginConnecting(to machine: RemoteMachine) {
+        // One at a time — a second press while the first is still dialling
+        // does nothing, the same "already driving" refusal `connectRemote`
+        // itself would give once the swap has happened, just before it has.
+        guard connectCeremony == nil, let content = window?.contentView else { return }
+        let ceremony = RemoteConnectCeremony(machineName: machine.name)
+        connectCeremony = ceremony
+        connectCeremonyMachine = machine
+        let view = RemoteConnectCeremonyOverlayView(ceremony: ceremony)
+        view.frame = content.bounds
+        view.autoresizingMask = [.width, .height]
+        view.onRetry = { [weak self] in self?.retryConnecting() }
+        view.onCancel = { [weak self] in self?.cancelConnecting() }
+        content.addSubview(view, positioned: .above, relativeTo: nil)
+        connectCeremonyView = view
+        window?.makeFirstResponder(view)
+        dial(machine, ceremony: ceremony)
+    }
+
+    /// Runs `connectRemote(to:)` and reports a failure that happens *before*
+    /// the swap — `connectRemote`'s three synchronous refusals (already
+    /// driving, the machine went offline, self-drive) — to `ceremony`. A
+    /// failure *after* the swap is `installConnectionHandlers`'s business,
+    /// not this function's: `connectRemote` itself never throws for those.
+    private func dial(_ machine: RemoteMachine, ceremony: RemoteConnectCeremony) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await connectRemote(to: machine)
+            } catch {
+                guard connectCeremony === ceremony else { return }
+                ceremony.failed(.init(message: error.localizedDescription))
+            }
+        }
+    }
+
+    /// **Try again.** While the swap has already happened
+    /// (`isDrivingRemote`), only the transport-level connect needs
+    /// repeating — `SessionConnection.connect()` over the *same* connection
+    /// object `connectRemote` swapped in, its own "no-op if already trying"
+    /// guard keeping a double-press harmless. Before the swap, there is
+    /// nothing to reconnect: `dial(_:ceremony:)` runs the whole attempt
+    /// again.
+    private func retryConnecting() {
+        guard let ceremony = connectCeremony, let machine = connectCeremonyMachine else { return }
+        ceremony.retry()
+        if isDrivingRemote {
+            connection.connect()
+        } else {
+            dial(machine, ceremony: ceremony)
+        }
+    }
+
+    /// **Cancel**, or Esc: unwinds whatever `beginConnecting` started —
+    /// swaps back to the local daemon if the swap had already happened, and
+    /// always takes the overlay down.
+    private func cancelConnecting() {
+        guard connectCeremony != nil else { return }
+        if isDrivingRemote {
+            disconnectRemote()
+        } else {
+            connectCeremony = nil
+            connectCeremonyMachine = nil
+            connectCeremonyView?.removeFromSuperview()
+            connectCeremonyView = nil
+        }
+    }
+
+    /// `ceremony.onDone`'s handler, wired from `installConnectionHandlers`:
+    /// the ceremony has reached `.done` and is fading itself out
+    /// (`RemoteConnectCeremonyOverlayView.animateOutOnDone`) — this only has
+    /// to stop treating it as the thing on screen.
+    private func finishConnectCeremony() {
+        connectCeremony = nil
+        connectCeremonyMachine = nil
+        connectCeremonyView = nil
+    }
+
     /// Points the whole window at another Mac's daemon.
     ///
     /// Local state is not destroyed — `disconnectRemote()` restores it. What
@@ -3548,6 +3754,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard !isDrivingRemote else {
             throw RemoteDriveError.alreadyDriving
         }
+        // The poll already drops this Mac's own device from `remoteMachines
+        // .machines` (`RemoteMachinesModel.apply`'s `online && deviceID !=
+        // localDeviceID` filter), which is why this has never yet been
+        // reachable in practice — but that is the UI's list filtering
+        // itself, not this method refusing to be called with the wrong
+        // argument. A test, a future caller, or a `remoteConnectionProvider`
+        // override could still hand this the local device id directly, and
+        // driving oneself is exactly the loop the no-chaining property
+        // exists to make impossible — so it is refused here too, by
+        // construction, rather than by trusting one caller upstream to have
+        // filtered correctly.
+        guard machine.deviceID != remoteMachines.localDeviceID else {
+            throw RemoteDriveError.isThisMachine
+        }
         let provider = remoteConnectionProvider ?? { [weak self] machine in
             self?.remoteMachines.sessionConnection(for: machine.deviceID)
         }
@@ -3564,6 +3784,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             projectLabels: projectLabels,
             recentSessionGroupIDs: recentSessionGroupIDs
         )
+        // The UI-side half of "no chaining in the UI" (spec §3, Task 25)
+        // closes the instant the takeover *begins* — before the far end has
+        // answered anything — not once it finishes connecting: every
+        // "Connect to ‹machine›" row reads `remoteSharing.activeRemoteSession`
+        // directly, and a window in the middle of the connect ceremony must
+        // already refuse a second one.
+        remoteSharing.beganDriving(machine.name)
         swapConnection(to: remote)
     }
 
@@ -3574,6 +3801,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let parked = parkedLocalEnvironment
         parkedLocalEnvironment = nil
         remoteMachines.drivenDeviceID = nil
+        remoteSharing.endedDriving()
+        connectCeremony = nil
+        connectCeremonyMachine = nil
+        connectCeremonyView?.removeFromSuperview()
+        connectCeremonyView = nil
+        connectCeremonyLoadedHandler = nil
         swapConnection(to: localConnection)
         if let parked {
             destination = parked.destination
@@ -3617,6 +3850,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     enum RemoteDriveError: LocalizedError, Equatable {
         case alreadyDriving
         case machineOffline(String)
+        /// `connectRemote`'s own self-drive guard (Task 23/25's carried
+        /// item C.3) — see its call site's doc comment for why this exists
+        /// even though `remoteMachines.machines` already excludes this
+        /// device from every list a caller would build a `RemoteMachine`
+        /// from.
+        case isThisMachine
 
         var errorDescription: String? {
             switch self {
@@ -3624,6 +3863,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 return "End the current remote session first."
             case let .machineOffline(name):
                 return "\(name) is not reachable."
+            case .isThisMachine:
+                return "This is this Mac — there is nothing to connect to."
             }
         }
     }
@@ -3720,6 +3961,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // The first launch over pre-account data: only now, with the panes
         // back, can the sessions the switch would end be counted.
         adoptLegacyAccountIfNeeded()
+        // Step 4 → done of the connect ceremony (spec §6): the saved
+        // `layout` row has actually come back and been turned into panes —
+        // set only while `installConnectionHandlers`'s `.connected` case is
+        // driving a live takeover, `nil` on every ordinary local restore.
+        // Consumed and cleared here rather than left standing, so a *later*
+        // `applyRestoredPanes` call (a reconnect's `layoutReadDispatched`
+        // guard skipping straight to `ensureSession`, say) cannot fire it a
+        // second time.
+        let ceremonyLoaded = connectCeremonyLoadedHandler
+        connectCeremonyLoadedHandler = nil
+        ceremonyLoaded?()
     }
 
     /// Kills daemon sessions this window no longer references.
@@ -3834,7 +4086,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // row can never be offered for a verb that has nothing to
                 // act on.
                 liveRemoteMachine: takeoverPanel?.info.machineName,
-                blockedMachineCount: remoteSharing.blockedViewerIDs.count
+                blockedMachineCount: remoteSharing.blockedViewerIDs.count,
+                // The machine *this* Mac is driving, if any — disables every
+                // Connect row and adds End remote session (spec §3/§10).
+                activeRemoteSession: remoteSharing.activeRemoteSession
             ),
             files: repoFiles,
             filesRoot: latestGitStatus?.root,
@@ -3855,6 +4110,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// sidebar's remote sections and the spotlight's remote rows are built
     /// from, so all three agree about what is on the other Mac.
     func presentRemoteSessionPicker() {
+        // Belt-and-braces (spec §3, Task 25): the item that opens this is
+        // already disabled while a session is live
+        // (`NavigationSidebarView.canResumeRemoteSession`), but this Mac's
+        // own local connection is gone for the whole of a takeover, so a
+        // picker that somehow still opened would have nothing to read
+        // anyway. `RemoteSessionPicker.canConnect`'s doc comment explains
+        // why this is not the guarantee itself.
+        guard RemoteSessionPicker.canConnect(model: remoteSharing) else { return }
         // The hover card is a floating window over the workspace; it would
         // otherwise sit above the sheet's glass. `presentCommandPalette`'s
         // reasoning exactly.
@@ -3913,6 +4176,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             takeoverPanel?.terminate()
         case .blockRemoteConnection:
             takeoverPanel?.block()
+        case let .connectRemoteMachine(deviceID):
+            guard let machine = remoteMachines.machine(for: deviceID) else { return }
+            beginConnecting(to: machine)
+        case .endRemoteSession:
+            disconnectRemote()
         case .checkForUpdates:
             updateController.checkForUpdates()
         case .downloadUpdate:
@@ -4597,6 +4865,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// an open popover, which has to follow the roster rather than hold the
     /// list it opened with.
     func applyRemoteViewers(_ viewers: [RemoteViewer]) {
+        // `RemoteViewers` is a HOST-side push (spec §12.3, local-only), but
+        // `connection.onRemoteViewers` is installed on whichever connection
+        // is active — the machine being driven, for the whole span of a
+        // takeover. Only the daemon's own local-only rule stands between a
+        // remote daemon sending one of these and it landing here as if it
+        // were this Mac's own roster, and this codebase's standing
+        // principle is that a guarantee should not rest on the far end
+        // saying no alone — so it is refused here too, defensively, rather
+        // than trusted to a rule this window has no way to verify held.
+        guard !isDrivingRemote else { return }
         // The takeover panel and the menu bar icon read the roster through
         // the sharing model, which is where "somebody is driving this Mac"
         // is decided — told first, and unconditionally, so a roster that
@@ -4827,7 +5105,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
         settingsView.applyBlockedMachines(remoteSharing.blockedViewerIDs)
         syncTakeoverPanel()
+        applyActiveRemoteSession()
         onRemoteSharingChanged?()
+    }
+
+    /// The viewer half of `applyRemoteSharingChange` (Task 25): the sidebar's
+    /// live-session widget, and the gate on every "Connect to ‹machine›"
+    /// surface in the window — one place, so the widget and the gate can
+    /// never read `remoteSharing.activeRemoteSession` a beat apart from each
+    /// other.
+    private func applyActiveRemoteSession() {
+        shellSidebar.remoteSessionWidget.apply(remoteSharing.activeRemoteSession)
+        shellSidebar.canResumeRemoteSession = RemoteSessionPicker.canConnect(model: remoteSharing)
+        shellSidebar.remoteSessionDisabledReason = RemoteSessionPicker.disabledReason(model: remoteSharing)
     }
 
     /// Whether sharing can be switched on at all: an `auth_account_email`

@@ -153,7 +153,13 @@ enum WorkspacesHeaderMenus {
         workspaces: [(id: String, label: String)],
         startSession: @escaping (String) -> Void,
         addLocalFolder: @escaping () -> Void,
-        resumeRemoteSession: (() -> Void)? = nil
+        resumeRemoteSession: (() -> Void)? = nil,
+        /// Why the item below is disabled, shown as its tooltip — `nil`
+        /// leaves the pre-2026-09-01 "announced future" copy with no reason
+        /// attached (`resumeRemoteSession == nil` because nothing has wired
+        /// it up yet, as opposed to `resumeRemoteSession == nil` because a
+        /// takeover is live right now).
+        remoteSessionDisabledReason: String? = nil
     ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -176,6 +182,7 @@ enum WorkspacesHeaderMenus {
             let remote = NSMenuItem(title: "Resume remote session…", action: nil, keyEquivalent: "")
             remote.isEnabled = false
             remote.image = remoteImage
+            remote.toolTip = remoteSessionDisabledReason
             menu.addItem(remote)
         }
         return menu

@@ -1114,10 +1114,30 @@ final class NavigationSidebarView: NSView {
     var onShowViewers: ((String) -> Void)?
 
     private(set) var navRows: [SidebarNavRowView] = []
+    /// The remote live-session card (2026-09-01 remote environment sharing
+    /// spec §6, Task 25) — above the self-update card, which is above the
+    /// session/week limits card: remote session → update → limits, one
+    /// stack. Hidden until this window is actually driving another Mac
+    /// (`SidebarRemoteSessionWidget.swift`).
+    let remoteSessionWidget = SidebarRemoteSessionWidgetView()
     /// The self-update card, directly above the session/week limits card —
     /// same glass, same radius, same inset, hidden until there is an update to
     /// talk about (`SidebarUpdateWidget.swift`).
     let updateWidget = SidebarUpdateWidgetView()
+    /// Whether **Resume remote session…** may open the picker right now —
+    /// `false` for the entire time this window is driving another Mac (spec
+    /// §3's no-chaining rule, belt-and-braces over the daemon's own
+    /// structural refusal: `remote_chaining.rs` already refuses a remote
+    /// `Hello` once the local connection is gone past its grace, and this
+    /// Mac has none while it is driving — so leaving the item live here
+    /// costs nothing but a confusing click, never a second connection). Set
+    /// by `WorkspaceWindowController` off `RemoteSharingModel.onChange`.
+    var canResumeRemoteSession = true
+    /// The tooltip on a disabled **Resume remote session…** item — the same
+    /// sentence `RemoteSessionPicker.disabledReason` computes, named
+    /// "‹machine›" so the reason travels with the item rather than requiring
+    /// a second look elsewhere.
+    var remoteSessionDisabledReason: String?
     let workspacesHeader = SidebarSectionHeaderView(title: "Workspaces")
     let workspacesTree = WorkspacesTreeView()
     let claudeLimits = SidebarClaudeLimitsView()
@@ -1210,18 +1230,18 @@ final class NavigationSidebarView: NSView {
             addSubview(glass)
         }
 
-        // The update card and the limits card are one stack of cards at the
-        // foot of the column, and the stack is what makes hiding the update
-        // one work: NSStackView drops a hidden arranged subview from the
-        // layout, where a pinned view would keep its height constraint and
-        // leave a gap above the gauges.
+        // The remote session, update and limits cards are one stack of cards
+        // at the foot of the column, and the stack is what makes hiding the
+        // first two work: NSStackView drops a hidden arranged subview from
+        // the layout, where a pinned view would keep its height constraint
+        // and leave a gap above the gauges.
         updateWidget.isHidden = true
-        let bottomCards = NSStackView(views: [updateWidget, claudeLimits])
+        let bottomCards = NSStackView(views: [remoteSessionWidget, updateWidget, claudeLimits])
         bottomCards.orientation = .vertical
         bottomCards.alignment = .leading
         bottomCards.spacing = 8
         bottomCards.translatesAutoresizingMaskIntoConstraints = false
-        for card in [updateWidget, claudeLimits] {
+        for card in [remoteSessionWidget, updateWidget, claudeLimits] {
             card.widthAnchor.constraint(equalTo: bottomCards.widthAnchor).isActive = true
         }
 
@@ -1377,12 +1397,20 @@ final class NavigationSidebarView: NSView {
     }
 
     /// The plus menu over whatever the tree currently renders.
+    ///
+    /// `resumeRemoteSession` is `nil` — the existing "announced but disabled
+    /// future" shape `WorkspacesHeaderMenus.plus` already draws — for the
+    /// entire time this window is driving another Mac
+    /// (`canResumeRemoteSession`); its tooltip carries the reason (spec §3).
     func makePlusMenu() -> NSMenu {
         WorkspacesHeaderMenus.plus(
             workspaces: workspaceMenuEntries,
             startSession: { [weak self] id in self?.onStartSession?(id) },
             addLocalFolder: { [weak self] in self?.onAddLocalFolder?() },
-            resumeRemoteSession: { [weak self] in self?.onResumeRemoteSession?() }
+            resumeRemoteSession: canResumeRemoteSession
+                ? { [weak self] in self?.onResumeRemoteSession?() }
+                : nil,
+            remoteSessionDisabledReason: remoteSessionDisabledReason
         )
     }
 

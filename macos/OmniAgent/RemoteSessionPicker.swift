@@ -1,5 +1,40 @@
 import AppKit
 
+/// Whether **Connect to ‹machine›** — and, defensively, the older "resume a
+/// shared pane" picker below — may be taken right now (2026-09-01 remote
+/// environment sharing spec §3, Task 25). One place, so the sidebar, the
+/// plus menu and the palette (`CommandPaletteModel.build`) ask the same
+/// question rather than each guessing at `RemoteSharingModel
+/// .activeRemoteSession` on its own.
+///
+/// **Belt-and-braces, not the guarantee itself.** The daemon already refuses
+/// a chained connection structurally: `remote_chaining.rs` — no remote
+/// `Hello` is accepted once the local connection has been gone past its
+/// grace, and a Mac that is driving another has none. This type exists so
+/// the UI does not even *offer* the click, which is a kindness to the user
+/// (no dead-end "in use" refusal to explain) and not a second line of
+/// security — do not delete the daemon-side check thinking this one covers
+/// it, and do not delete this one thinking the daemon covers it: they answer
+/// different questions ("should the button work" versus "can the protocol
+/// be abused"), and losing either changes what the other one is proving.
+@MainActor
+enum RemoteSessionPicker {
+    /// `false` for the entire time this Mac is already driving somebody —
+    /// there is nothing structural stopping the *click*, only the connect
+    /// that would follow it.
+    static func canConnect(model: RemoteSharingModel) -> Bool {
+        model.activeRemoteSession == nil
+    }
+
+    /// The sentence a disabled row/item shows in its stead — `nil` when
+    /// nothing is disabled, so a caller can use this directly as a tooltip
+    /// or subtitle without an extra `canConnect` check.
+    static func disabledReason(model: RemoteSharingModel) -> String? {
+        guard let session = model.activeRemoteSession else { return nil }
+        return "End the session with \(session.machineName) first"
+    }
+}
+
 /// # Resume remote session
 ///
 /// The picker behind "+ → Resume remote session…" — the remote-session-control
