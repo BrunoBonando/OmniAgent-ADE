@@ -25,7 +25,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // has a head start on the connection's first retry.
         let daemonPersistence = DaemonPersistenceController(paths: paths)
         daemonPersistence.start()
-        let connection = SessionConnection(socketURL: paths.socketURL)
+        // This Mac's own daemon, and the only connection this app builds for
+        // it. The window can be *re-pointed* at another Mac's daemon
+        // (`WorkspaceWindowController.connectRemote`), which swaps this one
+        // out and disconnects it rather than running a second one beside it —
+        // see `localConnection`'s doc comment for why that is a security
+        // property and not a tidiness one.
+        let localConnection = SessionConnection(socketURL: paths.socketURL)
         // The viewer side of remote session control: one connection per
         // online machine on the account, polled while signed in. Constructed
         // idle; the window starts it once the launch gate says signed in.
@@ -36,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // window must not wait on the daemon — a daemon that is slow (or not
         // running) has to produce a visible window saying so, not no window.
         let workspace = WorkspaceWindowController(
-            connection: connection,
+            connection: localConnection,
             panes: [],
             notifier: SessionNotifier(delivery: delivery),
             daemonPersistence: daemonPersistence,
@@ -56,8 +62,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 5×1s retry to cover the gap. `runWhenConnected` is the readiness
         // signal that race was standing in for. See `RemoteSharingModel
         // .shared`'s own doc comment.
+        //
+        // Deliberately the **local** connection, captured here, and not
+        // `workspace.connection`, which follows a takeover: `remote_sharing`,
+        // `relay_device_token` and `remote_control_blocked` say whether *this*
+        // Mac is shareable and by whom. Resolving them through the window
+        // would point the sharing switch at the machine being driven — and
+        // they are in the daemon's protected set anyway (spec §3), so a
+        // remote read or write of them is refused.
         workspace.runWhenConnected {
-            RemoteSharingModel.shared.configure(store: SettingsStore(client: connection))
+            RemoteSharingModel.shared.configure(store: SettingsStore(client: localConnection))
         }
         // The menu bar icon's live push (Task 4, §2): `workspace` is the
         // sole subscriber to `RemoteSharingModel.shared.onChange` and has no

@@ -319,6 +319,36 @@ final class SessionConnection {
     /// reconnects); read on `ioQueue`, where every mutation happens, so it
     /// can never race the connection's own I/O.
     var pendingReattachCount: Int { ioQueue.sync { pendingReattachSessions.count } }
+
+    /// Whether **anything** is still listening to this connection's pushes.
+    ///
+    /// The observable half of the no-chaining property (2026-09-01 remote
+    /// environment sharing spec §3): while this app drives another Mac, its
+    /// own local connection must have no subscribers left and must not be
+    /// attached, because a machine that is driving is not a machine that can
+    /// be driven. `WorkspaceWindowController.swapConnection` clears every one
+    /// of these on the way out and `ConnectionSwapTests` asserts the result —
+    /// a stale capture somewhere else in the app would show up here as a
+    /// closure that outlived the swap.
+    var hasSubscribers: Bool {
+        onStateChange != nil
+            || onTerminalData != nil
+            || onStatus != nil
+            || onAttention != nil
+            || onExit != nil
+            || onError != nil
+            || onSessionSize != nil
+            || onRemoteViewers != nil
+            || onRemoteActivity != nil
+            || onReattachFailed != nil
+    }
+
+    /// Whether this connection is attached or trying to be — `connect()` sets
+    /// it, `disconnect()` clears it. Read on `ioQueue`, where it is owned, so
+    /// it cannot race a connect or a close, and ordered *after* the
+    /// `disconnect()` that precedes it because that queue is serial.
+    var wantsConnection: Bool { ioQueue.sync { shouldReconnect } }
+
     private var shouldReconnect = false
     private var reconnectScheduled = false
     /// The delay the *next* remote reconnect waits. Doubles per failed

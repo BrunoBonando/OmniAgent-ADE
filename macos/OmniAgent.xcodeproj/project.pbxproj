@@ -137,6 +137,7 @@
 		99AA164ED3A349D5ABDD963D /* RemoteMachinesModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA557DDC2EDC466F84FBB88A /* RemoteMachinesModelTests.swift */; };
 		3EB0A5592ECBC0CAD61862B3 /* RemoteSharingModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A88A7569486D470AE987450A /* RemoteSharingModelTests.swift */; };
 		A1B2C3D40003470AE987450A /* RemoteTakeoverPanelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40004470AE987450A /* RemoteTakeoverPanelTests.swift */; };
+		A1B2C3D40023470AE987450A /* ConnectionSwapTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40024470AE987450A /* ConnectionSwapTests.swift */; };
 		CBFD87129B354D8E886D71EA /* RemoteActivityLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77CE7813FD7E4601BEE6107B /* RemoteActivityLogTests.swift */; };
 		38CCB7C65BEB4239AECB9FE4 /* HostStatePublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */; };
 		BA524298D19449349AF94799 /* PredictiveEchoModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */; };
@@ -357,6 +358,7 @@
 		EA557DDC2EDC466F84FBB88A /* RemoteMachinesModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteMachinesModelTests.swift; sourceTree = "<group>"; };
 		A88A7569486D470AE987450A /* RemoteSharingModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSharingModelTests.swift; sourceTree = "<group>"; };
 		A1B2C3D40004470AE987450A /* RemoteTakeoverPanelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTakeoverPanelTests.swift; sourceTree = "<group>"; };
+		A1B2C3D40024470AE987450A /* ConnectionSwapTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSwapTests.swift; sourceTree = "<group>"; };
 		77CE7813FD7E4601BEE6107B /* RemoteActivityLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteActivityLogTests.swift; sourceTree = "<group>"; };
 		C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostStatePublisherTests.swift; sourceTree = "<group>"; };
 		A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoModelTests.swift; sourceTree = "<group>"; };
@@ -597,6 +599,7 @@
 				EA557DDC2EDC466F84FBB88A /* RemoteMachinesModelTests.swift */,
 				A88A7569486D470AE987450A /* RemoteSharingModelTests.swift */,
 				A1B2C3D40004470AE987450A /* RemoteTakeoverPanelTests.swift */,
+				A1B2C3D40024470AE987450A /* ConnectionSwapTests.swift */,
 				77CE7813FD7E4601BEE6107B /* RemoteActivityLogTests.swift */,
 				C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */,
 				A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */,
@@ -911,6 +914,7 @@
 				99AA164ED3A349D5ABDD963D /* RemoteMachinesModelTests.swift in Sources */,
 				3EB0A5592ECBC0CAD61862B3 /* RemoteSharingModelTests.swift in Sources */,
 				A1B2C3D40003470AE987450A /* RemoteTakeoverPanelTests.swift in Sources */,
+				A1B2C3D40023470AE987450A /* ConnectionSwapTests.swift in Sources */,
 				CBFD87129B354D8E886D71EA /* RemoteActivityLogTests.swift in Sources */,
 				38CCB7C65BEB4239AECB9FE4 /* HostStatePublisherTests.swift in Sources */,
 				BA524298D19449349AF94799 /* PredictiveEchoModelTests.swift in Sources */,

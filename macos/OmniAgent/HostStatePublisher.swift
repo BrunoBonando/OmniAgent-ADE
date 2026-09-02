@@ -138,7 +138,11 @@ final class HostStatePublisher {
     static let slowRefreshEveryTicks = 60
 
     private let sources: HostStateSources
-    private var isRunning = false
+    /// Readable so the window can be asked whether this Mac is publishing —
+    /// `ConnectionSwapTests` pins that it is not, for the whole of a takeover:
+    /// a machine driving another machine is not a host and has nothing to say
+    /// about itself to anyone.
+    private(set) var isRunning = false
     private var ticksSinceSlowRefresh = 0
 
     /// `engines()`/`hostInfo()` as of the last `refreshSlowFields()` —

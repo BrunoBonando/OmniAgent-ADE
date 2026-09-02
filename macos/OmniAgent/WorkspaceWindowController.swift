@@ -110,11 +110,110 @@ final class WorkspaceWindow: NSWindow {
     }
 }
 
+/// The one connection the window drives, behind a reference so that the
+/// objects built in `WorkspaceWindowController.init` — before `self` exists,
+/// and therefore unable to ask the controller anything — resolve it *live*
+/// instead of capturing whichever connection happened to be current at
+/// construction.
+///
+/// This exists because of the no-chaining property (2026-09-01 remote
+/// environment sharing spec §3): a stale capture is precisely how a "local"
+/// connection survives a takeover unnoticed, which would leave this Mac
+/// shareable while it is driving another one.
+final class ActiveConnectionRef {
+    fileprivate(set) var current: SessionConnection
+
+    init(_ connection: SessionConnection) {
+        current = connection
+    }
+}
+
+/// `SessionConnection`'s injectable client protocols, forwarded to whichever
+/// daemon the window is driving right now. Everything handed one of these at
+/// `init` — the inspector, Settings' brain administration — therefore follows
+/// a swap rather than staying pointed at the connection it was born with.
+///
+/// Only the surfaces that are about *the environment* get one. The surfaces
+/// that are about *this Mac* (the auth rows, the sharing switch, the viewer
+/// roster, `HostState`) are deliberately bound to the local connection
+/// instead — see `WorkspaceWindowController.localConnection`.
+final class ResolvingDaemonClient: BrainAdminClient, BrainSearchClient {
+    private let active: ActiveConnectionRef
+
+    init(_ active: ActiveConnectionRef) {
+        self.active = active
+    }
+
+    private var connection: SessionConnection { active.current }
+
+    func listProjects(completion: @escaping (Result<[BrainProjectSummary], Error>) -> Void) {
+        connection.listProjects(completion: completion)
+    }
+
+    func getContext(project: String, completion: @escaping (Result<BrainContext, Error>) -> Void) {
+        connection.getContext(project: project, completion: completion)
+    }
+
+    func staleness(completion: @escaping (Result<[ProjectStaleness], Error>) -> Void) {
+        connection.staleness(completion: completion)
+    }
+
+    func pausedProjects(completion: @escaping (Result<[String], Error>) -> Void) {
+        connection.pausedProjects(completion: completion)
+    }
+
+    func setPaused(project: String, paused: Bool, completion: ((Result<Void, Error>) -> Void)?) {
+        connection.setPaused(project: project, paused: paused, completion: completion)
+    }
+
+    func reingestProject(project: String, completion: ((Result<Void, Error>) -> Void)?) {
+        connection.reingestProject(project: project, completion: completion)
+    }
+
+    func renameProject(id: String, newLabel: String, completion: ((Result<Void, Error>) -> Void)?) {
+        connection.renameProject(id: id, newLabel: newLabel, completion: completion)
+    }
+
+    func rebuildBrain(completion: ((Result<Void, Error>) -> Void)?) {
+        connection.rebuildBrain(completion: completion)
+    }
+
+    func search(query: String, scope: String?, completion: @escaping (Result<[BrainNodeView], Error>) -> Void) {
+        connection.search(query: query, scope: scope, completion: completion)
+    }
+}
+
 /// Owns the window, the connection, and the session lifecycle of every pane in
 /// the workspace. Layout, pane identity and focus belong to `PaneWorkspaceView`;
 /// creating, attaching and killing sessions belongs here.
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
-    let connection: SessionConnection
+    /// The daemon this window is driving — the local socket normally, another
+    /// Mac's while `isDrivingRemote`. Everything below that says `connection`
+    /// resolves through here on every call, so re-pointing the window is one
+    /// assignment rather than a hunt through call sites.
+    private let active: ActiveConnectionRef
+    /// This Mac's own daemon, for as long as this window lives. Kept apart
+    /// from `connection` because a handful of things are about *this machine*
+    /// and never about the one being driven: the `auth_*` rows, the sharing
+    /// switch and its blocked list, the viewer roster and the takeover panel,
+    /// `PublishHostState`, and the daemon pid a restart signals. All of those
+    /// are in the daemon's protected/local-only set anyway (spec §3, §12) —
+    /// addressing them here says so at the call site rather than relying on
+    /// the far end to refuse.
+    ///
+    /// **It is disconnected for the whole of a takeover**, and that is not an
+    /// oversight to be tidied up later: a Mac that is driving another Mac has
+    /// no local app connection, so its own daemon fails condition 3 of spec
+    /// §2 and refuses everyone inbound. No hops, no chains — enforced by
+    /// construction. Keeping both attached would silently undo it.
+    let localConnection: SessionConnection
+    var connection: SessionConnection { active.current }
+    /// Whether this window is pointed at another Mac's daemon.
+    var isDrivingRemote: Bool { active.current !== localConnection }
+    /// The brain/search surface handed to the objects built in `init`, which
+    /// cannot ask this controller for `connection` because `self` does not
+    /// exist yet.
+    private let daemonClient: ResolvingDaemonClient
     private let workspace: PaneWorkspaceView
     /// The pane rectangle. Reachable because the window's content view is now
     /// a split view — the workspace is one half of it, not the whole thing.
@@ -574,18 +673,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         settingsClient: SettingsClient? = nil,
         authDefaults: UserDefaults = .standard
     ) {
-        self.connection = connection
+        self.localConnection = connection
+        let active = ActiveConnectionRef(connection)
+        self.active = active
+        let daemonClient = ResolvingDaemonClient(active)
+        self.daemonClient = daemonClient
         self.notifier = notifier
         self.daemonPersistence = daemonPersistence
         self.remoteMachines = remoteMachines
         self.remoteSharing = remoteSharing
         let hostStatePublisher = HostStatePublisher(sources: hostStateSources)
+        // The **local** connection, not the active one: `PublishHostState` is
+        // this Mac telling its own daemon what only this Mac knows, and it is
+        // local-only in the daemon's allowlist (spec §12.3). It also never
+        // runs during a takeover — see `syncTakeoverPanel`.
         hostStatePublisher.publish = { [connection] payload in
             connection.publishHostState(payload)
         }
         self.hostStatePublisher = hostStatePublisher
         accountRoot = daemonPersistence.paths.dataDir
         currentAccountID = AccountDirectory.readCurrentAccount(root: daemonPersistence.paths.dataDir)
+        // The **local** connection again: every key this store reads or
+        // writes is an `auth_*` row, which names who is signed in to *this*
+        // Mac and which the daemon refuses to a remote client outright
+        // (spec §3, the protected set).
         let settingsStore = SettingsStore(client: settingsClient ?? connection)
         self.settingsStore = settingsStore
         // `authDefaults` is where the signed-in mirror lives — the real
@@ -599,26 +710,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         self.authGateCoordinator = authGateCoordinator
         let authGateWindow = AuthGateWindowController(coordinator: authGateCoordinator)
         self.authGateWindow = authGateWindow
+        // Onboarding is about *this* install's brain, so it keeps the local
+        // connection; `presentOnboardingIfNeeded` also declines to run at all
+        // while another Mac is being driven.
         firstRunWindow = FirstRunWindowController(ingestion: connection)
-        inspector = InspectorWindowController(client: connection)
+        // These two are about the environment on screen, so they follow the
+        // swap: the inspector shows the brain of whichever daemon owns the
+        // project the sidebar is listing, and Settings' brain administration
+        // acts on the same one. `Brain*` is in the remote allowlist (spec §3).
+        inspector = InspectorWindowController(client: daemonClient)
         settingsWindowController = SettingsWindowController(
             settings: settingsStore,
             authGate: authGateCoordinator,
             authGateWindow: authGateWindow,
-            brainAdmin: connection,
+            brainAdmin: daemonClient,
             notifier: notifier,
             daemonStatus: daemonPersistence
         )
-        workspace = PaneWorkspaceView { descriptor in
+        workspace = PaneWorkspaceView { [active] descriptor in
             switch descriptor.kind {
             case .terminal:
-                // A remote pane talks to its machine's connection; the local
-                // daemon's is for everything else. The lookup tolerates an
-                // offline machine so a pane is never silently rebound to the
-                // wrong daemon.
+                // A remote pane talks to its machine's connection; the daemon
+                // this window is driving is for everything else. `active` and
+                // not a captured `connection`: a pane built after a takeover
+                // must reach the machine being driven, and one built before it
+                // is gone by the time the swap completes.
                 let target = descriptor.remoteDeviceID
                     .flatMap { remoteMachines.retainedConnection(for: $0) as? SessionConnection }
-                    ?? connection
+                    ?? active.current
                 let surface = TerminalSurfaceView(connection: target, sessionID: descriptor.sessionID)
                 // Mosh-style local echo earns its keep only across a relay
                 // round trip; on the local socket it would draw glyphs the
@@ -1560,6 +1679,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // Sparkle's own cycle: a check shortly after launch, then daily. The
         // widget stays hidden until one of them finds something.
         updateController.start()
+        installConnectionHandlers()
+        connection.connect()
+    }
+
+    /// Every push this window listens for, installed on whichever connection
+    /// is active. Split out of `start()` so a takeover can re-establish the
+    /// whole set against the new daemon (`swapConnection`) rather than leaving
+    /// closures behind on the old one — a subscriber that outlives a swap is
+    /// still holding a connection this app is supposed to have let go of.
+    private func installConnectionHandlers() {
         connection.onStateChange = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -1574,21 +1703,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                     restoreAccountStateIfNeeded()
                 }
                 refreshProjectLabels()
-                // The roster is pushed on every change, but a daemon with
-                // nobody attached pushes nothing at all — so a freshly opened
-                // app has to ask once to learn that "nothing" is the answer
-                // rather than "not yet".
-                refreshRemoteViewers()
-                // The launch read ran before the daemon was up and failed;
-                // this is the first time the rows can actually be read.
-                refreshAccountSection()
-                // And the sharing model's own restore, if its first attempt
-                // failed: `configure(store:)` runs once, off
-                // `runWhenConnected`, so without this a single failed read
-                // left `RemoteSharingModel.shared` at its fail-closed
-                // defaults for the life of the process. A no-op once a
-                // restore has actually completed.
-                remoteSharing.connectionDidComeUp()
+                // Everything from here to `didConnect` is about *this* Mac,
+                // so a remote daemon coming up is not the event it answers to:
+                // the roster and the sharing rows are local-only or protected
+                // (spec §3, §12.3) and would be refused, and the account rows
+                // describe who is signed in here. During a takeover the local
+                // connection is down and there is nothing to ask; the swap
+                // back re-runs all of it on the local `.connected`.
+                if !isDrivingRemote {
+                    // The roster is pushed on every change, but a daemon with
+                    // nobody attached pushes nothing at all — so a freshly
+                    // opened app has to ask once to learn that "nothing" is
+                    // the answer rather than "not yet".
+                    refreshRemoteViewers()
+                    // The launch read ran before the daemon was up and failed;
+                    // this is the first time the rows can actually be read.
+                    refreshAccountSection()
+                    // And the sharing model's own restore, if its first attempt
+                    // failed: `configure(store:)` runs once, off
+                    // `runWhenConnected`, so without this a single failed read
+                    // left `RemoteSharingModel.shared` at its fail-closed
+                    // defaults for the life of the process. A no-op once a
+                    // restore has actually completed.
+                    remoteSharing.connectionDidComeUp()
+                }
                 didConnect = true
                 presentOnboardingIfNeeded()
                 let work = pendingConnectedWork
@@ -1704,11 +1842,39 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.onRemoteActivity = { [weak self] entries in
             self?.takeoverPanel?.appendActivity(entries)
         }
-        connection.connect()
+    }
+
+    /// The exact inverse of `installConnectionHandlers`, applied to the
+    /// connection being left behind.
+    ///
+    /// Nothing subtler than nilling every closure will do: these are the only
+    /// strong references from a connection back into this window, and the
+    /// no-chaining property (spec §3) is the claim that *none* of them
+    /// survives a takeover. `SessionConnection.hasSubscribers` is the same
+    /// list read back, and `ConnectionSwapTests` asserts it is false for the
+    /// local connection while another Mac is being driven.
+    ///
+    /// `onSessionSize` is included even though this window never assigns it:
+    /// `TerminalSurfaceView` does, through its own registry, so a pane that
+    /// somehow outlived the swap would leave one here.
+    private func clearConnectionHandlers(on connection: SessionConnection) {
+        connection.onStateChange = nil
+        connection.onTerminalData = nil
+        connection.onStatus = nil
+        connection.onAttention = nil
+        connection.onExit = nil
+        connection.onError = nil
+        connection.onSessionSize = nil
+        connection.onReattachFailed = nil
+        connection.onRemoteViewers = nil
+        connection.onRemoteActivity = nil
     }
 
     func stop() {
         connection.disconnect()
+        // Both, when a takeover is live: the window closing ends the remote
+        // session, and the local connection is sitting idle rather than gone.
+        localConnection.disconnect()
         daemonPersistence.stop()
         // The panel outlives nothing: quitting ends sharing (spec §7), and a
         // borderless screen-covering window left ordered in after its owner
@@ -3272,6 +3438,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if signedIn {
             remoteMachines.start()
         } else {
+            // Signing out ends a takeover too: the bearer the relay socket
+            // rides on is gone, and the window must be back on its own daemon
+            // before `stop()` closes every remote connection under it.
+            disconnectRemote()
             remoteMachines.stop()
             for paneID in workspace.allPaneIDs where workspace.descriptor(for: paneID)?.isRemote == true {
                 destroyPane(paneID)
@@ -3318,6 +3488,144 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard addDescriptor(descriptor, reattaches: true, startSession: false) else { return }
         attach(sessionID)
         revealPane(sessionID)
+    }
+
+    // MARK: - Driving another Mac (2026-09-01 remote environment sharing §6)
+
+    /// The workspaces this window is currently listing, in order. The
+    /// coarsest possible statement of "which environment is on screen", and
+    /// what `ConnectionSwapTests` compares across a takeover and back.
+    var workspaceIDs: [String] { workspaces.map(\.id) }
+
+    /// Whether this Mac is publishing its own gauges, limits and engines to a
+    /// lease holder (spec §4). Host-side, so false for the whole of a
+    /// takeover — see `syncTakeoverPanel`.
+    var isPublishingHostState: Bool { hostStatePublisher.isRunning }
+
+    /// How a machine is turned into the connection that reaches it —
+    /// `RemoteMachinesModel`'s, in production. A seam in the house style
+    /// (`viewerLister`, `sessionEnsurer`), so a swap can be exercised without
+    /// a relay, a device registration or a socket.
+    var remoteConnectionProvider: ((RemoteMachine) -> SessionConnection?)?
+
+    /// The handful of things the local daemon's answers had put in this
+    /// window that no later read brings back by itself: which screen was on,
+    /// which workspace was open, and the project list behind both.
+    ///
+    /// Everything else — the panes, the layout, the session metadata, the
+    /// notification feed, the usage store — is deliberately **not** in here.
+    /// Those live in rows in the local daemon's database, which a takeover
+    /// does not touch, so re-reading them on the swap back is both simpler
+    /// and more honest than replaying a copy of them from memory.
+    private struct LocalEnvironment {
+        var destination: WorkspaceDestination
+        var workspaces: [BrainProjectSummary]
+        var selectedProjectID: String?
+        var projectLabels: [String: String]
+        var recentSessionGroupIDs: [String]
+    }
+
+    /// Set for exactly as long as `isDrivingRemote` is true.
+    private var parkedLocalEnvironment: LocalEnvironment?
+
+    /// Points the whole window at another Mac's daemon.
+    ///
+    /// Local state is not destroyed — `disconnectRemote()` restores it. What
+    /// *is* destroyed, deliberately and permanently for the duration, is the
+    /// **attachment to this Mac's own daemon**: `swapConnection` clears every
+    /// subscription on the local connection and disconnects it.
+    ///
+    /// That is not an optimisation and must not be "fixed" by keeping both
+    /// attached. It is the whole of the app's half of the no-chaining
+    /// property (spec §3): the daemon shares a machine only while at least
+    /// one local app connection exists (spec §2, condition 3), so a Mac that
+    /// is driving another Mac fails that test and refuses everyone inbound.
+    /// No hops, no chains, enforced by construction rather than by a rule.
+    /// Two connections would make the condition satisfiable by accident, and
+    /// the property would silently stop holding.
+    @MainActor
+    func connectRemote(to machine: RemoteMachine) async throws {
+        guard !isDrivingRemote else {
+            throw RemoteDriveError.alreadyDriving
+        }
+        let provider = remoteConnectionProvider ?? { [weak self] machine in
+            self?.remoteMachines.sessionConnection(for: machine.deviceID)
+        }
+        guard let remote = provider(machine) else {
+            throw RemoteDriveError.machineOffline(machine.name)
+        }
+        // While this window drives it, the poll must not close it underneath
+        // us the first time the relay's answer flickers.
+        remoteMachines.drivenDeviceID = machine.deviceID
+        parkedLocalEnvironment = LocalEnvironment(
+            destination: destination,
+            workspaces: workspaces,
+            selectedProjectID: selectedProjectID,
+            projectLabels: projectLabels,
+            recentSessionGroupIDs: recentSessionGroupIDs
+        )
+        swapConnection(to: remote)
+    }
+
+    /// Swaps back to the local socket and puts this Mac's own environment
+    /// back where it was. A no-op when nothing is being driven.
+    func disconnectRemote() {
+        guard isDrivingRemote else { return }
+        let parked = parkedLocalEnvironment
+        parkedLocalEnvironment = nil
+        remoteMachines.drivenDeviceID = nil
+        swapConnection(to: localConnection)
+        if let parked {
+            destination = parked.destination
+            workspaces = parked.workspaces
+            selectedProjectID = parked.selectedProjectID
+            projectLabels = parked.projectLabels
+            recentSessionGroupIDs = parked.recentSessionGroupIDs
+        }
+        applyDestination(destination)
+        reloadOutline()
+        // The panes, the layout and every row-backed surface come back from
+        // the local daemon's own database on the next `.connected`, which
+        // `swapConnection` has just asked for. Nothing wrote to those rows
+        // while the takeover was live: the reset below drops
+        // `layoutReadCompleted`, which is the write gate every `persist*`
+        // checks, and after the swap the writes that did happen went to the
+        // machine being driven.
+    }
+
+    /// Re-points `active`, and does the three things that must happen with it
+    /// in one place: forget the environment the old daemon was showing, move
+    /// every subscription across, and dial the new connection.
+    private func swapConnection(to next: SessionConnection) {
+        let previous = active.current
+        guard previous !== next else { return }
+        // Write gates down *first* (`resetForAccountSwitch` starts by
+        // dropping them), so nothing below persists this window's outgoing
+        // state into the incoming daemon's database.
+        resetForAccountSwitch()
+        clearConnectionHandlers(on: previous)
+        previous.disconnect()
+        active.current = next
+        installConnectionHandlers()
+        next.connect()
+        // The panel and the host-state publisher are host-side, and
+        // `isDrivingRemote` has just changed under them.
+        syncTakeoverPanel()
+    }
+
+    /// Why `connectRemote` refused.
+    enum RemoteDriveError: LocalizedError, Equatable {
+        case alreadyDriving
+        case machineOffline(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .alreadyDriving:
+                return "End the current remote session first."
+            case let .machineOffline(name):
+                return "\(name) is not reachable."
+            }
+        }
     }
 
     // MARK: - Restoration
@@ -3929,8 +4237,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// (outline/palette/inspector) shares — refreshed on every connect
     /// (cheap, read-only, unlike the `layout` row there is no destructive
     /// write this could clobber, so no "read once" guard is needed).
+    /// `listProjects`, behind the house seam (`viewerLister`'s shape), so a
+    /// test can give this window a workspace list without a socket — which is
+    /// what makes the connection swap's "the environment on screen changed,
+    /// and came back" assertion possible at all.
+    var projectLister: ((@escaping (Result<[BrainProjectSummary], Error>) -> Void) -> Void)?
+
     func refreshProjectLabels() {
-        connection.listProjects { [weak self] result in
+        let apply: (Result<[BrainProjectSummary], Error>) -> Void = { [weak self] result in
             guard let self, case let .success(projects) = result else { return }
             projectLabels = Dictionary(projects.map { ($0.id, $0.label) }, uniquingKeysWith: { _, newest in newest })
             workspaces = projects
@@ -3940,6 +4254,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             if let selectedProjectID { selectWorkspace(id: selectedProjectID, animated: false) }
             selectInitialWorkspaceIfNeeded(animated: false)
             reloadOutline()
+        }
+        if let projectLister {
+            projectLister(apply)
+        } else {
+            // Through `daemonClient`, which resolves the connection live: the
+            // sidebar must list the workspaces of whichever daemon this window
+            // is driving.
+            daemonClient.listProjects(completion: apply)
         }
     }
 
@@ -4229,9 +4551,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// toggle are gone (2026-09-01 remote environment sharing spec §1); only
     /// the token read remains.
     private func restoreRemoteControlIfNeeded() {
+        // This Mac's relay identity, read off the local socket — which is
+        // down for the whole of a takeover. Asking a dead socket would only
+        // fail and re-arm; the swap back re-runs it on the local `.connected`.
+        guard !isDrivingRemote else { return }
         guard !remoteControlReadDispatched else { return }
         remoteControlReadDispatched = true
-        connection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] result in
+        // `localConnection`: `relay_device_token` is this Mac's own relay
+        // identity, in the daemon's protected set (spec §3) and refused to a
+        // remote client on both get and set.
+        localConnection.getSetting(key: SettingsKey.relayDeviceToken) { [weak self] result in
             guard let self else { return }
             switch result {
             case let .success(raw):
@@ -4291,7 +4620,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if let viewerLister {
             viewerLister(apply)
         } else {
-            connection.listViewers(completion: apply)
+            // `localConnection`: "who is watching this Mac" is a question only
+            // this Mac's daemon can answer, and `ListViewers` is local-only in
+            // the allowlist (spec §12.3).
+            localConnection.listViewers(completion: apply)
         }
     }
 
@@ -4356,7 +4688,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         if let viewerDisconnector {
             viewerDisconnector(viewerID, finish)
         } else {
-            connection.disconnectViewer(viewerID: viewerID, block: true, completion: finish)
+            // `localConnection`: kicking a viewer off *this* Mac.
+            // `DisconnectViewer` is local-only (spec §12.3).
+            localConnection.disconnectViewer(viewerID: viewerID, block: true, completion: finish)
         }
     }
 
@@ -4571,6 +4905,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // So it fails **open**: a panel a moment early is harmless, a panel
         // missing is the whole failure. The daemon is the authority on
         // whether a remote connection exists, and the roster is what it says.
+        //
+        // The one thing that does gate it is `isDrivingRemote`: a machine
+        // driving another machine is not a host. Its local connection is
+        // gone, so its daemon has already stopped accepting anyone (spec §2
+        // condition 3) and this roster is a frozen copy of the last thing the
+        // local daemon said — which must not raise a panel over an
+        // environment that belongs to another Mac, and must never start
+        // `hostStatePublisher`, whose whole subject is *this* Mac.
+        guard !isDrivingRemote else {
+            takeoverPanel?.dismiss()
+            takeoverPanel = nil
+            hostStatePublisher.stop()
+            return
+        }
         guard let info = remoteSharing.liveConnection else {
             takeoverPanel?.dismiss()
             takeoverPanel = nil
@@ -4581,7 +4929,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             panel.apply(info)
             return
         }
-        let panel = RemoteTakeoverPanel(info: info, connection: connection)
+        // `localConnection`: Terminate and Block are `DisconnectViewer` on
+        // *this* Mac's daemon, local-only in the allowlist (spec §12.3).
+        let panel = RemoteTakeoverPanel(info: info, connection: localConnection)
         // The daemon owns `remote_control_blocked`, so the app's copy is
         // stale the instant a Block lands.
         panel.onBlocked = { [weak self] in self?.remoteSharing.refreshBlockedList() }
@@ -4650,7 +5000,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             workspaceLabels: projectedWorkspaceLabels(),
             tints: projectedWorkspaceTints()
         )
-        write(RemoteControlProjection.encode(payload), to: SettingsKey.remoteControl)
+        write(RemoteControlProjection.encode(payload), to: SettingsKey.remoteControl, machineLocal: true)
     }
 
     /// The names remote viewers see — `sidebarDisplayLabel`'s answer for
@@ -4704,7 +5054,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 // `connection.setSetting` directly: one seam means a test can
                 // watch this land without a socket, and without touching the
                 // developer's real `brain.db`.
-                write(RelayClient.shared.deviceTokenRow(registration, name: name), to: SettingsKey.relayDeviceToken)
+                write(
+                    RelayClient.shared.deviceTokenRow(registration, name: name),
+                    to: SettingsKey.relayDeviceToken,
+                    machineLocal: true
+                )
                 relayTokenState = .present
                 remoteMachines.localDeviceID = registration.deviceID
             } catch {
@@ -5978,6 +6332,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// daemon what roots exist needs the socket. Whichever lands last runs
     /// it. Dispatched once per launch; a reconnect does not re-ask.
     private func presentOnboardingIfNeeded() {
+        // Not while driving another Mac: onboarding is this install asking
+        // its own user for a folder on this disk, and the swap's reset
+        // deliberately re-arms `onboardingDispatched` for the local daemon.
+        guard !isDrivingRemote else { return }
         guard authGateResolved, didConnect, !onboardingDispatched else { return }
         onboardingDispatched = true
         presentFirstRunIfNeeded()
@@ -6184,7 +6542,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             daemonTerminator(completion)
             return
         }
-        daemonPersistence.terminateDaemon(pid: connection.peerProcessID(), completion: completion)
+        // `localConnection`: the pid to signal is the daemon on the other end
+        // of *this* Mac's socket, never anything reached through the relay.
+        daemonPersistence.terminateDaemon(pid: localConnection.peerProcessID(), completion: completion)
     }
 
     /// Forgets the daemon that just went away: every pane, without
@@ -6194,6 +6554,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// whatever the *new* daemon's directory holds. Terminal panes whose
     /// sessions are gone come back through `handleReattachFailure →
     /// ensureSession` as new terminals resuming their conversations.
+    ///
+    /// Two callers now, and they mean the same thing by it: an account switch
+    /// (the daemon restarts onto another directory) and a takeover
+    /// (`swapConnection` points the window at another Mac's daemon, and back).
+    /// The name is the older of the two; the operation is "this window is
+    /// about to be answered by a different daemon".
     func resetForAccountSwitch() {
         // Write gates first, so nothing below persists anything.
         layoutReadDispatched = false
@@ -6215,6 +6581,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         remoteControlReadDispatched = false
         usageReadDispatched = false
         usageReadCompleted = false
+        // The "did this row actually change?" cache is per *database*. Left
+        // standing, it would suppress the first write of a value the outgoing
+        // daemon happened to already hold and the incoming one has never seen.
+        lastPersisted.removeAll()
 
         for id in workspace.allPaneIDs {
             homeLaunches[id]?.cancel()
@@ -6278,7 +6648,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     }
 
     private func presentFirstRunIfNeeded() {
-        FirstRunWindowController.needsPresenting(ingestion: connection) { [weak self] needed in
+        // `localConnection`: first run is about this install's own brain, and
+        // the folder it would go on to add is this Mac's.
+        FirstRunWindowController.needsPresenting(ingestion: localConnection) { [weak self] needed in
             guard let self, needed else { return }
             firstRunWindow.present(over: window) { [weak self] project in
                 guard let self else { return }
@@ -6718,13 +7090,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// its OSC title on every prompt would otherwise write an identical
     /// `layout` row several times a second, against the database the web app
     /// is also reading.
-    private func write(_ value: String, to key: String) {
+    ///
+    /// `machineLocal` marks a row that describes **this** Mac rather than the
+    /// environment on screen — `relay_device_token`, `remote_control`. Those
+    /// go to the local daemon whatever the window is driving, so a takeover
+    /// can never write this Mac's relay identity into the host's database.
+    /// (The daemon refuses them to a remote client too — spec §3's protected
+    /// set — but a call site that says which machine it means is better than
+    /// one that relies on the far end to say no.)
+    private func write(_ value: String, to key: String, machineLocal: Bool = false) {
         guard lastPersisted[key] != value else { return }
         lastPersisted[key] = value
         if let settingsWriter {
             settingsWriter(key, value)
         } else {
-            connection.setSetting(key: key, value: value)
+            (machineLocal ? localConnection : connection).setSetting(key: key, value: value)
         }
     }
 

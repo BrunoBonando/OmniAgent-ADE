@@ -203,7 +203,10 @@ final class RemoteTakeoverPanel {
     private(set) var info: RemoteConnectionInfo
     /// `nil` in a test that only inspects the layout. A kick with no
     /// connection is a no-op, never a crash.
-    private weak var connection: RemoteViewerDisconnecting?
+    /// Readable so `ConnectionSwapTests` can pin which machine Terminate and
+    /// Block actually reach: this Mac's own daemon, never whatever the window
+    /// happens to be driving.
+    private(set) weak var connection: RemoteViewerDisconnecting?
     /// A failed Terminate/Block, for anyone who wants to know beyond the
     /// panel itself.
     ///

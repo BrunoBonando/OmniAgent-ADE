@@ -105,6 +105,19 @@ final class RemoteMachinesModel {
         }
     }
 
+    /// The machine `WorkspaceWindowController` is currently *driving*
+    /// (2026-09-01 remote environment sharing spec §6), or `nil`.
+    ///
+    /// Its connection is no longer this model's to close. A poll that sees
+    /// that device drop off the relay's list — a Core deploy, a lost list
+    /// call, the host's control channel re-registering — would otherwise
+    /// `disconnect()` the socket the whole window is running on, and the
+    /// session would end because a *list* flickered. The transport already
+    /// reconnects on its own; this only stops the poll from pulling it out
+    /// from underneath the window. `stop()`/`clearAll()` still close it: that
+    /// is sign-out, which ends a takeover on purpose.
+    var drivenDeviceID: String?
+
     private let relay: RelayClient
     private let pollInterval: TimeInterval
     private let makeConnection: (URL) -> RemoteConnection
@@ -287,16 +300,21 @@ final class RemoteMachinesModel {
         await refreshSession()
     }
 
-    private func apply(_ devices: [RelayClient.Device]) {
+    /// One poll's answer, applied. Not `private` — `ConnectionSwapTests`
+    /// calls it directly to pin `drivenDeviceID` without standing up a relay
+    /// stub, the same reason `HostStatePublisher.tick` is reachable.
+    func apply(_ devices: [RelayClient.Device]) {
         let online = devices.filter { $0.online && $0.deviceID != localDeviceID }
         let nowOnline = Set(online.map(\.deviceID))
         for device in online {
             names[device.deviceID] = device.name
         }
         // Gone offline: the socket is closed but the object stays, for the
-        // panes still holding it.
+        // panes still holding it — unless the window is driving that machine,
+        // in which case the connection is not this model's to close (see
+        // `drivenDeviceID`).
         for deviceID in onlineIDs.subtracting(nowOnline) {
-            connections[deviceID]?.disconnect()
+            if deviceID != drivenDeviceID { connections[deviceID]?.disconnect() }
             projections.removeValue(forKey: deviceID)
             unauthorized.removeValue(forKey: deviceID)
             connectionStates.removeValue(forKey: deviceID)
