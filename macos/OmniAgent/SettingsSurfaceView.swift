@@ -614,16 +614,25 @@ final class SettingsSurfaceView: NSView {
     /// share *with* — no device registration, and a daemon that refuses every
     /// viewer — so the switch is disabled and the copy under it says what to
     /// do about that instead of describing a feature that cannot run.
-    func applyRemoteSharing(isSharing: Bool, canShare: Bool) {
+    ///
+    /// `isRegistering` (fix round 2, Task 29): a Mac with no device token
+    /// yet registers with the relay before sharing can go live
+    /// (`WorkspaceWindowController.ensureRelayRegistration`), and that round
+    /// trip used to have no visible state at all — the switch just sat
+    /// showing off, and a second press during it was a silent no-op. The
+    /// switch now says so instead of pretending nothing is happening.
+    func applyRemoteSharing(isSharing: Bool, canShare: Bool, isRegistering: Bool = false) {
         self.isSharing = isSharing
         self.canShare = canShare
         shareToggle.state = isSharing ? .on : .off
         // Never disabled while sharing is *on*: switching it off must always
-        // be possible, whatever the account rows say.
-        shareToggle.isEnabled = canShare || isSharing
-        shareExplanationField.stringValue = canShare
-            ? Self.shareExplanation
-            : Self.signInFirstExplanation
+        // be possible, whatever the account rows say. Disabled while a
+        // registration is in flight either way — there is nothing a second
+        // press could do but start a duplicate one.
+        shareToggle.isEnabled = (canShare || isSharing) && !isRegistering
+        shareExplanationField.stringValue = isRegistering
+            ? Self.registeringExplanation
+            : (canShare ? Self.shareExplanation : Self.signInFirstExplanation)
     }
 
     static let shareExplanation =
@@ -632,6 +641,7 @@ final class SettingsSurfaceView: NSView {
     static let signInFirstExplanation =
         "Sign in to OmniAgent to share this environment. Sharing lets other Macs signed in to "
             + "your account use this one, so there has to be an account first."
+    static let registeringExplanation = "Registering this Mac with the relay…"
 
     /// The blocked list, as the model last reported it. Rebuilt rather than
     /// diffed: the list is a handful of rows a human curates, and a rebuild

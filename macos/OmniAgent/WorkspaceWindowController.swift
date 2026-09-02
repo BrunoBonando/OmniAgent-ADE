@@ -5070,7 +5070,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// test can restore without a socket, `applyRestoredWorkspaceCustomizations`'s
     /// pattern. Only the row's presence is kept — never its value, which
     /// belongs to the daemon alone.
+    ///
+    /// **Never overwrites `.registering`** (fix round 2, Task 29): this is
+    /// also reached from `restoreRemoteControlIfNeeded`'s ordinary
+    /// reconnect read, which races a registration this window itself
+    /// started. A reconnect's read necessarily predates that registration's
+    /// own conclusion, so applying it mid-flight would reset the state to
+    /// `.absent` and let a second toggle press start a second real
+    /// registration underneath the first — a duplicate `relay_devices` row,
+    /// with whichever lands last winning the token. The in-flight
+    /// registration's own completion is what settles `relayTokenState`
+    /// next; this read simply has nothing to say until then.
     func applyRestoredRelayDeviceToken(_ raw: String?) {
+        guard relayTokenState != .registering else { return }
         relayTokenState = (raw ?? "").isEmpty ? .absent : .present
         // The row also names this Mac's own relay device — the one machine
         // the viewer side must never list or dial.
@@ -5129,7 +5141,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     private func applyRemoteSharingChange() {
         settingsView.applyRemoteSharing(
             isSharing: remoteSharing.isSharing,
-            canShare: canShareEnvironment
+            canShare: canShareEnvironment,
+            // A registration this window started is still in flight (fix
+            // round 2, Task 29): the switch surface says so — disabled,
+            // different copy — rather than silently eating a second press.
+            isRegistering: relayTokenState == .registering
         )
         settingsView.applyBlockedMachines(remoteSharing.blockedViewerIDs)
         syncTakeoverPanel()
@@ -5327,8 +5343,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// Returns once whether a token is present is actually known — `true`
     /// only once `relayTokenState` itself reads `.present`, never
     /// optimistically.
+    ///
+    /// **Bails if the account changes underneath it** (fix round 2, Task
+    /// 29): `accountAtStart` is captured before the one `await` this
+    /// function itself introduces (the `.unknown` row read) and compared
+    /// after. `registerThisMachine` carries the same guard around its own,
+    /// longer `await` — capture-and-compare rather than cancellation,
+    /// because nothing here cancels the `Task` `toggleRemoteSharing` starts,
+    /// and a check that could be skipped is a check that will be.
     @MainActor
     private func ensureRelayRegistration() async -> Bool {
+        let accountAtStart = currentAccountID
         switch relayTokenState {
         case .present:
             return true
@@ -5348,6 +5373,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let result: Result<String?, Error> = await withCheckedContinuation { continuation in
                 localConnection.getSetting(key: SettingsKey.relayDeviceToken) { continuation.resume(returning: $0) }
             }
+            guard currentAccountID == accountAtStart else {
+                // The account changed while this read was in flight — its
+                // answer describes nobody here any more. `resetForAccountSwitch`
+                // has already reset `relayTokenState` to `.unknown` for the
+                // account now signed in; applying a read that predates the
+                // switch would be exactly the foreign-account mistake this
+                // guard exists to stop, one step earlier than the write.
+                return false
+            }
             if case let .success(raw) = result, relayTokenState == .unknown {
                 applyRestoredRelayDeviceToken(raw)
             }
@@ -5364,6 +5398,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// daemon keeps the only copy, and this window keeps nothing but the
     /// fact that one exists.
     ///
+    /// **Bails if the account changes underneath it** (fix round 2, Task
+    /// 29): `accountAtStart` is captured before `await register(name)`, and
+    /// compared after — an account switch or sign-out mid-registration must
+    /// not write account A's device token into account B's directory
+    /// (`write(_:to:machineLocal:)` always targets *whichever* daemon
+    /// `localConnection` currently points at), nor tell B it is registered
+    /// when what actually landed belongs to A. The daemon's own account
+    /// check (spec §9) would refuse a viewer whose asserted account does
+    /// not match B's directory, so this could not leak a session either
+    /// way — but a device registered under the wrong account is wrong on
+    /// its own terms, not merely unreachable. Neither `relayTokenState`
+    /// (already reset by `resetForAccountSwitch`) nor a failure card is
+    /// touched on the way out: A's attempt has nobody left to report to,
+    /// and B's own state is not this abandoned attempt's to set.
+    ///
     /// Not `private`: `ensureRelayRegistration` is the one production
     /// caller, but a test may still want to drive this directly. Callers
     /// must check `relayTokenState` themselves first (`ensureRelayRegistration`'s
@@ -5374,10 +5423,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     @discardableResult
     func registerThisMachine() async -> Bool {
         let name = Host.current().localizedName ?? "Mac"
+        let accountAtStart = currentAccountID
         let register = relayDeviceRegistrar ?? { try await RelayClient.shared.registerDevice(name: $0) }
         relayTokenState = .registering
+        applyRemoteSharingChange()
         do {
             let registration = try await register(name)
+            guard currentAccountID == accountAtStart else { return false }
             // Through `write(_:to:)` like every other settings row, not
             // `connection.setSetting` directly: one seam means a test can
             // watch this land without a socket, and without touching the
@@ -5391,10 +5443,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             remoteMachines.localDeviceID = registration.deviceID
             return true
         } catch {
+            guard currentAccountID == accountAtStart else { return false }
             // Back to `absent`, not `unknown`: the read succeeded, the
             // registration is what failed, so the retry the card promises
             // has to be able to start another one.
             relayTokenState = .absent
+            applyRemoteSharingChange()
             presentWindowAsk(
                 title: "Could not register this Mac",
                 message: "Sharing stays off until this Mac is registered with the relay — no other "

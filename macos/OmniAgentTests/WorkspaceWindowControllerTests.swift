@@ -3206,6 +3206,11 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.settingsView.isSharing, "a failed write leaves the switch exactly as it was")
         let card = try XCTUnwrap(controller.windowAskOverlay, "the real card, not an NSAlert")
         XCTAssertEqual(card.options.map(\.title), ["OK"])
+        // Not just "a card is up" — *this* card, so a future bug that
+        // swapped it for the registration-failure card ("Could not register
+        // this Mac", a different bug entirely) would still be caught: both
+        // cards share the single "OK" button.
+        XCTAssertEqual(card.accessibilityLabel(), "Could not update sharing")
     }
 
     /// The spotlight row runs through the exact same `toggleRemoteSharing()`
@@ -3308,6 +3313,222 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertNil(client.rows[SettingsKey.remoteSharing], "remote_sharing was never even written")
         let card = try XCTUnwrap(controller.windowAskOverlay, "the failure is visible, not silent")
         XCTAssertEqual(card.options.map(\.title), ["OK"])
+        // Distinguishes this from a *write* failure
+        // (`testAFailedSharingWriteAsksInACardAndLeavesTheSwitchAlone`'s
+        // "Could not update sharing") — two different bugs, two different
+        // cards, and a test that could not tell them apart would not
+        // actually be testing this one.
+        XCTAssertEqual(card.accessibilityLabel(), "Could not register this Mac")
+    }
+
+    /// IMPORTANT, fix round 2: an account switch landing while
+    /// `registerThisMachine`'s `await` is still suspended must not write
+    /// account A's device token into account B's directory —
+    /// `write(_:to:machineLocal:)` always targets whichever daemon
+    /// `localConnection` currently points at, and by the time A's
+    /// registrar resolves that is B's. `accountAtStart` (captured before
+    /// the `await`) catches it.
+    @MainActor
+    func testAnAccountSwitchMidRegistrationDoesNotWriteAForeignAccountsToken() async throws {
+        let client = FakeSettingsClient(rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"])
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-account-race-test.sock")
+            ),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            settingsClient: client,
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount(AccountDirectory.accountID(forEmail: "account-a@test.com"), root: root)
+        controller.accountRoot = root
+        XCTAssertEqual(controller.currentAccountID, AccountDirectory.accountID(forEmail: "account-a@test.com"))
+
+        let gate = RegistrationGate()
+        controller.relayDeviceRegistrar = { _ in
+            await gate.wait()
+            return RelayClient.Registration(deviceID: "device-a", token: "secret-a")
+        }
+        controller.applyRestoredRelayDeviceToken(nil)
+
+        controller.toggleRemoteSharing()
+        for _ in 0..<200 where controller.relayTokenState != .registering {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        // Account A's registration is now suspended mid-flight — switch to
+        // B before it resumes.
+        controller.daemonTerminator = { $0(true) }
+        controller.switchAccount(toEmail: "other@bonando.com") {}
+        XCTAssertNotEqual(
+            controller.currentAccountID, AccountDirectory.accountID(forEmail: "account-a@test.com"),
+            "the switch actually landed"
+        )
+        XCTAssertEqual(controller.relayTokenState, .unknown, "resetForAccountSwitch's own reset, for account B")
+
+        gate.open()
+        try await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertFalse(
+            writes.contains { $0.0 == SettingsKey.relayDeviceToken },
+            "account A's abandoned registration must never write into account B's directory"
+        )
+        XCTAssertEqual(
+            controller.relayTokenState, .unknown,
+            "left exactly where resetForAccountSwitch put it for B, not clobbered by A's stale result"
+        )
+        XCTAssertFalse(
+            controller.isSharingEnvironment,
+            "never presented as on for account B on the strength of account A's token"
+        )
+    }
+
+    /// The other half: a sign-out landing mid-registration must not write
+    /// the token either — there is no account left to write it *for*.
+    @MainActor
+    func testASignOutMidRegistrationDoesNotWriteAToken() async throws {
+        let client = FakeSettingsClient(rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"])
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-signout-race-test.sock")
+            ),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            settingsClient: client,
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        let root = try temporaryAccountRoot()
+        try AccountDirectory.writeCurrentAccount(AccountDirectory.accountID(forEmail: "account-a@test.com"), root: root)
+        controller.accountRoot = root
+        XCTAssertEqual(controller.currentAccountID, AccountDirectory.accountID(forEmail: "account-a@test.com"))
+
+        let gate = RegistrationGate()
+        controller.relayDeviceRegistrar = { _ in
+            await gate.wait()
+            return RelayClient.Registration(deviceID: "device-a", token: "secret-a")
+        }
+        controller.applyRestoredRelayDeviceToken(nil)
+
+        controller.toggleRemoteSharing()
+        for _ in 0..<200 where controller.relayTokenState != .registering {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        controller.daemonTerminator = { $0(true) }
+        controller.serverSessionRevoker = {}
+        controller.authGatePresenter = { _ in }
+        controller.logOutOfAccount()
+        XCTAssertNil(controller.currentAccountID, "the sign-out actually landed")
+        XCTAssertEqual(controller.relayTokenState, .unknown)
+
+        gate.open()
+        try await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertFalse(
+            writes.contains { $0.0 == SettingsKey.relayDeviceToken },
+            "a signed-out account's abandoned registration must never land a token on disk"
+        )
+        XCTAssertEqual(controller.relayTokenState, .unknown)
+        XCTAssertFalse(controller.isSharingEnvironment)
+    }
+
+    /// MINOR 1, fix round 2: `applyRestoredRelayDeviceToken` must not
+    /// overwrite `.registering` — an ordinary reconnect's read necessarily
+    /// predates the in-flight registration's own conclusion (the row is
+    /// not written until it succeeds), so applying it mid-flight would
+    /// reset the state to `.absent` and let a second press start a second
+    /// real registration underneath the first.
+    @MainActor
+    func testAReconnectDuringRegistrationDoesNotClobberRegisteringOrDuplicateIt() async throws {
+        let client = FakeSettingsClient(rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"])
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-reconnect-race-test.sock")
+            ),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+        var registrationCalls = 0
+        let gate = RegistrationGate()
+        controller.relayDeviceRegistrar = { _ in
+            registrationCalls += 1
+            await gate.wait()
+            return RelayClient.Registration(deviceID: "d1", token: "secret")
+        }
+        controller.applyRestoredRelayDeviceToken(nil)
+
+        controller.toggleRemoteSharing()
+        for _ in 0..<200 where controller.relayTokenState != .registering {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(registrationCalls, 1)
+
+        // A reconnect's ordinary read lands mid-flight — the row on disk is
+        // still empty, since the in-flight registration has not written it.
+        controller.applyRestoredRelayDeviceToken(nil)
+        XCTAssertEqual(controller.relayTokenState, .registering, "the reconnect's stale read must not clobber it")
+
+        // A second press while it still reads as registering must not
+        // start a second real registration.
+        controller.toggleRemoteSharing()
+        XCTAssertEqual(registrationCalls, 1, "no duplicate relay_devices row")
+
+        gate.open()
+        for _ in 0..<200 where controller.relayTokenState != .present {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(registrationCalls, 1)
+        XCTAssertTrue(controller.isSharingEnvironment)
+    }
+
+    /// MINOR 3, fix round 2: the switch says a registration it started is
+    /// in flight — disabled, with different copy — rather than silently
+    /// eating a second press for the whole round trip.
+    @MainActor
+    func testTheSwitchDisablesWhileRegisteringAndRestoresOnceSharingGoesLive() async throws {
+        let client = FakeSettingsClient(rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"])
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-switchstate-test.sock")
+            ),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+        let gate = RegistrationGate()
+        controller.relayDeviceRegistrar = { _ in
+            await gate.wait()
+            return RelayClient.Registration(deviceID: "d1", token: "secret")
+        }
+        controller.applyRestoredRelayDeviceToken(nil)
+
+        controller.toggleRemoteSharing()
+        for _ in 0..<200 where controller.relayTokenState != .registering {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        XCTAssertFalse(
+            controller.settingsView.shareToggle.isEnabled,
+            "a second press could only start a duplicate registration"
+        )
+        XCTAssertEqual(controller.settingsView.shareExplanationField.stringValue, SettingsSurfaceView.registeringExplanation)
+
+        gate.open()
+        for _ in 0..<200 where !controller.isSharingEnvironment {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        XCTAssertTrue(controller.settingsView.shareToggle.isEnabled, "re-enabled once sharing actually went live")
     }
 
     /// This Mac's own identity, read-only, from the same `relay_device_token`
@@ -3731,4 +3952,21 @@ private final class RecordingDelivery: NotificationDelivering {
     func deliver(_ entry: NotificationEntry) { delivered.append(entry) }
     func withdraw(identifiers: [String]) { withdrawn.append(contentsOf: identifiers) }
     func deliverTransient(identifier: String, title: String, body: String, sessionID: String) {}
+}
+
+/// A registration whose completion the test controls — so an account
+/// switch or sign-out can be made to land *while* `registerThisMachine`'s
+/// own `await` is still suspended, which is the one window the fix round 2
+/// account race lives in.
+private final class RegistrationGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func open() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
