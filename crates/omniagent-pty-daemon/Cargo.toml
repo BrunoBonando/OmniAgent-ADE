@@ -11,6 +11,15 @@ path = "src/lib.rs"
 name = "omniagent-pty-daemon"
 path = "src/main.rs"
 
+[features]
+# Gates `ActivityContext::fixture()` (activity.rs). `#[cfg(test)]` would not
+# work for it: `tests/remote_activity.rs` is a separate crate that links this
+# library built WITHOUT `cfg(test)`, so a genuinely test-only `pub fn` needs a
+# real feature — enabled for every test binary via this crate's own
+# self-referencing `[dev-dependencies]` entry below, never turned on for the
+# real daemon binary.
+test-support = []
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -49,3 +58,4 @@ tokio-tungstenite = "0.26"
 # The grace is read off `tokio::time::Instant` (`connections.rs`) for the same
 # reason.
 tokio = { version = "1", features = ["test-util"] }
+omniagent-pty-daemon = { path = ".", features = ["test-support"] }

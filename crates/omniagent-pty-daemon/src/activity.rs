@@ -3,33 +3,39 @@
 //!
 //! **The whole argument for this file is who witnesses what.** Nothing here
 //! is reported by the viewer about itself: [`ActivityLog::record`] maps a
-//! [`Frame`] the daemon actually received into an [`ActivityEntry`], and
-//! [`append`] persists it. A self-reported audit trail on a security surface
-//! is worse than none, because it looks like evidence — so a row exists only
-//! when the wire carried the frame that caused it.
+//! [`Frame`] the daemon actually received into zero or more [`ActivityEntry`]
+//! values, and [`append`] persists them. A self-reported audit trail on a
+//! security surface is worse than none, because it looks like evidence — so
+//! a row exists only when the wire carried the frame that caused it.
 //!
-//! [`ActivityLog::record`] is one `match` on [`MessageKind`], producing
-//! exactly the mutating frames a remote client can reach
+//! [`ActivityLog::record`] is one `match` on [`MessageKind`], producing a row
+//! for exactly the mutating frames a remote client can reach
 //! (`crate::authorize_remote`'s allowlist): every kind that only *reads* the
-//! machine (`ListSessions`, `GetSetting`, `BrainListProjects`,
-//! `BrainGetContext`, the read-only `Roots*` status queries) produces no row,
-//! because nothing happened to log. `Resize` and `Detach` are mutating-ish
-//! but deliberately silent too: a live grid follows the driver's window
-//! continuously, and a row for every frame of a window drag is exactly the
-//! "Input 12 bytes" noise this log exists to avoid; `Detach` drops a
-//! subscription, not the session underneath it. Every other reachable kind —
-//! `Attach`, `CreateSession`, `Input` (coalesced), `Interrupt`, `Kill`,
-//! `SetSetting`, every mutating `Roots*` kind, `ListDirectory`, `BrainSearch`
-//! — produces one.
+//! machine without disclosing anything about it (`ListSessions`,
+//! `GetSetting`, `BrainListProjects`, the read-only `Roots*` status queries)
+//! produces no row, because nothing happened worth logging. `BrainGetContext`
+//! and `BrainSearch` are reads too, but ones that hand brain content to the
+//! remote client — the same reasoning `ListDirectory` gets — so they are
+//! logged for disclosure, not mutation. `Detach` is silent: it drops a
+//! subscription, not the session underneath it. `Resize` is a real mutation
+//! (it ioctls the host pty, `session.resize`), so it is **not** silent
+//! either — but a raw `Resize` frame arrives once per pixel of a window drag,
+//! so it is coalesced exactly like `Input`: the buffered size settles into
+//! one row after the driver stops resizing, rather than one row per frame.
+//! Every other reachable kind — `Attach`, `CreateSession`, `Input`
+//! (coalesced), `Interrupt`, `Kill`, `SetSetting`, every mutating `Roots*`
+//! kind — produces one immediately.
 //!
 //! Connection-opened/closed rows (spec §8's other two table rows) are not
 //! built here: by the time a frame reaches [`ActivityLog::record`], `Hello`
 //! has already been consumed by the handshake and a close is not a frame at
-//! all. Both are events the dispatch loop itself observes directly, with
-//! the connection's own [`crate::AssertedIdentity`]/timing in hand — Task 19
+//! all. Both are events the dispatch loop itself observes directly, with the
+//! connection's own [`crate::AssertedIdentity`]/timing in hand — Task 19
 //! builds those two rows at the point it already has that context, rather
-//! than this module inventing a second, frame-shaped API for events that
-//! are not frames.
+//! than this module inventing a second, frame-shaped API for events that are
+//! not frames. That same dispatch loop must call [`ActivityLog::flush_all`]
+//! when a connection ends, so a viewer that drops mid-line does not simply
+//! erase whatever it had half-typed.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -41,31 +47,77 @@ use brain_core::redact::redact;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    decode_raw_payload, AttachPayload, BrainSearchPayload, Frame, ListDirectoryPayload,
-    MessageKind, RootsAddProjectPayload, RootsReingestProjectPayload, RootsRenameProjectPayload,
-    RootsSetPausedPayload, RootsStartIngestPayload, SessionIdPayload, SettingValue,
+    decode_raw_payload, AttachPayload, BrainGetContextPayload, BrainSearchPayload, Frame,
+    ListDirectoryPayload, MessageKind, ResizePayload, RootsAddProjectPayload,
+    RootsReingestProjectPayload, RootsRenameProjectPayload, RootsSetPausedPayload,
+    RootsStartIngestPayload, SessionIdPayload, SettingValue,
 };
 use crate::CreateSession;
+
+/// `ActivityEntry.ts`'s wire format: RFC 3339, not serde's default
+/// `SystemTime` encoding (`{"secs_since_epoch":…,"nanos_since_epoch":…}`).
+/// Task 20 reads `remote-activity.jsonl` back to render history, so the
+/// timestamp on the wire has to be something a reader can use directly —
+/// the same reasoning `connections.rs`'s own `rfc3339` helper exists for the
+/// presence roster's `since` field.
+mod rfc3339_ts {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::SystemTime;
+
+    pub fn serialize<S: Serializer>(value: &SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
+        chrono::DateTime::<chrono::Utc>::from(*value)
+            .to_rfc3339()
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SystemTime, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        chrono::DateTime::parse_from_rfc3339(&text)
+            .map(|parsed| SystemTime::from(parsed.with_timezone(&chrono::Utc)))
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// One row of the daemon-witnessed remote activity log.
 ///
 /// `detail` is `None` exactly when `summary` already says everything there
 /// is to say — a row with nothing more does not expand (spec §8: "clicking a
 /// session is one line and no detail"). Task 19 pushes these as
-/// `RemoteActivity` (`0x8f`) and Task 20 renders them, so the shape is a
-/// contract those two consume: keep it small and stable.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// `RemoteActivity` (`0x8f`) and Task 20 renders them (reading them back from
+/// `remote-activity.jsonl`, hence `Deserialize`), so the shape is a contract
+/// those two consume: keep it small and stable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActivityEntry {
+    #[serde(with = "rfc3339_ts")]
     pub ts: SystemTime,
     /// A short, stable machine tag — `"attach"`, `"create_session"`,
     /// `"input"`, `"interrupt"`, `"kill"`, `"set_setting"`, `"roots"`,
-    /// `"list_directory"`, `"brain_search"` — for Task 20 to group or icon
-    /// rows by, never itself shown as the row's text.
-    pub kind: &'static str,
+    /// `"list_directory"`, `"brain_search"`, `"brain_get_context"`,
+    /// `"resize"` — for Task 20 to group or icon rows by, never itself shown
+    /// as the row's text. A `String`, not `&'static str`: the latter cannot
+    /// implement `Deserialize`, and Task 20 has to read this back.
+    pub kind: String,
     /// One line, human, no ids.
     pub summary: String,
     /// Shown when the row is expanded.
     pub detail: Option<String>,
+}
+
+impl ActivityEntry {
+    /// Stamps `ts` with now and owns `kind`, so every arm of
+    /// [`ActivityLog::record`] states only what makes it different.
+    /// `pub(crate)` rather than private: Task 19 builds the
+    /// connection-opened/closed rows the same way, right where it already
+    /// has the context this module cannot reach through a `Frame` (see the
+    /// module doc).
+    pub(crate) fn new(kind: &'static str, summary: String, detail: Option<String>) -> Self {
+        Self {
+            ts: SystemTime::now(),
+            kind: kind.to_string(),
+            summary,
+            detail,
+        }
+    }
 }
 
 /// Resolves protocol ids into the words a person reads — pane titles,
@@ -211,6 +263,14 @@ impl ActivityContext {
     /// workspace's first, unnamed session — "Session 1" — of workspace
     /// "OmniAgent-ADE". The same shape a real `layout` row with one session
     /// and one pane, neither ever renamed, produces.
+    ///
+    /// Gated behind `test-support` rather than `#[cfg(test)]`: an integration
+    /// test in `tests/` is a separate crate that links this library built
+    /// *without* `cfg(test)`, so a `cfg(test)`-only `pub fn` would compile out
+    /// of the very binary that needs it. The crate's own `[dev-dependencies]`
+    /// turns the feature on for every test target; the real daemon binary
+    /// never enables it.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn fixture() -> Self {
         Self::from_layout(Some(
             r#"{"tabs":[{"project":"/Users/bruno/Bruno.Digital/OmniAgent-ADE","engine":"claude","cwd":"/tmp","id":"pane-1","group":"g1"}]}"#,
@@ -279,37 +339,70 @@ fn engine_from_command(command: &[String]) -> String {
     }
 }
 
-/// The 5 s of quiet after which [`ActivityLog::tick`] flushes a pane's
-/// half-typed input even without a `\r` (spec §8).
-const INPUT_QUIET: Duration = Duration::from_secs(5);
+/// The 5 s of quiet after which [`ActivityLog::tick`] settles a pane's
+/// half-typed input, or its half-finished resize, into a row (spec §8 for
+/// input; the same shape is reused for `Resize` — see the module doc).
+const SETTLE_QUIET: Duration = Duration::from_secs(5);
 
-/// Buffers `Input` per session and turns admitted frames into rows.
+/// Half-typed input for one session: the pane name resolved *once*, at the
+/// moment typing started, and reused at every flush — a CR-triggered row and
+/// a 5 s-quiet row for the same keystrokes must read identically, not one
+/// dressed up and the other naming the raw session id because it happened to
+/// end a different way.
+#[derive(Debug, Clone)]
+struct PendingInput {
+    pane: String,
+    text: String,
+    last_activity: Instant,
+}
+
+/// A pane's settling resize: the latest size the driver has asked for, and
+/// when it last changed. Named once, same reasoning as [`PendingInput`].
+#[derive(Debug, Clone)]
+struct PendingResize {
+    pane: String,
+    cols: u16,
+    rows: u16,
+    last_activity: Instant,
+}
+
+/// Buffers `Input` and `Resize` per session and turns admitted frames into
+/// rows.
 ///
 /// See the module doc for exactly which [`MessageKind`]s produce a row and
 /// why the rest correctly produce none.
 #[derive(Debug, Default)]
 pub struct ActivityLog {
     /// Half-typed input per session id, flushed on CR, Interrupt, or quiet.
-    pending: HashMap<String, (String, Instant)>,
+    pending: HashMap<String, PendingInput>,
+    /// A settling resize per session id, flushed on quiet or on
+    /// [`ActivityLog::flush_all`].
+    pending_resize: HashMap<String, PendingResize>,
 }
 
 impl ActivityLog {
-    /// Maps one admitted frame to a row, or `None` when the frame does not
-    /// belong in the log (a read, a malformed payload, or a kind this table
-    /// deliberately leaves silent — see the module doc).
-    pub fn record(&mut self, frame: &Frame, ctx: &ActivityContext) -> Option<ActivityEntry> {
+    /// Maps one admitted frame to zero or more rows — zero when the frame
+    /// does not belong in the log (a read, a malformed payload, or a kind
+    /// this table deliberately leaves silent — see the module doc), more
+    /// than one when a single `Input` frame carries more than one line (a
+    /// multi-line paste arrives as one frame; each embedded `\r` completes a
+    /// row, and whatever follows the last one stays pending).
+    pub fn record(&mut self, frame: &Frame, ctx: &ActivityContext) -> Vec<ActivityEntry> {
         match frame.header.message_kind {
             MessageKind::Attach => {
-                let attach: AttachPayload = serde_json::from_slice(&frame.payload).ok()?;
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "attach",
-                    summary: format!("Opened {}", ctx.pane_location(&attach.id)),
-                    detail: None,
-                })
+                let Ok(attach) = serde_json::from_slice::<AttachPayload>(&frame.payload) else {
+                    return Vec::new();
+                };
+                vec![ActivityEntry::new(
+                    "attach",
+                    format!("Opened {}", ctx.pane_location(&attach.id)),
+                    None,
+                )]
             }
             MessageKind::CreateSession => {
-                let create: CreateSession = serde_json::from_slice(&frame.payload).ok()?;
+                let Ok(create) = serde_json::from_slice::<CreateSession>(&frame.payload) else {
+                    return Vec::new();
+                };
                 let engine = engine_from_command(&create.command);
                 let workspace = create
                     .cwd
@@ -322,19 +415,29 @@ impl ActivityLog {
                     create.cwd.as_deref().map(redact).unwrap_or_default(),
                     redact(&create.command.join(" ")),
                 );
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "create_session",
-                    summary: format!("Started a {engine} terminal in {workspace}"),
-                    detail: Some(detail),
-                })
+                vec![ActivityEntry::new(
+                    "create_session",
+                    format!("Started a {engine} terminal in {workspace}"),
+                    Some(detail),
+                )]
             }
             MessageKind::Input => {
-                let (session, bytes) = decode_raw_payload(&frame.payload).ok()?;
+                let Ok((session, bytes)) = decode_raw_payload(&frame.payload) else {
+                    return Vec::new();
+                };
                 self.push_input(session, bytes, ctx)
             }
+            MessageKind::Resize => {
+                let Ok(resize) = serde_json::from_slice::<ResizePayload>(&frame.payload) else {
+                    return Vec::new();
+                };
+                self.push_resize(&resize, ctx);
+                Vec::new()
+            }
             MessageKind::Interrupt => {
-                let target: SessionIdPayload = serde_json::from_slice(&frame.payload).ok()?;
+                let Ok(target) = serde_json::from_slice::<SessionIdPayload>(&frame.payload) else {
+                    return Vec::new();
+                };
                 let pane = ctx.pane_title(&target.id);
                 // Interrupt is also a flush trigger (spec §8): whatever was
                 // half-typed when the driver hit Ctrl-C belongs on this same
@@ -342,119 +445,151 @@ impl ActivityLog {
                 let pending = self
                     .pending
                     .remove(&target.id)
-                    .map(|(text, _)| text)
+                    .map(|pending| pending.text)
                     .filter(|text| !text.is_empty());
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "interrupt",
-                    summary: format!("Interrupted {pane}"),
-                    detail: pending.map(|text| redact(&text)),
-                })
+                vec![ActivityEntry::new(
+                    "interrupt",
+                    format!("Interrupted {pane}"),
+                    pending.map(|text| redact(&text)),
+                )]
             }
             MessageKind::Kill => {
-                let target: SessionIdPayload = serde_json::from_slice(&frame.payload).ok()?;
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "kill",
-                    summary: format!("Closed {}", ctx.pane_title(&target.id)),
-                    detail: None,
-                })
+                let Ok(target) = serde_json::from_slice::<SessionIdPayload>(&frame.payload) else {
+                    return Vec::new();
+                };
+                vec![ActivityEntry::new(
+                    "kill",
+                    format!("Closed {}", ctx.pane_title(&target.id)),
+                    None,
+                )]
             }
             MessageKind::SetSetting => {
-                let setting: SettingValue = serde_json::from_slice(&frame.payload).ok()?;
-                let summary = if setting.key == "layout" {
-                    "Changed the workspace layout".to_string()
-                } else {
-                    // Every other reachable key (`editor_panes_native`,
-                    // `roots`, `persona`, and whatever joins them later) is
-                    // just as remote-writable as `layout` — a frame that
-                    // changes one of them and produces no row is the exact
-                    // bug this log exists to not have.
-                    format!("Changed a setting ({})", setting.key)
+                let Ok(setting) = serde_json::from_slice::<SettingValue>(&frame.payload) else {
+                    return Vec::new();
                 };
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "set_setting",
-                    summary,
-                    detail: None,
-                })
+                // Every reachable key (`editor_panes_native`, `roots`,
+                // `remote_control`, `remote_control_workspaces`, `persona`,
+                // and whatever joins them later — `protected_setting_key`
+                // is the only list that matters) is just as remote-writable
+                // as `layout`. A frame that changes one and produces no row
+                // is the exact bug this log exists to not have.
+                let (summary, detail) = if setting.key == "layout" {
+                    // The one exception worth omitting: `layout` is a large
+                    // JSON blob whose shape is not human-readable, so a
+                    // detail here would be noise, not evidence.
+                    ("Changed the workspace layout".to_string(), None)
+                } else {
+                    // For everything else the redacted value *is* the
+                    // auditable fact — "changed the persona" with no detail
+                    // does not say what it was changed to.
+                    (
+                        format!("Changed a setting ({})", setting.key),
+                        Some(redact(&setting.value)),
+                    )
+                };
+                vec![ActivityEntry::new("set_setting", summary, detail)]
             }
             MessageKind::RootsStartIngest => {
-                let payload: RootsStartIngestPayload =
-                    serde_json::from_slice(&frame.payload).ok()?;
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "roots",
-                    summary: format!("Started scanning {} for workspaces", redact(&payload.path)),
-                    detail: None,
-                })
+                let Ok(payload) = serde_json::from_slice::<RootsStartIngestPayload>(&frame.payload)
+                else {
+                    return Vec::new();
+                };
+                vec![ActivityEntry::new(
+                    "roots",
+                    format!("Started scanning {} for workspaces", redact(&payload.path)),
+                    None,
+                )]
             }
             MessageKind::RootsAddProject => {
-                let payload: RootsAddProjectPayload =
-                    serde_json::from_slice(&frame.payload).ok()?;
+                let Ok(payload) = serde_json::from_slice::<RootsAddProjectPayload>(&frame.payload)
+                else {
+                    return Vec::new();
+                };
                 let path = redact(&payload.path);
                 match payload.name.as_deref().map(redact) {
-                    Some(name) => Some(ActivityEntry {
-                        ts: SystemTime::now(),
-                        kind: "roots",
-                        summary: format!("Added workspace {name}"),
-                        detail: Some(path),
-                    }),
-                    None => Some(ActivityEntry {
-                        ts: SystemTime::now(),
-                        kind: "roots",
-                        summary: format!("Added workspace {path}"),
-                        detail: None,
-                    }),
+                    Some(name) => vec![ActivityEntry::new(
+                        "roots",
+                        format!("Added workspace {name}"),
+                        Some(path),
+                    )],
+                    None => vec![ActivityEntry::new(
+                        "roots",
+                        format!("Added workspace {path}"),
+                        None,
+                    )],
                 }
             }
             MessageKind::RootsRenameProject => {
-                let payload: RootsRenameProjectPayload =
-                    serde_json::from_slice(&frame.payload).ok()?;
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "roots",
-                    summary: format!("Renamed a workspace to {}", redact(&payload.new_label)),
-                    detail: None,
-                })
+                let Ok(payload) =
+                    serde_json::from_slice::<RootsRenameProjectPayload>(&frame.payload)
+                else {
+                    return Vec::new();
+                };
+                vec![ActivityEntry::new(
+                    "roots",
+                    format!("Renamed a workspace to {}", redact(&payload.new_label)),
+                    None,
+                )]
             }
             MessageKind::RootsSetPaused => {
-                let payload: RootsSetPausedPayload = serde_json::from_slice(&frame.payload).ok()?;
+                let Ok(payload) = serde_json::from_slice::<RootsSetPausedPayload>(&frame.payload)
+                else {
+                    return Vec::new();
+                };
                 let verb = if payload.paused { "Paused" } else { "Resumed" };
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "roots",
-                    summary: format!("{verb} workspace {}", redact(&payload.project)),
-                    detail: None,
-                })
+                vec![ActivityEntry::new(
+                    "roots",
+                    format!("{verb} workspace {}", redact(&payload.project)),
+                    None,
+                )]
             }
             MessageKind::RootsReingestProject => {
-                let payload: RootsReingestProjectPayload =
-                    serde_json::from_slice(&frame.payload).ok()?;
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "roots",
-                    summary: format!("Re-ingested workspace {}", redact(&payload.project)),
-                    detail: None,
-                })
+                let Ok(payload) =
+                    serde_json::from_slice::<RootsReingestProjectPayload>(&frame.payload)
+                else {
+                    return Vec::new();
+                };
+                vec![ActivityEntry::new(
+                    "roots",
+                    format!("Re-ingested workspace {}", redact(&payload.project)),
+                    None,
+                )]
             }
-            MessageKind::RootsRebuild => Some(ActivityEntry {
-                ts: SystemTime::now(),
-                kind: "roots",
-                summary: "Rebuilt the whole brain".to_string(),
-                detail: None,
-            }),
+            MessageKind::RootsRebuild => vec![ActivityEntry::new(
+                "roots",
+                "Rebuilt the whole brain".to_string(),
+                None,
+            )],
             MessageKind::ListDirectory => {
-                let payload: ListDirectoryPayload = serde_json::from_slice(&frame.payload).ok()?;
-                Some(ActivityEntry {
-                    ts: SystemTime::now(),
-                    kind: "list_directory",
-                    summary: format!("Browsed {}", redact(&payload.path)),
-                    detail: None,
-                })
+                let Ok(payload) = serde_json::from_slice::<ListDirectoryPayload>(&frame.payload)
+                else {
+                    return Vec::new();
+                };
+                vec![ActivityEntry::new(
+                    "list_directory",
+                    format!("Browsed {}", redact(&payload.path)),
+                    None,
+                )]
+            }
+            MessageKind::BrainGetContext => {
+                let Ok(payload) = serde_json::from_slice::<BrainGetContextPayload>(&frame.payload)
+                else {
+                    return Vec::new();
+                };
+                // A read, but one that hands brain content — the project's
+                // summary, decisions, notes — to the remote client, the same
+                // disclosure `ListDirectory`/`BrainSearch` are logged for.
+                vec![ActivityEntry::new(
+                    "brain_get_context",
+                    format!("Read the brief for {}", redact(&payload.project)),
+                    None,
+                )]
             }
             MessageKind::BrainSearch => {
-                let payload: BrainSearchPayload = serde_json::from_slice(&frame.payload).ok()?;
+                let Ok(payload) = serde_json::from_slice::<BrainSearchPayload>(&frame.payload)
+                else {
+                    return Vec::new();
+                };
                 let query = redact(&payload.query);
                 // A row that already shows the whole query has nothing left
                 // to expand; a truncated one keeps the full text a click
@@ -462,78 +597,176 @@ impl ActivityLog {
                 const PREVIEW_CHARS: usize = 60;
                 if query.chars().count() > PREVIEW_CHARS {
                     let preview: String = query.chars().take(PREVIEW_CHARS).collect();
-                    Some(ActivityEntry {
-                        ts: SystemTime::now(),
-                        kind: "brain_search",
-                        summary: format!("Searched the brain for \"{preview}…\""),
-                        detail: Some(query),
-                    })
+                    vec![ActivityEntry::new(
+                        "brain_search",
+                        format!("Searched the brain for \"{preview}…\""),
+                        Some(query),
+                    )]
                 } else {
-                    Some(ActivityEntry {
-                        ts: SystemTime::now(),
-                        kind: "brain_search",
-                        summary: format!("Searched the brain for \"{query}\""),
-                        detail: None,
-                    })
+                    vec![ActivityEntry::new(
+                        "brain_search",
+                        format!("Searched the brain for \"{query}\""),
+                        None,
+                    )]
                 }
             }
-            // Every other reachable kind is a read (`ListSessions`,
-            // `GetSetting`, `BrainListProjects`, `BrainGetContext`, the
-            // read-only `Roots*` status queries), or a mutation the table
-            // deliberately leaves silent (`Resize`, `Detach` — see the
-            // module doc) — nothing happened here worth a row.
-            _ => None,
+            // Every other reachable kind is a read that discloses nothing
+            // beyond its own success (`ListSessions`, `GetSetting`,
+            // `BrainListProjects`, the read-only `Roots*` status queries), or
+            // a mutation the table deliberately leaves silent (`Detach` —
+            // see the module doc) — nothing happened here worth a row.
+            _ => Vec::new(),
         }
     }
 
-    /// The context-free flush: pops whatever is pending for `session` and
-    /// redacts it, naming the pane by its raw session id rather than
-    /// resolving it through an [`ActivityContext`] — for a caller with no
-    /// context conveniently in hand, such as [`Self::tick`]'s periodic sweep
-    /// across every pending session at once, which is not scoped to any one
-    /// connection's layout.
+    /// The pane-name-resolved flush: pops whatever is pending for `session`
+    /// and redacts it. Used identically by the CR path inside
+    /// [`Self::push_input`], by [`Self::tick`]'s quiet sweep, and by
+    /// [`Self::flush_all`] — the same pane name every time, because it was
+    /// resolved once, at push time, and stored on the [`PendingInput`]
+    /// itself rather than re-resolved (or not) depending on how the line
+    /// happened to end.
     pub fn flush_input(&mut self, session: &str) -> Option<ActivityEntry> {
-        let (text, _) = self.pending.remove(session)?;
-        Self::finish_input(session.to_string(), text)
+        let pending = self.pending.remove(session)?;
+        Self::finish_input(pending.pane, pending.text)
     }
 
-    /// Flushes every session that has gone quiet for [`INPUT_QUIET`] or
-    /// longer, so a half-typed prompt is not lost just because the driver
-    /// never pressed return.
+    /// The `Resize` counterpart of [`Self::flush_input`]: pops the settled
+    /// size for `session` and builds its row, naming the pane the same way
+    /// it was named when the resize started.
+    fn flush_resize(&mut self, session: &str) -> Option<ActivityEntry> {
+        let pending = self.pending_resize.remove(session)?;
+        Some(ActivityEntry::new(
+            "resize",
+            format!(
+                "Resized {} to {}x{}",
+                pending.pane, pending.cols, pending.rows
+            ),
+            None,
+        ))
+    }
+
+    /// Flushes every session — input or resize — that has gone quiet for
+    /// [`SETTLE_QUIET`] or longer, so a half-typed prompt or a half-finished
+    /// drag is not lost just because nothing else ever triggers it.
     pub fn tick(&mut self, now: Instant) -> Vec<ActivityEntry> {
-        let stale: Vec<String> = self
+        let stale_input: Vec<String> = self
             .pending
             .iter()
-            .filter(|(_, (_, last))| now.saturating_duration_since(*last) >= INPUT_QUIET)
+            .filter(|(_, pending)| {
+                now.saturating_duration_since(pending.last_activity) >= SETTLE_QUIET
+            })
             .map(|(session, _)| session.clone())
             .collect();
-        stale
+        let stale_resize: Vec<String> = self
+            .pending_resize
+            .iter()
+            .filter(|(_, pending)| {
+                now.saturating_duration_since(pending.last_activity) >= SETTLE_QUIET
+            })
+            .map(|(session, _)| session.clone())
+            .collect();
+        let mut entries: Vec<ActivityEntry> = stale_input
             .into_iter()
             .filter_map(|session| self.flush_input(&session))
-            .collect()
+            .collect();
+        entries.extend(
+            stale_resize
+                .into_iter()
+                .filter_map(|session| self.flush_resize(&session)),
+        );
+        entries
     }
 
-    /// Buffers `bytes` for `session`, flushing on the first `\r` in them.
+    /// Flushes **everything** pending, regardless of how recently it moved —
+    /// for a connection that is ending. CR, `Interrupt`, and the 5 s tick are
+    /// not the only ways a typed line or a resize ends: a dropped connection
+    /// ends it too, and the daemon must not let that text or that size
+    /// simply vanish, because a viewer disconnecting mid-line is exactly the
+    /// moment the record matters most. Task 19 calls this once per
+    /// connection, on close.
+    pub fn flush_all(&mut self) -> Vec<ActivityEntry> {
+        let sessions: Vec<String> = self.pending.keys().cloned().collect();
+        let resizing: Vec<String> = self.pending_resize.keys().cloned().collect();
+        let mut entries: Vec<ActivityEntry> = sessions
+            .into_iter()
+            .filter_map(|session| self.flush_input(&session))
+            .collect();
+        entries.extend(
+            resizing
+                .into_iter()
+                .filter_map(|session| self.flush_resize(&session)),
+        );
+        entries
+    }
+
+    /// Buffers `bytes` for `session`, flushing one row per `\r` found in
+    /// them — a frame is not always one keystroke: a pasted multi-line
+    /// prompt arrives as a single `Input` frame carrying every embedded
+    /// `\r` at once, and each one completes a line exactly as if it had
+    /// arrived on its own. Whatever follows the last `\r` (or all of
+    /// `bytes`, if there is none) stays buffered for the next frame,
+    /// `Interrupt`, or the quiet tick.
     fn push_input(
         &mut self,
         session: &str,
         bytes: &[u8],
         ctx: &ActivityContext,
-    ) -> Option<ActivityEntry> {
-        let now = Instant::now();
-        let cr_at = bytes.iter().position(|&byte| byte == b'\r');
-        let head = cr_at.map_or(bytes, |pos| &bytes[..pos]);
-        {
-            let buffered = self
-                .pending
-                .entry(session.to_string())
-                .or_insert_with(|| (String::new(), now));
-            buffered.0.push_str(&String::from_utf8_lossy(head));
-            buffered.1 = now;
+    ) -> Vec<ActivityEntry> {
+        let mut entries = Vec::new();
+        let mut remaining = bytes;
+        loop {
+            match remaining.iter().position(|&byte| byte == b'\r') {
+                Some(cr_at) => {
+                    self.append_pending(session, &remaining[..cr_at], ctx);
+                    if let Some(entry) = self.flush_input(session) {
+                        entries.push(entry);
+                    }
+                    remaining = &remaining[cr_at + 1..];
+                }
+                None => {
+                    self.append_pending(session, remaining, ctx);
+                    break;
+                }
+            }
         }
-        cr_at?;
-        let (text, _) = self.pending.remove(session)?;
-        Self::finish_input(ctx.pane_with_engine(session), text)
+        entries
+    }
+
+    /// Appends `bytes` to `session`'s buffer, resolving and storing the pane
+    /// name once, on the insert that creates the buffer.
+    fn append_pending(&mut self, session: &str, bytes: &[u8], ctx: &ActivityContext) {
+        let now = Instant::now();
+        let buffered = self
+            .pending
+            .entry(session.to_string())
+            .or_insert_with(|| PendingInput {
+                pane: ctx.pane_with_engine(session),
+                text: String::new(),
+                last_activity: now,
+            });
+        buffered.text.push_str(&String::from_utf8_lossy(bytes));
+        buffered.last_activity = now;
+    }
+
+    /// Records or extends `session`'s settling resize, keeping the pane name
+    /// resolved on the first frame of the drag and updating only the size
+    /// and the quiet timer on every one after.
+    fn push_resize(&mut self, resize: &ResizePayload, ctx: &ActivityContext) {
+        let now = Instant::now();
+        self.pending_resize
+            .entry(resize.id.clone())
+            .and_modify(|pending| {
+                pending.cols = resize.cols;
+                pending.rows = resize.rows;
+                pending.last_activity = now;
+            })
+            .or_insert_with(|| PendingResize {
+                pane: ctx.pane_title(&resize.id),
+                cols: resize.cols,
+                rows: resize.rows,
+                last_activity: now,
+            });
     }
 
     // ponytail: redaction only; PTY echo-state detection if this ever bites.
@@ -543,12 +776,11 @@ impl ActivityLog {
         if text.is_empty() {
             return None;
         }
-        Some(ActivityEntry {
-            ts: SystemTime::now(),
-            kind: "input",
-            summary: format!("Sent a prompt to {pane}"),
-            detail: Some(redact(&text)),
-        })
+        Some(ActivityEntry::new(
+            "input",
+            format!("Sent a prompt to {pane}"),
+            Some(redact(&text)),
+        ))
     }
 }
 

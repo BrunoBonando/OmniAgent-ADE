@@ -857,6 +857,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "mcp-server",
+ "omniagent-pty-daemon",
  "portable-pty",
  "rustls",
  "serde",
