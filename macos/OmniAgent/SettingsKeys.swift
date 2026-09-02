@@ -154,11 +154,16 @@ enum SettingsKey {
 
     /// **A contract with the Rust daemon** — the spec's §2 "Host
     /// authentication — device tokens". `{"device_id","token","name","relay_url"}`,
-    /// written once by `RelayClient.deviceTokenRow` on the first Enable
-    /// Remote Control. The daemon authenticates to the relay with it; it
-    /// never leaves this Mac otherwise, and the relay itself stores only its
-    /// hash, so this row is the only copy. Deleting the server-side row
-    /// revokes the machine everywhere.
+    /// written by `RelayClient.deviceTokenRow` once `WorkspaceWindowController
+    /// .registerThisMachine` registers this Mac with the relay —
+    /// `toggleRemoteSharing` triggers that (via `ensureRelayRegistration`)
+    /// the first time "Share this environment" is switched on with no token
+    /// yet present, since nothing else does any more (the per-workspace
+    /// "Enable Remote Control" toggle this used to ride on is gone). The
+    /// daemon authenticates to the relay with it; it never leaves this Mac
+    /// otherwise, and the relay itself stores only its hash, so this row is
+    /// the only copy. Deleting the server-side row revokes the machine
+    /// everywhere.
     static let relayDeviceToken = "relay_device_token"
 
     /// **A contract with the Rust daemon, written from both sides** — the

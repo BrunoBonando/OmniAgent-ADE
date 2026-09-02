@@ -272,6 +272,7 @@ final class MenuBarControllerTests: XCTestCase {
         )
         defer { controller.close() }
         let menuBar = MenuBarController(workspace: controller)
+        controller.applyRestoredRelayDeviceToken(#"{"device_id":"d1","token":"secret","name":"Mac","relay_url":"https://relay.test"}"#)
 
         // Seeded at construction: sharing starts off.
         XCTAssertEqual(menuBar.statusItem.button?.image?.isTemplate, true)
@@ -303,6 +304,7 @@ final class MenuBarControllerTests: XCTestCase {
         )
         defer { controller.close() }
         let menuBar = MenuBarController(workspace: controller)
+        controller.applyRestoredRelayDeviceToken(#"{"device_id":"d1","token":"secret","name":"Mac","relay_url":"https://relay.test"}"#)
 
         controller.toggleRemoteSharing()
         menuBar.refreshShareIcon()
@@ -360,6 +362,7 @@ final class MenuBarControllerTests: XCTestCase {
             remote.disconnect()
         }
         let menuBar = MenuBarController(workspace: controller)
+        controller.applyRestoredRelayDeviceToken(#"{"device_id":"d1","token":"secret","name":"Mac","relay_url":"https://relay.test"}"#)
 
         controller.toggleRemoteSharing()
         menuBar.refreshShareIcon()

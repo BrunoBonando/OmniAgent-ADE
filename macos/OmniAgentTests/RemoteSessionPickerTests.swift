@@ -219,10 +219,12 @@ final class RemoteSessionPickerTests: XCTestCase {
 
         XCTAssertEqual(view.frame, window.contentView?.bounds, "the glass covers the window")
         let card = view.cardFrameForTesting
-        // The card is shorter than the old machine/workspace/session tree
-        // ever was — there is only a title, a message and a one-row list —
-        // so the height floor is lower than the width's.
-        XCTAssertGreaterThan(card.width, 250)
+        // The width floor is unchanged: `cardWidth` is a fixed 420
+        // (`RemoteSessionPicker.swift`), so 300 was always true and had no
+        // reason to move. Only the height floor drops — the card is shorter
+        // than the old machine/workspace/session tree ever was, since there
+        // is now only a title, a message and a one-row list.
+        XCTAssertGreaterThan(card.width, 300)
         XCTAssertGreaterThan(card.height, 200)
         XCTAssertTrue(view.bounds.contains(card), "the card fits inside the window it is mounted over")
         XCTAssertEqual(card.midX, view.bounds.midX, accuracy: 1, "centred")

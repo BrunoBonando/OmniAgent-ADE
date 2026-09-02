@@ -3160,6 +3160,11 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             authDefaults: try throwawayDefaults()
         )
         defer { controller.close() }
+        // A token already on hand — steady state for any Mac that has
+        // shared before — so this test stays about the write, not about
+        // `ensureRelayRegistration`'s fresh-install path
+        // (`testTurningSharingOnWithNoTokenRegistersFirst` covers that).
+        controller.applyRestoredRelayDeviceToken(#"{"device_id":"d1","token":"secret","name":"Mac","relay_url":"https://relay.test"}"#)
 
         XCTAssertFalse(controller.settingsView.isSharing, "off until the row says otherwise")
         XCTAssertFalse(controller.isSharingEnvironment)
@@ -3192,6 +3197,9 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             authDefaults: try throwawayDefaults()
         )
         defer { controller.close() }
+        // A token already on hand, so this exercises the write itself
+        // rather than `ensureRelayRegistration`'s registration path.
+        controller.applyRestoredRelayDeviceToken(#"{"device_id":"d1","token":"secret","name":"Mac","relay_url":"https://relay.test"}"#)
 
         controller.settingsView.onToggleRemoteSharing?()
 
@@ -3217,10 +3225,89 @@ final class WorkspaceWindowControllerTests: XCTestCase {
             authDefaults: try throwawayDefaults()
         )
         defer { controller.close() }
+        controller.applyRestoredRelayDeviceToken(#"{"device_id":"d1","token":"secret","name":"Mac","relay_url":"https://relay.test"}"#)
 
         XCTAssertFalse(controller.isSharingEnvironment)
         controller.run(.toggleRemoteSharing)
         XCTAssertTrue(controller.isSharingEnvironment)
+    }
+
+    /// The gap fix round 1 closes, CRITICAL: `relay_device_token` has
+    /// exactly one writer, `registerThisMachine`, and until this fix nothing
+    /// ever called it — the per-workspace toggle that used to is deleted,
+    /// and no task rewired the new one-switch `remote_sharing` flag to
+    /// registration. A Mac that never used the old toggle could switch
+    /// sharing on and have it mean nothing: no token, no control channel,
+    /// invisible to every viewer, silently. `toggleRemoteSharing` now
+    /// registers first (`ensureRelayRegistration`) and only writes
+    /// `remote_sharing` once a token is confirmed present — so turning
+    /// sharing on with nothing registered yet still ends up genuinely live.
+    @MainActor
+    func testTurningSharingOnWithNoTokenRegistersFirstThenReportsLive() async throws {
+        let client = FakeSettingsClient(rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"])
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-register-test.sock")
+            ),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+        var writes: [(String, String)] = []
+        controller.settingsWriter = { writes.append(($0, $1)) }
+        controller.relayDeviceRegistrar = { _ in RelayClient.Registration(deviceID: "d1", token: "secret") }
+        // The fresh-install state this fix exists for: the row has been
+        // read (or is known absent) and there is genuinely no token yet —
+        // `applyRestoredRelayDeviceToken(nil)`'s own contract.
+        controller.applyRestoredRelayDeviceToken(nil)
+        XCTAssertEqual(controller.relayTokenState, .absent)
+
+        controller.toggleRemoteSharing()
+
+        for _ in 0..<200 where !controller.isSharingEnvironment {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        XCTAssertEqual(controller.relayTokenState, .present, "registered before sharing was ever asked to go live")
+        XCTAssertTrue(controller.isSharingEnvironment, "and it actually reports live, not just registered")
+        XCTAssertEqual(client.rows[SettingsKey.remoteSharing], #"{"enabled":true}"#)
+        XCTAssertTrue(
+            writes.contains { $0.0 == SettingsKey.relayDeviceToken },
+            "the token itself landed, not just the in-memory state"
+        )
+    }
+
+    /// The other half: a registration that fails must leave the switch off,
+    /// with a reason — a switch that silently means nothing is exactly the
+    /// failure mode this fix exists to close, and presenting it as "on"
+    /// anyway would just move that failure mode rather than fixing it.
+    @MainActor
+    func testAFailedRegistrationLeavesSharingOffWithAReason() async throws {
+        let client = FakeSettingsClient(rows: [SettingsKey.authAccountEmail: "bruno@bonando.com"])
+        let controller = WorkspaceWindowController(
+            connection: SessionConnection(
+                socketURL: URL(fileURLWithPath: "/tmp/omniagent-remote-sharing-register-fail-test.sock")
+            ),
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: SettingsStore(client: client)),
+            authDefaults: try throwawayDefaults()
+        )
+        defer { controller.close() }
+        controller.relayDeviceRegistrar = { _ in throw SessionConnectionError.disconnected }
+        controller.applyRestoredRelayDeviceToken(nil)
+
+        controller.toggleRemoteSharing()
+
+        for _ in 0..<200 where controller.windowAskOverlay == nil {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        XCTAssertEqual(controller.relayTokenState, .absent, "the failed registration, not a guess")
+        XCTAssertFalse(controller.isSharingEnvironment, "never presented as on for a Mac the relay cannot reach")
+        XCTAssertNil(client.rows[SettingsKey.remoteSharing], "remote_sharing was never even written")
+        let card = try XCTUnwrap(controller.windowAskOverlay, "the failure is visible, not silent")
+        XCTAssertEqual(card.options.map(\.title), ["OK"])
     }
 
     /// This Mac's own identity, read-only, from the same `relay_device_token`

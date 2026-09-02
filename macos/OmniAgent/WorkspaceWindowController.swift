@@ -479,14 +479,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// `registering` is the same guard against two enables inside one
     /// network round trip.
     ///
-    /// `.registering` is currently unreachable: the workspace toggle that
-    /// used to drive this state machine through `ensureRelayRegistration` is
-    /// deleted with per-workspace sharing (2026-09-01 remote environment
-    /// sharing spec §1/§2 — sharing is now the single `remote_sharing`
-    /// switch). The state machine, `registerThisMachine` and
-    /// `relayDeviceRegistrar` below are kept intact for whichever task wires
-    /// that switch to registration next — see `registerThisMachine`'s own
-    /// comment.
+    /// Driven by `ensureRelayRegistration` (fix round 1, Task 29): the
+    /// per-workspace toggle that used to drive this state machine is deleted
+    /// with per-workspace sharing (2026-09-01 remote environment sharing
+    /// spec §1/§2), and `toggleRemoteSharing` is what rewires it to the
+    /// single `remote_sharing` switch — the one thing left that can turn
+    /// sharing on at all.
     enum RelayTokenState { case unknown, absent, present, registering }
     private(set) var relayTokenState: RelayTokenState = .unknown
     /// The registration call. `nil` means the real `RelayClient`; a test
@@ -5096,8 +5094,32 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// checkmarked item, and the spotlight row (§10) all call this rather
     /// than `remoteSharing.setSharing` directly, so there is exactly one
     /// place that decides what "toggle" means.
+    ///
+    /// Turning **on** with a token already present is the synchronous path
+    /// exactly as before — `RelayTokenState.present` is the steady state
+    /// for any Mac that has shared before, and every existing test's
+    /// "toggle it and check" assumption holds. Only a Mac with **no** token
+    /// yet — the fresh-install gap fix round 1 closes — goes through
+    /// `ensureRelayRegistration` first: `remoteSharing.setSharing(true)` is
+    /// never even called unless a token is confirmed present by the time it
+    /// returns, so a failed or still-in-flight registration leaves the
+    /// switch reading `false` — never optimistically on for a Mac the relay
+    /// cannot actually reach. Turning **off** is unconditional,
+    /// `RemoteSharingModel.setSharing`'s own rule: a host with nothing
+    /// registered must still be able to say so.
     func toggleRemoteSharing() {
-        remoteSharing.setSharing(!remoteSharing.isSharing)
+        guard !remoteSharing.isSharing else {
+            remoteSharing.setSharing(false)
+            return
+        }
+        guard relayTokenState == .present else {
+            Task { @MainActor [weak self] in
+                guard let self, await ensureRelayRegistration() else { return }
+                remoteSharing.setSharing(true)
+            }
+            return
+        }
+        remoteSharing.setSharing(true)
     }
 
     /// `remoteSharing.onChange`'s one handler: pushes the confirmed state to
@@ -5290,58 +5312,103 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         )
     }
 
+    /// Makes sure this Mac has a device token before sharing can start, from
+    /// the one state where registering is known to be the right thing to do
+    /// — restored (fix round 1, Task 29) from the per-workspace toggle's own
+    /// `ensureRelayRegistration`, which had exactly this switch. Sharing is
+    /// one machine-wide flag now instead of a set of enabled workspaces, but
+    /// the token question underneath it is unchanged: `relay_config` (the
+    /// daemon's own gate on dialling the relay at all) returns `nil` without
+    /// one, so a Mac that never used the old toggle can turn "Share this
+    /// environment" on and have it mean nothing, silently — no control
+    /// channel, never in `relay_devices`, invisible to every viewer's
+    /// `listDevices()`. `toggleRemoteSharing` is the only caller now.
+    ///
+    /// Returns once whether a token is present is actually known — `true`
+    /// only once `relayTokenState` itself reads `.present`, never
+    /// optimistically.
+    @MainActor
+    private func ensureRelayRegistration() async -> Bool {
+        switch relayTokenState {
+        case .present:
+            return true
+        case .registering:
+            // A registration is already in flight — a second request here
+            // would risk a duplicate `relay_devices` row and a token
+            // overwritten by whichever lands last. Stand down; the caller
+            // that started it will see its own outcome, and this one is
+            // told "not yet" rather than guessing.
+            return false
+        case .absent:
+            return await registerThisMachine()
+        case .unknown:
+            // The token row has not been read yet, or its read failed.
+            // Registering on a guess costs a duplicate device row, so ask
+            // first and decide on the answer.
+            let result: Result<String?, Error> = await withCheckedContinuation { continuation in
+                localConnection.getSetting(key: SettingsKey.relayDeviceToken) { continuation.resume(returning: $0) }
+            }
+            if case let .success(raw) = result, relayTokenState == .unknown {
+                applyRestoredRelayDeviceToken(raw)
+            }
+            switch relayTokenState {
+            case .present: return true
+            case .absent: return await registerThisMachine()
+            case .registering, .unknown: return false
+            }
+        }
+    }
+
     /// Registers this Mac with the relay and hands the token straight to the
     /// daemon. The app never stores it — the relay keeps only its hash, the
     /// daemon keeps the only copy, and this window keeps nothing but the
     /// fact that one exists.
     ///
-    /// Currently unreachable: the workspace toggle that used to call this
-    /// through `ensureRelayRegistration` is deleted with per-workspace
-    /// sharing (2026-09-01 remote environment sharing spec §1/§2). Kept,
-    /// with `relayTokenState`/`relayDeviceRegistrar` above, for whichever
-    /// task wires the one-switch `remote_sharing` flag to registration next
-    /// — re-deriving this shape there would be the drift a shared mechanism
-    /// exists to prevent.
-    private func registerThisMachine() {
+    /// Not `private`: `ensureRelayRegistration` is the one production
+    /// caller, but a test may still want to drive this directly. Callers
+    /// must check `relayTokenState` themselves first (`ensureRelayRegistration`'s
+    /// own switch) — this does not guard against a second call arriving
+    /// while one is already in flight; only `relayTokenState = .registering`
+    /// below, claimed before the `await`, makes that guard possible at all.
+    @MainActor
+    @discardableResult
+    func registerThisMachine() async -> Bool {
         let name = Host.current().localizedName ?? "Mac"
         let register = relayDeviceRegistrar ?? { try await RelayClient.shared.registerDevice(name: $0) }
-        // Claimed before the `await`, so a second enable arriving while this
-        // is in flight sees `registering` and stands down.
         relayTokenState = .registering
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let registration = try await register(name)
-                // Through `write(_:to:)` like every other settings row, not
-                // `connection.setSetting` directly: one seam means a test can
-                // watch this land without a socket, and without touching the
-                // developer's real `brain.db`.
-                write(
-                    RelayClient.shared.deviceTokenRow(registration, name: name),
-                    to: SettingsKey.relayDeviceToken,
-                    machineLocal: true
-                )
-                relayTokenState = .present
-                remoteMachines.localDeviceID = registration.deviceID
-            } catch {
-                // Back to `absent`, not `unknown`: the read succeeded, the
-                // registration is what failed, so the retry the card promises
-                // has to be able to start another one.
-                relayTokenState = .absent
-                presentWindowAsk(
-                    title: "Could not register this Mac",
-                    message: "Remote Control stays on for this workspace, but this Mac is not registered with "
-                        + "the relay yet, so no other computer can reach it. Turn Remote Control off and on "
-                        + "again to retry.\n\n\(error.localizedDescription)",
-                    icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
-                    // The overlay's two severities: `.critical` is the tinted
-                    // card a failure gets (`Could not create branch session`'s
-                    // treatment). Never an `NSAlert` — every modal question in
-                    // this app is liquid glass.
-                    severity: .critical,
-                    options: [PaneAskOption("OK", isPrimary: true) { _ in }]
-                )
-            }
+        do {
+            let registration = try await register(name)
+            // Through `write(_:to:)` like every other settings row, not
+            // `connection.setSetting` directly: one seam means a test can
+            // watch this land without a socket, and without touching the
+            // developer's real `brain.db`.
+            write(
+                RelayClient.shared.deviceTokenRow(registration, name: name),
+                to: SettingsKey.relayDeviceToken,
+                machineLocal: true
+            )
+            relayTokenState = .present
+            remoteMachines.localDeviceID = registration.deviceID
+            return true
+        } catch {
+            // Back to `absent`, not `unknown`: the read succeeded, the
+            // registration is what failed, so the retry the card promises
+            // has to be able to start another one.
+            relayTokenState = .absent
+            presentWindowAsk(
+                title: "Could not register this Mac",
+                message: "Sharing stays off until this Mac is registered with the relay — no other "
+                    + "computer could reach it otherwise. Turn Share this environment off and on again "
+                    + "to retry.\n\n\(error.localizedDescription)",
+                icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil),
+                // The overlay's two severities: `.critical` is the tinted
+                // card a failure gets (`Could not create branch session`'s
+                // treatment). Never an `NSAlert` — every modal question in
+                // this app is liquid glass.
+                severity: .critical,
+                options: [PaneAskOption("OK", isPrimary: true) { _ in }]
+            )
+            return false
         }
     }
 
