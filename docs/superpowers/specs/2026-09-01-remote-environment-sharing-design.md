@@ -232,6 +232,7 @@ Rows, built off live lists so later additions appear by themselves, each with sy
 | Version skew between the two Macs | `Hello` refused with "update OmniAgent on ‹machine›"; no reconnect loop |
 | Terminate | Connection cancelled; host reclaims the grid and the panel closes; the machine may reconnect |
 | Block | Same, plus the viewer id is refused at `Hello` until unblocked in Settings |
+| Blocked viewer redials (on its own, or a later manual retry) | Non-terminal refusal (`RefusalCode.blocked`): the viewer keeps redialing on its own, unprompted, backing off to one attempt per 30 s, until the host unblocks it — a deliberate decision, the same shape as a lease-held-elsewhere refusal |
 | Sharing switched off while connected | Control channel closes; identical to Terminate, and no reconnect is possible |
 | Relay restart / Core deploy | Both sides back off and reconnect; the viewer re-runs the ceremony. Host sessions run on untouched |
 | Viewer link drops mid-session | Lease released on close; host panel closes; sessions keep running |
@@ -243,13 +244,13 @@ Rows, built off live lists so later additions appear by themselves, each with sy
 ## 12. Security invariants (each pinned by a test)
 
 1. The allowlist and the protected-key set live in the **daemon**, not the relay or the app.
-2. A remote client can never get or set `remote_sharing`, `relay_device_token`, `remote_control_blocked`, or any `auth_*` key **through the protocol**. This is an RPC-layer guarantee only, and deliberately so: the lease holder can open a terminal, so it can read anything the signed-in user can read, including the daemon's own database. What contains those secrets is not the key list but *who may hold the lease* — a device token bound to one account, the daemon's independent account check (§9), one viewer at a time, a takeover panel the host cannot dismiss, and Terminate/Block. The key list stops the protocol from handing them over for free; it does not, and cannot, sandbox a shell.
+2. A remote client can never get or set `remote_sharing`, `relay_device_token`, `remote_control_blocked`, `engine_search_path`, or any `auth_*` key **through the protocol**. (`engine_search_path` joined the set late: unprotected, a remote viewer could write it and plant a directory ahead of the real `claude`/`codex`/`copilot` binaries, for every future driver of this Mac to exec without warning.) This is an RPC-layer guarantee only, and deliberately so: the lease holder can open a terminal, so it can read anything the signed-in user can read, including the daemon's own database. What contains those secrets is not the key list but *who may hold the lease* — a device token bound to one account, the daemon's independent account check (§9), one viewer at a time, a takeover panel the host cannot dismiss, and Terminate/Block. The key list stops the protocol from handing them over for free; it does not, and cannot, sandbox a shell.
 3. `ListViewers`, `DisconnectViewer` and `PublishHostState` are local-only.
-4. At most one remote connection holds the lease; the second is refused.
+4. At most one remote connection holds the lease; the second is refused — unless it asserts the *same account* as the connection already holding it and self-reports the same `viewer_id`, in which case it reclaims the lease instead and the stale connection is cancelled (§9's discriminator: the account match is relay-asserted, the `viewer_id` match is self-reported, and the check requires both).
 5. No remote connection is accepted unless a local app connection exists.
 6. A blocked viewer id cannot complete `Hello`.
 7. Every logged entry originates in a frame the daemon received; no log entry is ever written from viewer-supplied text describing itself.
-8. `remote-activity.jsonl` is written by the daemon and is not remotely readable or writable.
+8. `remote-activity.jsonl` is written by the daemon and is not remotely readable or writable **through the protocol**. This is the same RPC-layer scoping as invariant 2, and for the same reason: the lease holder has a shell, and a shell can read — or write — any file the signed-in user can, this log included. Only the protocol refuses it; the file itself is not sandboxed from a shell.
 9. The relay refuses a viewer whose `sub` does not own the device, and lists only that user's devices.
 10. The daemon independently refuses a viewer whose asserted account does not hash to the account directory it is serving — a second check, in a second process, on a second fact.
 11. A machine that is driving another cannot be driven, and a machine being driven cannot reach onward.
