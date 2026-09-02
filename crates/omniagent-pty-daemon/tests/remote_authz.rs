@@ -109,10 +109,15 @@ fn a_lease_holder_may_drive_the_whole_environment() {
 
 /// §12 invariant 3. Presence is the host's view of who is watching *it*, and
 /// the kick is the host's power over them; neither is a viewer's to reach.
-/// (`PublishHostState` joins this list when it lands.)
+/// `PublishHostState` (Task 21, spec §4) joins them: a viewer must never be
+/// able to overwrite what the host says about itself.
 #[test]
 fn the_local_only_kinds_stay_local() {
-    for kind in [MessageKind::ListViewers, MessageKind::DisconnectViewer] {
+    for kind in [
+        MessageKind::ListViewers,
+        MessageKind::DisconnectViewer,
+        MessageKind::PublishHostState,
+    ] {
         assert!(
             authorize_remote(&frame(kind, b"{}")).is_err(),
             "{kind:?} must be denied"
@@ -231,9 +236,13 @@ fn every_message_kind_is_deliberately_classified() {
             MessageKind::GetSetting | MessageKind::SetSetting => false,
 
             // Local-only (§12 invariant 3): the host's view of who is watching
-            // it, and the host's power to throw them off.
-            // `PublishHostState` joins these two when it lands.
-            MessageKind::ListViewers | MessageKind::DisconnectViewer => false,
+            // it, and the host's power to throw them off. `PublishHostState`
+            // (Task 21, spec §4) joins them for the same reason: a viewer
+            // must never be able to overwrite what the host says about
+            // itself.
+            MessageKind::ListViewers
+            | MessageKind::DisconnectViewer
+            | MessageKind::PublishHostState => false,
 
             // Server → client. A client may never send one at all, remote or
             // local; the dispatch answers "clients cannot send server message
@@ -256,7 +265,14 @@ fn every_message_kind_is_deliberately_classified() {
             // the log says about it, so this is deliberately absent from
             // `authorize_remote`'s allowlist rather than merely unreachable
             // by convention — the same treatment `RemoteViewers` gets.
-            | MessageKind::RemoteActivity => false,
+            | MessageKind::RemoteActivity
+            // `HostState` (Task 21, spec §4): a push to the lease holder
+            // only. It is never sent *to* the daemon by any client, remote or
+            // local — `authorize_remote` refusing it is belt-and-suspenders
+            // for a frame a real client never emits, since the dispatch's own
+            // catch-all already answers "clients cannot send server message
+            // kinds" for it.
+            | MessageKind::HostState => false,
         };
         assert_eq!(
             authorize_remote(&frame(kind, b"{}")).is_ok(),

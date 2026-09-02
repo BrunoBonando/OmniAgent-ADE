@@ -2,7 +2,8 @@ use crate::activity::{
     append, display_field, display_field_bounded, ActivityContext, ActivityEntry, ActivityLog,
 };
 use crate::connections::{
-    ActivityFeed, AssertedIdentity, ConnectionRegistry, LeaseHolder, PresenceFeed, ViewerIdentity,
+    ActivityFeed, AssertedIdentity, ConnectionRegistry, HostStateFeed, LeaseHolder, PresenceFeed,
+    ViewerIdentity,
 };
 use crate::protocol::{
     decode_raw_payload, encode_raw_payload, read_frame, read_handshake_frame, write_frame,
@@ -1082,6 +1083,16 @@ where
     let _activity_feed = connections
         .activity_updates(&trust)
         .map(|updates| ActivityFeed::spawn(updates, Arc::clone(&writer)));
+    // The host-state feed (spec §4, Task 21): `HostState` reaches the lease
+    // holder only, the mirror of the two feeds above — `host_state_updates`
+    // is `None` for a `Local` connection, and `Some` here means this
+    // connection has already taken the lease (see its own doc). Whatever the
+    // app last published is sent at once, so a viewer that has just taken
+    // over sees real gauges immediately rather than waiting out the app's
+    // 1 Hz tick.
+    let _host_state_feed = connections
+        .host_state_updates(&trust)
+        .map(|updates| HostStateFeed::spawn(updates, Arc::clone(&writer)));
 
     // The activity apparatus (Task 19; restructured fix round 1 — see
     // `ActivityGuard`'s own doc for why a guard with its own task, rather
@@ -1652,6 +1663,25 @@ where
                     Err(error) => send_error(&writer, request, error).await,
                 }
             }
+            // Local-only, exactly like `ListViewers`/`DisconnectViewer` just
+            // above (spec §4, Task 21): absent from `authorize_remote`'s
+            // allow arms, so a remote client's own attempt is refused before
+            // this dispatch ever sees it — a viewer must never overwrite what
+            // the host says about itself.
+            //
+            // **The payload is taken verbatim, never through `decode_payload!`.**
+            // `parse_json` would round-trip it through `serde_json::Value` —
+            // parsing it, which is exactly what this daemon has promised
+            // never to do to this one payload. UTF-8 validation is not JSON
+            // parsing; it is what `String` requires to exist at all, and it
+            // is the only check this frame's payload is put through.
+            MessageKind::PublishHostState => match String::from_utf8(frame.payload.clone()) {
+                Ok(state) => {
+                    connections.publish_host_state(state);
+                    send_response(&writer, request).await
+                }
+                Err(error) => send_error(&writer, request, anyhow!(error)).await,
+            },
             MessageKind::Hello => {
                 send_error(&writer, request, anyhow!("Hello is only valid once")).await
             }

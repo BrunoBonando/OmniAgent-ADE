@@ -243,6 +243,19 @@ pub struct ConnectionRegistry {
     /// changes may collapse into one frame, which is correct — a roster is a
     /// statement of the present, not an event log.
     roster: Arc<watch::Sender<Arc<RemoteViewersPayload>>>,
+    /// The last `PublishHostState` payload (spec §4, Task 21) — opaque JSON,
+    /// held and forwarded without ever being parsed. `watch` for the same
+    /// reason as [`Self::roster`]: publishing must never block on a slow
+    /// reader, and a `HostState` push genuinely is "the present state of the
+    /// host," which is what makes latest-wins the right delivery — a
+    /// receiver that misses an intermediate metric is not missing an event,
+    /// unlike an activity row.
+    ///
+    /// `None` until the host app's first publish, so a lease holder that
+    /// connects before the app has ever published anything is correctly sent
+    /// nothing rather than an empty object it would have to distinguish from
+    /// real zeros.
+    host_state: Arc<watch::Sender<Option<Arc<str>>>>,
     /// The daemon-lifetime activity history (Task 19, spec §8) — published
     /// through a `watch` channel exactly like [`Self::roster`] and for the
     /// same reason: publishing must never be able to block on a slow local
@@ -303,12 +316,14 @@ impl Default for ConnectionRegistry {
             viewers: Vec::new(),
         }));
         let (activity, _) = watch::channel(Arc::new(ActivityHistory::default()));
+        let (host_state, _) = watch::channel(None);
         Self {
             entries: Arc::default(),
             next_id: Arc::default(),
             lease: Arc::default(),
             local_gone_since: Arc::default(),
             roster: Arc::new(roster),
+            host_state: Arc::new(host_state),
             activity: Arc::new(activity),
         }
     }
@@ -631,6 +646,38 @@ impl ConnectionRegistry {
         trust.is_local().then(|| self.roster.subscribe())
     }
 
+    /// Records the host app's latest published state (spec §4, Task 21) and
+    /// publishes it to whichever connection is subscribed via
+    /// [`Self::host_state_updates`] — the lease holder, and only the lease
+    /// holder, since that is the one subscriber [`Self::host_state_updates`]
+    /// ever hands a receiver to.
+    ///
+    /// `state` is taken as-is. This function does not parse it, does not
+    /// validate it as JSON, and does not touch its bytes — the daemon's whole
+    /// contract with the app is that this payload is opaque, and the way to
+    /// keep that true is for nothing on this side to ever look inside it.
+    pub fn publish_host_state(&self, state: String) {
+        self.host_state.send_replace(Some(Arc::from(state)));
+    }
+
+    /// The host-state feed for one connection, or `None` when it must never
+    /// have one.
+    ///
+    /// **Remote, not local** — the mirror image of [`Self::presence_updates`]
+    /// and [`Self::activity_updates`], which are both local-only. `HostState`
+    /// exists so a viewer's own machine is told the truth about the one it is
+    /// driving instead of answering from its own disk; the host app that
+    /// *produced* the state has no use for it echoed back, and by the time a
+    /// remote connection reaches this point in `serve_client` it has already
+    /// taken the lease (spec §3) — every subscriber this ever returns
+    /// `Some` for is the lease holder.
+    pub fn host_state_updates(
+        &self,
+        trust: &ClientTrust,
+    ) -> Option<watch::Receiver<Option<Arc<str>>>> {
+        trust.is_remote().then(|| self.host_state.subscribe())
+    }
+
     /// Extends the activity history with everything one frame, or one
     /// [`crate::ActivityLog::tick`], produced — never replaces it (see the
     /// field's own doc for why). A no-op for an empty batch: nothing
@@ -781,6 +828,55 @@ async fn write_roster(writer: &SharedWriter, roster: &RemoteViewersPayload) -> s
     // A push, so the header carries a sequence rather than a request id, and
     // there is no request this answers.
     let frame = Frame::new(MessageKind::RemoteViewers, 0, payload);
+    write_frame(&mut *writer.lock().await, &frame).await
+}
+
+/// Writes `HostState` pushes to the lease holder, on its own task (spec §4,
+/// Task 21) — the same structure as [`PresenceFeed`], and the same reason: a
+/// client that stops draining its socket must be able to stall only itself.
+///
+/// **Like [`PresenceFeed`] and unlike [`ActivityFeed`], the value already in
+/// the channel at subscribe time is sent.** Host state is a *state*, not an
+/// event log (see [`ConnectionRegistry::host_state`]'s own doc): a viewer
+/// that has just taken the lease needs to know the gauges *now*, not only
+/// from the next change, exactly as a roster is worth replaying but an
+/// activity batch is not. Nothing is sent when there is nothing to say —
+/// the host app has not published yet, or has not changed anything since.
+pub struct HostStateFeed(JoinHandle<()>);
+
+impl Drop for HostStateFeed {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl HostStateFeed {
+    pub fn spawn(mut updates: watch::Receiver<Option<Arc<str>>>, writer: SharedWriter) -> Self {
+        Self(tokio::spawn(async move {
+            let initial = updates.borrow_and_update().clone();
+            if let Some(state) = initial {
+                if write_host_state(&writer, &state).await.is_err() {
+                    return;
+                }
+            }
+            while updates.changed().await.is_ok() {
+                let state = updates.borrow_and_update().clone();
+                if let Some(state) = state {
+                    if write_host_state(&writer, &state).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }))
+    }
+}
+
+/// Writes one `HostState` frame carrying `state` **verbatim** — not
+/// `serde_json::to_vec`, which would parse-and-re-emit JSON this daemon has
+/// promised never to touch. `state`'s bytes are exactly what the host app
+/// wrote in its `PublishHostState` request, unwrapped.
+async fn write_host_state(writer: &SharedWriter, state: &str) -> std::io::Result<()> {
+    let frame = Frame::new(MessageKind::HostState, 0, state.as_bytes().to_vec());
     write_frame(&mut *writer.lock().await, &frame).await
 }
 

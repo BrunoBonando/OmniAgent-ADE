@@ -484,10 +484,15 @@ pub enum MessageKind {
     /// Kicks one remote viewer and blocks it until Remote Control is turned
     /// on again (phase 2 §5). Local-only, like `ListViewers`.
     DisconnectViewer = 0x1b,
-    // 0x1c is reserved for phase 3's `PublishHostState` (spec §4), which
-    // lands with the host-state feed. Left as a hole rather than reused:
-    // discriminants are appended and never renumbered, and a hole costs
-    // nothing next to two Macs disagreeing about what a byte means.
+    /// Publishes the host's own state — the gauges, the Claude usage limits
+    /// and engine availability the app computes in-process (spec §4). The
+    /// payload is opaque JSON the daemon stores and forwards to the lease
+    /// holder without ever parsing it; see [`HostState`](MessageKind::HostState).
+    /// Local-only, like `ListViewers`/`DisconnectViewer`: it is nowhere in
+    /// [`crate::authorize_remote`]'s allow arms, so a remote client's own
+    /// attempt to publish is answered with `Error` — a viewer must never be
+    /// able to overwrite what the host says about itself.
+    PublishHostState = 0x1c,
     /// One directory's entries on the host — `[{name, is_dir}]` via the
     /// ordinary `Response` (phase 3 spec §4). Remote-reachable: it is what
     /// makes "Add local folder…" browse the *host's* disk instead of the
@@ -516,11 +521,15 @@ pub enum MessageKind {
     /// only, whenever the set of identified remote viewers or what they are
     /// attached to changes: a viewer never learns about other viewers.
     RemoteViewers = 0x8d,
-    // 0x8e is reserved for phase 5's `HostState` push (spec §4), which lands
-    // with the host-state feed — the same reasoning 0x1c is left as a hole
-    // for `PublishHostState`: discriminants are appended and never
-    // renumbered, and a hole costs nothing next to two Macs disagreeing
-    // about what a byte means.
+    /// The host's own state — [`PublishHostState`](MessageKind::PublishHostState)'s
+    /// opaque JSON payload, forwarded byte-for-byte (spec §4). Pushed to the
+    /// **lease holder only**, on attach and again on every publish; a
+    /// connection that is not driving this machine is never sent one, and a
+    /// local connection never receives its own publishes echoed back to it.
+    /// The daemon holds the last published payload and never parses it —
+    /// keeping this opaque is what stops the shape becoming a second schema
+    /// to maintain in two languages.
+    HostState = 0x8e,
     /// One batch of daemon-witnessed activity rows,
     /// [`crate::activity::RemoteActivityPayload`] (phase 3 spec §8 — Task
     /// 19). Pushed to **local** connections only, exactly like
@@ -563,6 +572,7 @@ impl TryFrom<u8> for MessageKind {
             0x19 => Self::BrainSearch,
             0x1a => Self::ListViewers,
             0x1b => Self::DisconnectViewer,
+            0x1c => Self::PublishHostState,
             0x1d => Self::ListDirectory,
             0x81 => Self::HelloAck,
             0x82 => Self::SessionList,
@@ -577,6 +587,7 @@ impl TryFrom<u8> for MessageKind {
             0x8b => Self::Error,
             0x8c => Self::SessionResized,
             0x8d => Self::RemoteViewers,
+            0x8e => Self::HostState,
             0x8f => Self::RemoteActivity,
             other => return Err(FrameError::UnknownMessageKind(other)),
         })

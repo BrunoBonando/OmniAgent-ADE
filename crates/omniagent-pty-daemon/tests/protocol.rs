@@ -257,20 +257,29 @@ fn phase_2_message_kind_discriminants_are_appended_never_renumbering_v1() {
     );
 }
 
-/// Phase 3's `ListDirectory`, appended after `DisconnectViewer` — with 0x1c
-/// left as a hole for `PublishHostState`, which lands with the host-state
-/// feed. Discriminants are appended and never renumbered: a hole costs
-/// nothing next to two Macs disagreeing about what a byte means.
+/// Phase 3's `ListDirectory`, appended after `DisconnectViewer` at 0x1d —
+/// leaving 0x1c as the hole Task 21's `PublishHostState` fills below.
+/// Discriminants are appended and never renumbered: a hole costs nothing next
+/// to two Macs disagreeing about what a byte means.
 #[test]
-fn list_directory_is_appended_at_0x1d_leaving_0x1c_for_publish_host_state() {
+fn list_directory_is_appended_at_0x1d() {
     assert_eq!(MessageKind::ListDirectory as u8, 0x1d);
     assert_eq!(
         MessageKind::try_from(0x1d).unwrap(),
         MessageKind::ListDirectory
     );
-    assert!(
-        MessageKind::try_from(0x1c).is_err(),
-        "0x1c is reserved, not yet assigned"
+}
+
+/// Task 21's `PublishHostState` (spec §4), filling the 0x1c hole
+/// `list_directory_is_appended_at_0x1d`'s own doc describes rather than
+/// claiming a new discriminant — appended and never renumbered, like every
+/// other kind in this enum.
+#[test]
+fn publish_host_state_fills_the_0x1c_hole() {
+    assert_eq!(MessageKind::PublishHostState as u8, 0x1c);
+    assert_eq!(
+        MessageKind::try_from(0x1c).unwrap(),
+        MessageKind::PublishHostState
     );
 }
 
@@ -427,21 +436,25 @@ fn phase_2_payload_shapes_match_the_swift_client() {
     );
 }
 
-/// Task 19's `RemoteActivity`, appended after `RemoteViewers` with 0x8e left
-/// as a hole for phase 5's `HostState` push — the same reasoning `ListDirectory`
-/// leaves 0x1c for `PublishHostState`: discriminants are appended and never
-/// renumbered.
+/// Task 19's `RemoteActivity`, appended after `RemoteViewers` at 0x8f —
+/// leaving 0x8e as the hole Task 21's `HostState` fills below, the same
+/// reasoning `ListDirectory`/`PublishHostState` share at 0x1d/0x1c:
+/// discriminants are appended and never renumbered.
 #[test]
-fn remote_activity_is_appended_at_0x8f_leaving_0x8e_for_host_state() {
+fn remote_activity_is_appended_at_0x8f() {
     assert_eq!(MessageKind::RemoteActivity as u8, 0x8f);
     assert_eq!(
         MessageKind::try_from(0x8f).unwrap(),
         MessageKind::RemoteActivity
     );
-    assert!(
-        MessageKind::try_from(0x8e).is_err(),
-        "0x8e is reserved, not yet assigned"
-    );
+}
+
+/// Task 21's `HostState` push (spec §4), filling the 0x8e hole
+/// `remote_activity_is_appended_at_0x8f`'s own doc describes.
+#[test]
+fn host_state_fills_the_0x8e_hole() {
+    assert_eq!(MessageKind::HostState as u8, 0x8e);
+    assert_eq!(MessageKind::try_from(0x8e).unwrap(), MessageKind::HostState);
 }
 
 /// The `RemoteActivity` push payload round-trips. Unlike

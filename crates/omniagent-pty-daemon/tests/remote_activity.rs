@@ -164,6 +164,14 @@ fn list_directory_frame(path: &str) -> Frame {
     )
 }
 
+/// A raw payload, unlike every other builder here — `PublishHostState`'s
+/// contract is that this daemon never JSON-decodes it (spec §4), so a
+/// `hostile_frame` case built through `frame`'s `serde_json::to_vec` would be
+/// testing a shape this kind never actually receives.
+fn publish_host_state_frame(state: &str) -> Frame {
+    Frame::new(MessageKind::PublishHostState, 0, state.as_bytes().to_vec())
+}
+
 fn brain_search_frame(query: &str) -> Frame {
     frame(
         MessageKind::BrainSearch,
@@ -750,6 +758,25 @@ fn detach_is_deliberately_silent() {
     let mut log = ActivityLog::default();
     let ctx = ActivityContext::fixture();
     assert!(log.record(&detach_frame("pane-1"), &ctx).is_empty());
+}
+
+/// `PublishHostState` is also deliberately silent — Task 21's explicit
+/// decision, not an oversight the exhaustive sweep merely happens to pass.
+/// It is the host describing its own gauges once a second while a viewer is
+/// connected; a row per tick would drown every other entry in the log within
+/// a minute, and the state itself already reaches the lease holder over
+/// `HostState`, so a row here would tell the host nothing an activity log is
+/// for — it is not something that happened, it is a heartbeat.
+#[test]
+fn publish_host_state_produces_no_row() {
+    let mut log = ActivityLog::default();
+    let ctx = ActivityContext::fixture();
+    assert!(log
+        .record(
+            &publish_host_state_frame(r#"{"metrics":{"cpu":0.5}}"#),
+            &ctx
+        )
+        .is_empty());
 }
 
 // -- Resize: coalesced, not silent, and not immediate ------------------
@@ -1363,6 +1390,17 @@ fn hostile_frame(kind: MessageKind) -> Frame {
         MessageKind::RootsReingestProject => roots_reingest_project_frame(HOSTILE),
         MessageKind::RootsRebuild => roots_rebuild_frame(),
         MessageKind::ListDirectory => list_directory_frame(HOSTILE),
+        // `PublishHostState` (Task 21, spec §4) gets its own arm, built with
+        // hostile *content*, to pin the daemon-wide decision explicitly: the
+        // host describing itself once a second must not drown the log, so
+        // this is a row that must never exist, hostile input or not — see
+        // `publish_host_state_produces_no_row` below for the assertion.
+        // `record`'s own `_ => Vec::new()` is what actually produces "no
+        // row" here; a live connection could never reach it this way anyway
+        // (local-only, and `record_remote_activity` is only ever called for
+        // `ClientTrust::Remote`), so this sweep is the one place that
+        // exercises `record` against it at all.
+        MessageKind::PublishHostState => publish_host_state_frame(HOSTILE),
         // No viewer-controlled string in the request payload — and every
         // daemon→client kind, which `record` is never handed at all. An
         // empty object is a payload each of these arms either ignores or
@@ -1377,6 +1415,7 @@ fn hostile_frame(kind: MessageKind) -> Frame {
         | MessageKind::RootsStaleness
         | MessageKind::ListViewers
         | MessageKind::DisconnectViewer
+        | MessageKind::HostState
         | MessageKind::HelloAck
         | MessageKind::SessionList
         | MessageKind::SessionCreated

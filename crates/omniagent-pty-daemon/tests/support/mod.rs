@@ -423,6 +423,20 @@ pub enum HelloResult {
     Error(String),
 }
 
+/// What the daemon answered a `PublishHostState` with — `Response` from a
+/// local client publishing, `Error` from a remote client's own refused
+/// attempt (spec §4, Task 21). A thin wrapper over the reply [`Frame`] rather
+/// than the frame itself, so a test reads the one fact it cares about —
+/// [`Self::is_error`] — without matching on `message_kind` by hand.
+#[derive(Debug)]
+pub struct PublishHostStateResult(Frame);
+
+impl PublishHostStateResult {
+    pub fn is_error(&self) -> bool {
+        self.0.header.message_kind == MessageKind::Error
+    }
+}
+
 impl Client {
     /// Sends `Hello` and reads the one frame that answers it.
     pub async fn hello(&mut self) -> HelloResult {
@@ -583,6 +597,44 @@ impl Client {
             encode_raw_payload(session, bytes).unwrap(),
         );
         write_frame(&mut self.stream, &frame).await.unwrap();
+    }
+
+    /// Sends `PublishHostState` with `state` as the wire payload **verbatim**
+    /// — raw bytes, not through [`Self::send`]'s `serde_json::to_vec`, which
+    /// would wrap `state` in a JSON string literal and double-encode it. The
+    /// daemon's own contract is that this payload is opaque (spec §4), so the
+    /// harness sends it exactly the way the real app would: `state` already
+    /// *is* the JSON text, not a string containing it.
+    ///
+    /// Returns the reply so a caller can tell a `Response` (a local client,
+    /// publishing) from an `Error` (a remote client's own attempt, which
+    /// `authorize_remote` refuses before the dispatch above ever runs it).
+    pub async fn publish_host_state(&mut self, state: &str) -> PublishHostStateResult {
+        self.request += 1;
+        let frame = Frame::new(
+            MessageKind::PublishHostState,
+            self.request,
+            state.as_bytes().to_vec(),
+        );
+        write_frame(&mut self.stream, &frame).await.unwrap();
+        PublishHostStateResult(self.read_reply(self.request).await)
+    }
+
+    /// Reads frames until a `HostState` push arrives, and parses its payload
+    /// as JSON (spec §4, Task 21) — a test convenience only. The daemon
+    /// itself never parses this payload; it forwards `PublishHostState`'s
+    /// bytes to the lease holder exactly as received, and this is that same
+    /// text, decoded here purely so a test can index into it.
+    pub async fn next_host_state(&mut self) -> serde_json::Value {
+        loop {
+            let frame = tokio::time::timeout(PATIENCE, read_frame(&mut self.stream))
+                .await
+                .expect("no HostState push arrived")
+                .expect("the daemon closed before pushing host state");
+            if frame.header.message_kind == MessageKind::HostState {
+                return serde_json::from_slice(&frame.payload).unwrap();
+            }
+        }
     }
 
     /// Reads frames until a `RemoteActivity` push arrives, and decodes it —
