@@ -133,13 +133,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// both live here permanently — in `contentCard` — and the destination
     /// only toggles which is hidden. Unmounting `PaneWorkspaceView` would tear
     /// down live SwiftTerm views and their PTY attachment along with it.
-    /// The column's ground as well as its container: a `PaneGroundView` paints
-    /// the grey sheet from the window's top edge down, and since the content
-    /// card (2026-09-01) that sheet is what shows *around* the content — the
-    /// title-bar strip above the card, and the card's 12pt margin on the other
-    /// three sides (the title bar itself paints nothing). The Desk and the
-    /// pages sit on `contentCard`, which floats on this.
-    private let contentContainer = PaneGroundView()
+    /// The column paints nothing: the window's one `PaneGroundView` (the
+    /// split's container, `installSplitView`) shows through it, around the
+    /// content — the title-bar strip above the card, and the card's 12pt margin
+    /// on the other three sides (the title bar itself paints nothing) — and
+    /// through the sidebar beside it, as one sheet. The Desk and the pages sit
+    /// on `contentCard`, which floats on that ground.
+    private let contentContainer = NSView()
     /// The inset card inside that ground, and the parent of every destination:
     /// the Desk, the placeholder, Home, Settings and the docked Settings
     /// panel all fill it exactly (flow-layout spec §2). Internal, not private:
@@ -641,12 +641,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // the window will go, instead of trusting a default.
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(
-            srgbRed: 8 / 255,
-            green: 10 / 255,
-            blue: 14 / 255,
-            alpha: 1
-        )
+        // The ground's own foot, so a live-resize sliver is the ground and
+        // not a black edge on a blue window.
+        window.backgroundColor = PaneGroundView.colors[1]
         // Not a taste: below this the pane area cannot hold one terminal worth
         // reading, and every sizing rule in `PaneWorkspaceView` assumes it can.
         // The sidebar is counted at its own floor rather than at zero, so the
@@ -1256,6 +1253,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         let content = NSViewController()
         content.view = contentContainer
         let split = NSSplitViewController()
+        // The seam between the columns paints nothing: both sit on the one
+        // ground below, and a divider of any colour is the line between two
+        // slabs that are no longer two.
+        split.splitView = GroundSplitView()
         // A plain split item, NOT `sidebarWithViewController:`. macOS 26 draws
         // a `.sidebar` item as an inset, rounded, floating slab — the rounded
         // edges Bruno is looking at. Nothing here wanted that chrome: the
@@ -1351,8 +1352,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // leading, trailing but added AFTER split.view so it is above it.
         // `contentViewController` is a plain container now — read the split
         // through `splitController`, never by casting it back.
+        // The ground: one `PaneGroundView` under the sidebar, the strip and
+        // the content column alike, with the card the only thing floating on
+        // it (flow-layout spec §2, amended 2026-09-02).
         let container = NSViewController()
-        container.view = NSView()
+        container.view = PaneGroundView()
         container.addChild(split)
         split.view.translatesAutoresizingMaskIntoConstraints = false
         container.view.addSubview(split.view)

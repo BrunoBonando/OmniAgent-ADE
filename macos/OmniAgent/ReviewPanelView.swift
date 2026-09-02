@@ -204,11 +204,11 @@ final class ReviewPanelView: NSView {
     private let tabStack = NSStackView()
     private let hairline = NSView()
     private let contentContainer = NSView()
-    /// The panel's ground, the sidebar's treatment mirrored to this edge of the
-    /// window: one full-bleed sheet of Liquid Glass with the design's blue
-    /// washed over it. `nil` below macOS 26, where `draw` paints the opaque
-    /// gradient instead — see `NavigationSidebarView.glassHost`, which this
-    /// follows exactly.
+    /// The panel's ground: one full-bleed sheet of Liquid Glass with the
+    /// design's blue washed over it. `nil` below macOS 26, where `draw` paints
+    /// the opaque gradient instead. The sidebar wore the same until 2026-09-02,
+    /// when the window became one `PaneGroundView` and the column stopped
+    /// painting; this panel keeps its sheet.
     private(set) var glassHost: NSView?
     private(set) var glassTint: NSView?
     private(set) var tabItems: [ReviewPanelTabItemView] = []

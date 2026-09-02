@@ -124,12 +124,8 @@ final class NavigationSidebarTests: XCTestCase {
             ["Settings", "Help"]
         )
 
-        // Every other row is above the foot — but not the two full-height
-        // pieces that are not rows at all: the glass ground runs the whole
-        // column *under* them, and the trailing edge runs it *beside* them.
-        let rows = sidebar.subviews.filter {
-            $0 !== sidebar.footerRows && $0 !== sidebar.glassHost && $0 !== sidebar.trailingEdge
-        }
+        // Every other row is above the foot.
+        let rows = sidebar.subviews.filter { $0 !== sidebar.footerRows }
         for sibling in rows {
             XCTAssertGreaterThanOrEqual(
                 sibling.frame.minY,
@@ -612,83 +608,44 @@ final class NavigationSidebarTests: XCTestCase {
 
     // MARK: - The column's ground
 
-    /// The column is Liquid Glass where there is glass to ask for: one
-    /// full-bleed sheet at the very back of the view, with the design's blue
-    /// washed over it rather than under it. Below macOS 26 there is no sheet
-    /// and `draw` paints the opaque gradient exactly as it always did.
-    func testTheColumnIsAGlassGroundCarryingTheBlueWash() throws {
+    /// The column paints nothing of its own — no glass sheet, no blue wash, no
+    /// grey hairline down its trailing edge. The window's one `PaneGroundView`
+    /// is the ground under it and the content column alike (flow-layout spec
+    /// §2, amended 2026-09-02): a column with a ground of its own is a second
+    /// slab with a seam, however closely the two gradients match. Rendered
+    /// rather than reasoned about — a view that paints looks exactly like one
+    /// that does not until a pixel says otherwise.
+    func testTheColumnPaintsNothingOfItsOwn() throws {
         let sidebar = makeSidebar()
+        XCTAssertFalse(
+            sidebar.subviews.contains { $0 is ShellGlassTintView || $0.subviews.contains { $0 is ShellGlassTintView } },
+            "no sheet of its own"
+        )
 
-        guard #available(macOS 26.0, *) else {
-            XCTAssertNil(
-                sidebar.glassHost,
-                "below 26 there is no glass to ask for and `draw` is the ground"
-            )
-            return
+        let ground = NSView(frame: sidebar.frame)
+        ground.wantsLayer = true
+        ground.layer?.backgroundColor = NSColor.green.cgColor
+        let window = NSWindow(
+            contentRect: sidebar.frame, styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = ground
+        ground.addSubview(sidebar)
+        sidebar.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+
+        let image = try XCTUnwrap(render(ground))
+        // The four corners, 3px in: the chrome strip above the nav rows and
+        // the 10pt under the footer rows are bare column, and the trailing
+        // corners are where the full-height hairline used to end.
+        let w = image.pixelsWide, h = image.pixelsHigh
+        for (x, y) in [(3, 3), (w - 1, 3), (3, h - 3), (w - 1, h - 3)] {
+            let color = try XCTUnwrap(image.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+            XCTAssertGreaterThan(color.greenComponent, 0.9, "the ground shows through at (\(x), \(y))")
+            XCTAssertLessThan(color.redComponent, 0.1, "untinted at (\(x), \(y))")
+            XCTAssertLessThan(color.blueComponent, 0.1, "untinted at (\(x), \(y))")
         }
-
-        let glass = try XCTUnwrap(sidebar.glassHost, "macOS 26 has glass to ask for")
-        XCTAssertIdentical(
-            sidebar.subviews.first, glass, "the sheet is the ground, behind every row"
-        )
-        XCTAssertEqual(glass.frame, sidebar.bounds, "full-bleed: no inset, no floating slab")
-
-        let wash = try XCTUnwrap(sidebar.glassTint)
-        XCTAssertEqual(wash.frame.size, glass.frame.size, "the wash covers the whole sheet")
-        let stops = try XCTUnwrap(wash.layer as? CAGradientLayer)
-        let colors = try XCTUnwrap(stops.colors as? [CGColor])
-            .compactMap { NSColor(cgColor: $0)?.usingColorSpace(.sRGB) }
-        XCTAssertEqual(colors.count, 2)
-        let top = try XCTUnwrap(colors.first)
-        let bottom = try XCTUnwrap(colors.last)
-        // Translucent, or the wash is paint over the glass and hides the
-        // material it is supposed to tint.
-        XCTAssertLessThan(top.alphaComponent, 1)
-        XCTAssertGreaterThan(top.alphaComponent, 0)
-        XCTAssertLessThan(bottom.alphaComponent, top.alphaComponent, "top-lit, as it always was")
-        // Still the column's blue, both ends.
-        XCTAssertGreaterThan(top.blueComponent, top.redComponent)
-        XCTAssertGreaterThan(bottom.blueComponent, bottom.redComponent)
-        // Top to bottom: (0.5, 1) is the top in the layer's y-up unit space,
-        // the direction `NSGradient`'s -90° angle gave the opaque gradient.
-        XCTAssertEqual(stops.startPoint.y, 1)
-        XCTAssertEqual(stops.endPoint.y, 0)
-    }
-
-    /// The column's trailing edge carries its own grey hairline. The sheet
-    /// draws a rim there, but it measured `64, 65, 71` at its brightest
-    /// against the pane black beside it — present, and not enough to say where
-    /// the column stops. This line is, and it is grey on purpose: the column's
-    /// own blue would read as part of the column rather than as its border.
-    ///
-    /// Drawn whatever the OS: below macOS 26 there is no sheet and so no rim
-    /// at all, which is the case that needs it most.
-    func testTheColumnsTrailingEdgeCarriesAGreySeparator() throws {
-        let sidebar = makeSidebar()
-        let edge = sidebar.trailingEdge
-
-        XCTAssertEqual(edge.frame.width, 1, accuracy: 0.01, "a hairline, not a bar")
-        XCTAssertEqual(
-            edge.frame.maxX, sidebar.bounds.maxX, accuracy: 0.5, "pinned to the trailing edge"
-        )
-        XCTAssertEqual(
-            edge.frame.height, sidebar.bounds.height, accuracy: 0.5,
-            "the whole height, chrome included — the column runs under it"
-        )
-        XCTAssertIdentical(
-            sidebar.subviews.last, edge, "over the glass and every row, never under them"
-        )
-
-        let cg = try XCTUnwrap(edge.layer?.backgroundColor)
-        let color = try XCTUnwrap(NSColor(cgColor: cg)?.usingColorSpace(.sRGB))
-        XCTAssertEqual(
-            color.redComponent, color.blueComponent, accuracy: 0.02,
-            "grey — the column's blue would read as column, not as border"
-        )
-        XCTAssertEqual(color.redComponent, color.greenComponent, accuracy: 0.02)
-        XCTAssertGreaterThan(
-            color.redComponent, 0.25, "and light enough to read against both sides"
-        )
     }
 
     /// The sheet went behind the rows, not over them: a press still lands on

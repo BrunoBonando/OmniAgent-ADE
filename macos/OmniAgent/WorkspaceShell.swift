@@ -80,19 +80,21 @@ enum WorkspaceDestination: String, CaseIterable {
 /// `.darkAqua` with its own near-black ground, and the design specifies exact
 /// values that must not drift with the user's system accent.
 enum ShellPalette {
-    /// The sidebar's ground *below macOS 26*: a top-lit blue-black sheet, so
-    /// the column reads as glass over the flat `content` black rather than a
-    /// second slab of it. There is no Liquid Glass to ask for that far back,
-    /// and every stand-in dims rather than refracts, so this paints the look
-    /// by hand.
+    /// The review panel's ground *below macOS 26*: a top-lit blue-black sheet,
+    /// so the panel reads as glass over the ground rather than a second slab
+    /// of it. There is no Liquid Glass to ask for that far back, and every
+    /// stand-in dims rather than refracts, so this paints the look by hand.
     ///
-    /// On 26 and later the column is a real `NSGlassEffectView` wearing
-    /// `sidebarGlassTint` instead — see `NavigationSidebarView.glassHost`.
+    /// On 26 and later the panel is a real `NSGlassEffectView` wearing
+    /// `sidebarGlassTint` instead — see `ReviewPanelView.glassHost`. The
+    /// sidebar wore both until 2026-09-02, when the window became one
+    /// `PaneGroundView` in the blue they produced and the column stopped
+    /// painting anything of its own.
     static let sidebarGlass = NSGradient(
         colors: [srgb(28, 32, 52), srgb(13, 14, 22)]
     )!
 
-    /// The same blue, washed *over* the glass column rather than painted as
+    /// The same blue, washed *over* the glass panel rather than painted as
     /// its ground. Translucent where `sidebarGlass` is opaque: a solid
     /// gradient over Liquid Glass is paint, and hides the material it is there
     /// to tint.
@@ -107,24 +109,13 @@ enum ShellPalette {
     /// and reads slate rather than blue.
     ///
     /// So these are solved against those two readings. Measured off the built
-    /// app, the column now runs `44, 52, 87` down to `29, 32, 52` — the
-    /// design's hue and its top-lighting, and a foot that lands on
-    /// `sidebarGlass`'s own head,
-    /// sitting lighter than the flat token because it is glass and meant to
-    /// look like it. Deep navy over a bright material, and the alpha falls with
-    /// the light — the sheet shows through most where the column is dimmest.
+    /// app, the column ran `44, 52, 87` down to `29, 32, 52` — the design's
+    /// hue and its top-lighting, and a foot that lands on `sidebarGlass`'s own
+    /// head, sitting lighter than the flat token because it is glass and meant
+    /// to look like it. Those two readings are now `PaneGroundView.colors`, the
+    /// whole window's ground. Deep navy over a bright material, and the alpha
+    /// falls with the light — the sheet shows through most where it is dimmest.
     static let sidebarGlassTint = [srgb(30, 38, 84, 0.70), srgb(6, 9, 30, 0.52)]
-
-    /// The line down the column's trailing edge — where the sidebar stops and
-    /// the pane black starts.
-    ///
-    /// Grey rather than a lighter step of the column's blue, which would read
-    /// as the column's own edge rather than as a border between two things.
-    /// It is not the glass sheet's rim either: that rim exists, and measured
-    /// `64, 65, 71` at its brightest against the pane black, which is present
-    /// without being a separation. This is drawn on every OS — below macOS 26
-    /// there is no sheet and so no rim at all.
-    static let sidebarEdge = srgb(107, 107, 107)
 
     static let ink = srgb(240, 240, 244)
     static let inkNav = srgb(176, 176, 186)
@@ -1102,10 +1093,9 @@ final class SessionRowView: ShellRowView, NSTextFieldDelegate {
     }
 }
 
-/// The blue a glass column wears — the sidebar's, and the review panel's on
-/// the other side of the window. Its backing layer *is* the gradient, so the
-/// wash resizes with the sheet and there is no sublayer frame for anyone to
-/// keep in step.
+/// The blue the review panel's glass wears (the sidebar's too, until
+/// 2026-09-02). Its backing layer *is* the gradient, so the wash resizes with
+/// the sheet and there is no sublayer frame for anyone to keep in step.
 final class ShellGlassTintView: NSView {
     override func makeBackingLayer() -> CALayer {
         let layer = CAGradientLayer()
@@ -1160,6 +1150,24 @@ final class ContentCardView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
+/// The window's split view, with a seam that paints nothing: the sidebar and
+/// the content column both sit on the one `PaneGroundView` behind the split,
+/// and AppKit's thin divider would draw the line between two slabs that are
+/// no longer two. Vertical and thin, as `NSSplitViewController` would have
+/// made its own.
+final class GroundSplitView: NSSplitView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isVertical = true
+        dividerStyle = .thin
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override var dividerColor: NSColor { .clear }
 }
 
 // MARK: - Placeholder

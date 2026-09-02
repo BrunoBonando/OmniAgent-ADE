@@ -16,7 +16,8 @@ Bruno compared the app against Wispr Flow's desktop app and liked how Flow is *o
 
 ## 2. Content card
 
-- Inside `contentContainer` (the `PaneGroundView` gradient, unchanged) sits one **`ContentCardView`**: layer-backed, corner radius 14 (continuous), `masksToBounds`, fill `NSColor(white: 1, alpha: 0.035)` (new token `ShellPalette.contentCardFill`), 1pt `ShellPalette.cardStroke` border.
+- **Amended 2026-09-02 — one ground.** The `PaneGroundView` gradient is the *window's* content view, behind the split: the sidebar, the title strip and the content column all sit on the one sheet, and the card is the only thing floating on it — Flow's window is one ground with a card on it, not a sidebar slab beside a content slab. The sidebar paints nothing of its own (its Liquid Glass sheet, blue wash and grey trailing hairline are gone; the review panel keeps its glass), `contentContainer` is a plain transparent view, and the split's divider is painted with nothing (`GroundSplitView`). The ground's blue is the one the glass column produced, measured off the built app: `44, 52, 87` → `29, 32, 52`, top-lit.
+- Inside `contentContainer` sits one **`ContentCardView`**: layer-backed, corner radius 14 (continuous), `masksToBounds`, fill `NSColor(white: 1, alpha: 0.035)` (new token `ShellPalette.contentCardFill`), 1pt `ShellPalette.cardStroke` border.
 - Pinned: **top = `WorkspaceTitleBarView.height`, leading/trailing/bottom = 12.** With the sidebar collapsed the card still sits 12pt off the window's left edge; with the review panel open it sits 12pt off the divider.
 - The Desk (`workspace`), the To Do placeholder, Home, Insights, Settings and the docked Settings panel are **children of the card**, pinned to its four edges at 0. Pages no longer run under the title strip: `ShellScrollView`'s `topInset`/`topFade` for pages go to 0 (the card's edge is the boundary now).
 - `sessionTitleField` stays in the strip (in `contentContainer`, outside the card).

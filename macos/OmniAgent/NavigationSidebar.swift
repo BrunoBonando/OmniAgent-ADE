@@ -820,22 +820,13 @@ final class NavigationSidebarView: NSView {
     let footerRows = NSStackView()
     private(set) var destination: WorkspaceDestination = .home
 
-    /// The column's ground on macOS 26: one full-bleed sheet of Liquid Glass
-    /// behind every row, with `glassTint` washing the design's blue over it.
-    /// `nil` below 26, where `draw` paints the opaque gradient instead.
-    ///
-    /// Full-bleed and square — no inset, no corner radius. The rim the sheet
-    /// draws down its trailing edge is the border between the column and the
-    /// black pane area, which is the whole reason for the glass. An inset
-    /// rounded slab is the chrome a `.sidebar` split item gives for free, and
-    /// the one this app turned down (see `installSplitView`).
-    private(set) var glassHost: NSView?
-    /// The blue over the sheet — the glass view's `contentView`, so it is
-    /// composited on top of the material rather than behind it.
-    private(set) var glassTint: NSView?
-    /// The grey line where the column stops. Topmost, so nothing the column
-    /// grows later can cover the one thing that separates it from the panes.
-    let trailingEdge = NSView()
+    // The column has no ground of its own since 2026-09-02: it paints nothing,
+    // and the window's one `PaneGroundView` shows through it and the content
+    // column alike, so the two read as one sheet with only the content card
+    // floating on it — Wispr Flow's window (flow-layout spec §2, amended). The
+    // glass sheet, its blue wash and the grey trailing hairline went with the
+    // second slab they were the edge of.
+
     /// What the plus menu lists: every workspace the tree currently renders,
     /// in render order.
     private(set) var workspaceMenuEntries: [(id: String, label: String)] = []
@@ -894,17 +885,6 @@ final class NavigationSidebarView: NSView {
         }
         workspacesTree.onShowViewers = { [weak self] id in self?.onShowViewers?(id) }
 
-        // The ground first, so every row above sits on it. Sized in `layout`
-        // rather than by an autoresizing mask: the mask scales from this
-        // view's own frame, which at init is whatever the caller passed —
-        // usually zero, and zero scales to zero.
-        let tint = ShellGlassTintView()
-        if let glass = WorkspaceGlass.sheet(content: tint) {
-            glassHost = glass
-            glassTint = tint
-            addSubview(glass)
-        }
-
         // The update card and the limits card are one stack of cards at the
         // foot of the column, and the stack is what makes hiding the update
         // one work: NSStackView drops a hidden arranged subview from the
@@ -935,21 +915,6 @@ final class NavigationSidebarView: NSView {
         for view in [navStack, workspacesHeader, scroll, bottomCards, statsRow, footerRows] {
             addSubview(view)
         }
-
-        // Last, and so on top of everything: the rows are all inset from this
-        // edge, so it never covers one, and being topmost means it cannot be
-        // covered either.
-        trailingEdge.wantsLayer = true
-        trailingEdge.layer?.backgroundColor = ShellPalette.sidebarEdge.cgColor
-        trailingEdge.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(trailingEdge)
-
-        NSLayoutConstraint.activate([
-            trailingEdge.trailingAnchor.constraint(equalTo: trailingAnchor),
-            trailingEdge.topAnchor.constraint(equalTo: topAnchor),
-            trailingEdge.bottomAnchor.constraint(equalTo: bottomAnchor),
-            trailingEdge.widthAnchor.constraint(equalToConstant: 1),
-        ])
 
         NSLayoutConstraint.activate([
             // The column runs under the window chrome (titleBar) and this clears it.
@@ -984,25 +949,6 @@ final class NavigationSidebarView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    /// The sheet fills the column, and so does the wash on it — through every
-    /// divider drag, which is the one thing this view's geometry ever does.
-    override func layout() {
-        super.layout()
-        glassHost?.frame = bounds
-        glassTint?.frame = NSRect(origin: .zero, size: bounds.size)
-    }
-
-    /// Top-lit, so the column has a light source and the content black beside
-    /// it does not.
-    ///
-    /// Only below macOS 26. With glass there is a sheet covering these exact
-    /// bounds carrying the same blue itself, and painting an opaque gradient
-    /// under it is work no pixel ever shows.
-    override func draw(_ dirtyRect: NSRect) {
-        guard glassHost == nil else { return }
-        ShellPalette.sidebarGlass.draw(in: bounds, angle: -90)
-    }
 
     /// Lights the row for `destination`, or none: Desk (`.terminals`) has no
     /// sidebar row any more — its content is entered through the sessions

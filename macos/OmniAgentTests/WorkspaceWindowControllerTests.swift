@@ -1632,6 +1632,30 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.titleBar.isReviewToggleVisible)
     }
 
+    /// One ground, not two: the window's content view is the `PaneGroundView`,
+    /// under the sidebar and the content column alike, the column itself paints
+    /// nothing, and the seam between the two is painted with nothing — so the
+    /// card is the only thing floating on the sheet (flow-layout spec §2,
+    /// amended 2026-09-02).
+    func testTheSidebarAndTheContentColumnShareOneGround() throws {
+        let controller = makeController()
+        defer { controller.close() }
+        controller.showWindow(nil)
+
+        XCTAssertTrue(
+            controller.window?.contentViewController?.view is PaneGroundView,
+            "the ground is the window's, behind the split"
+        )
+        let column = try XCTUnwrap(controller.contentCard.superview)
+        XCTAssertFalse(column is PaneGroundView, "the column paints nothing of its own")
+        XCTAssertNil(column.layer?.backgroundColor)
+        let split = try XCTUnwrap(controller.splitController)
+        XCTAssertTrue(split.splitView is GroundSplitView)
+        XCTAssertEqual(split.splitView.dividerColor, .clear, "no seam between the two")
+        XCTAssertTrue(split.splitView.isVertical, "columns side by side, as AppKit's own would be")
+        XCTAssertEqual(split.splitView.dividerStyle, .thin)
+    }
+
     /// The session title label is a subview of the content column, so it is
     /// carried by the column's own collapse animation and cannot drift from it.
     func testTheSessionNameRidesTheContentColumnSoItCannotDriftFromIt() throws {
