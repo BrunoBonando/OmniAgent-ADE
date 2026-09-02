@@ -669,7 +669,7 @@ pub fn commit(repo_path: &str, message: &str) -> Result<CommitResult, String> {
     let sha = String::from_utf8_lossy(&git(&root, &["rev-parse", "HEAD"])?.stdout)
         .trim()
         .to_string();
-    let short_sha = sha.chars().take(7).collect();
+    let short_sha = sha[..7.min(sha.len())].to_string();
     Ok(CommitResult {
         sha,
         short_sha,

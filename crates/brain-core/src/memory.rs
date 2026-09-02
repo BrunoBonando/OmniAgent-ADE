@@ -36,6 +36,17 @@ fn extract_relative_links(body: &str) -> Vec<String> {
         .collect()
 }
 
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut char_count = 0;
+    for (idx, _) in s.char_indices() {
+        if char_count == max {
+            return format!("{}\u{2026}", &s[..idx]);
+        }
+        char_count += 1;
+    }
+    s.to_string()
+}
+
 impl<'a> Memory<'a> {
     /// `data_dir` is the same root passed to `Store::open`; memory notes live
     /// under `data_dir/brain/<project>/`.
@@ -110,7 +121,7 @@ impl<'a> Memory<'a> {
                 project: project.to_string(),
                 label: title.to_string(),
                 path: Some(path.to_string_lossy().to_string()),
-                summary: Some(redacted_body.chars().take(280).collect()),
+                summary: Some(truncate_chars(&redacted_body, 280)),
                 origin,
                 updated: now_ts(),
             })

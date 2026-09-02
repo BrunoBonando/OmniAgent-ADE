@@ -198,11 +198,14 @@ const COMMUNITY_SUMMARY_INSTRUCTION: &str = "You are enriching a developer's loc
 const SESSION_SUMMARY_INSTRUCTION: &str = "You are enriching a developer's local knowledge graph after one of their terminal sessions ended. Based ONLY on the transcript excerpt and git diff below (you have no tools and cannot read any other files), reply in EXACTLY this shape:\n\nTITLE: <a short imperative phrase, 60 characters or fewer, naming the main thing the user was trying to do this session>\n\n<a 2-5 sentence plain-prose summary of what was actually done, any decisions made, and files touched>\n\nDo not invent details the transcript/diff don't support. No markdown headers, no preamble beyond the TITLE line.\n\n";
 
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
+    let mut char_count = 0;
+    for (idx, _) in s.char_indices() {
+        if char_count == max {
+            return format!("{}\u{2026}", &s[..idx]);
+        }
+        char_count += 1;
     }
-    let truncated: String = s.chars().take(max).collect();
-    format!("{truncated}\u{2026}")
+    s.to_string()
 }
 
 /// Reads a short excerpt of a `Doc` node's file straight from disk (capped
@@ -475,7 +478,7 @@ fn parse_title_and_body(answer: &str, project: &str) -> (String, String) {
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .map(|l| l.chars().take(60).collect::<String>())
+        .map(|l| truncate_chars(l, 60))
         .unwrap_or_else(fallback_title);
     (title, trimmed.to_string())
 }
@@ -569,7 +572,7 @@ fn write_session_summary(
         project: payload.project.clone(),
         label: intent,
         path: Some(payload.transcript_path.clone()),
-        summary: Some(body.chars().take(280).collect()),
+        summary: Some(truncate_chars(&body, 280)),
         origin: Origin::MachineSummary,
         updated: now_ts(),
     })?;
