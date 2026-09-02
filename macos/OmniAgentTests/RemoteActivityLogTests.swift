@@ -85,4 +85,66 @@ final class RemoteActivityLogTests: XCTestCase {
         XCTAssertFalse(table.isExpandable(at: 0))
         XCTAssertTrue(table.isExpandable(at: 1))
     }
+
+    // MARK: - Task 20: RemoteActivityHistoryGroup.grouped — no test before fix round 1
+
+    private func row(_ kind: String, _ summary: String) -> RemoteActivityLog.Entry {
+        .init(ts: Date(), kind: kind, summary: summary, detail: nil)
+    }
+
+    /// `history(from:limit:)`'s own order (newest first): reading backwards,
+    /// a "connected" row is the *oldest* fact about its connection, so it is
+    /// what closes the group being built rather than what opens it. Two full
+    /// connections, newest first, each ending at its own "connected" row.
+    func testGroupedSplitsAtConnectedRowsReadingNewestFirst() {
+        let entries = [
+            row("disconnected", "Disconnected · 2m 00s"),  // B, newest
+            row("input", "Sent a prompt to Terminal 1"),  // B
+            row("connected", "Connected from Air (203.0.113.7)"),  // B, oldest
+            row("disconnected", "Disconnected · 1m 00s"),  // A
+            row("attach", "Opened Terminal 1"),  // A
+            row("connected", "Connected from Studio (203.0.113.8)"),  // A, oldest
+        ]
+        let groups = RemoteActivityHistoryGroup.grouped(from: entries)
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(groups[0].rows.map(\.kind), ["disconnected", "input", "connected"])
+        XCTAssertEqual(groups[0].rows.last?.summary, "Connected from Air (203.0.113.7)")
+        XCTAssertEqual(groups[1].rows.map(\.kind), ["disconnected", "attach", "connected"])
+        XCTAssertEqual(groups[1].rows.last?.summary, "Connected from Studio (203.0.113.8)")
+    }
+
+    /// The trailing-group case: rows with no "connected" row of their own —
+    /// a file predating that row, or one torn at the tail — still form a
+    /// group rather than being silently dropped.
+    func testGroupedKeepsATrailingGroupWithNoConnectedRowOfItsOwn() {
+        let entries = [
+            row("input", "Sent a prompt to Terminal 1"),
+            row("attach", "Opened Terminal 1"),
+        ]
+        let groups = RemoteActivityHistoryGroup.grouped(from: entries)
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0].rows.map(\.kind), ["input", "attach"])
+    }
+
+    /// A trailing, connection-less group can only realistically follow a
+    /// complete one, never precede it: the file is written in true
+    /// chronological order and `history` only reverses it, so a torn or
+    /// pre-Task-19 prefix with no "connected" row of its own is always the
+    /// *oldest* material — the last group in this newest-first list, not
+    /// the first. Both groups must survive, in order, not merge into one.
+    func testGroupedKeepsATrailingGroupAfterACompleteOne() {
+        let entries = [
+            row("disconnected", "Disconnected · 1m 00s"),  // B, complete, newest
+            row("connected", "Connected from Studio (203.0.113.8)"),  // B, complete
+            row("input", "Sent a prompt to Terminal 1"),  // A, torn — oldest, trailing
+        ]
+        let groups = RemoteActivityHistoryGroup.grouped(from: entries)
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(groups[0].rows.map(\.kind), ["disconnected", "connected"])
+        XCTAssertEqual(groups[1].rows.map(\.kind), ["input"])
+    }
+
+    func testGroupedOfNoEntriesIsNoGroups() {
+        XCTAssertEqual(RemoteActivityHistoryGroup.grouped(from: []), [])
+    }
 }

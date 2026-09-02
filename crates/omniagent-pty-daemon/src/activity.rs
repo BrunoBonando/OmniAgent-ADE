@@ -127,9 +127,20 @@ impl ActivityEntry {
 /// per line, in `remote-activity.jsonl` (see [`append`]); this wrapper exists
 /// only on the wire, exactly as [`crate::protocol::RemoteViewersPayload`]
 /// wraps [`crate::protocol::ViewerSummaryPayload`] for its own push.
+///
+/// `dropped` (fix round 1, IMPORTANT 2) is how many rows this particular
+/// push is *not* delivering because a slow local feed fell behind the
+/// registry's capped in-memory history and they were trimmed before it ever
+/// saw them. Zero the overwhelming majority of the time. A feed that fell
+/// behind used to jump straight to whatever was still retained with nothing
+/// on the wire to say so — invisible on an audit surface whose whole job is
+/// to be trusted, which is worse than an honest gap. `#[serde(default)]` so
+/// a value built before this field existed still deserializes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoteActivityPayload {
     pub entries: Vec<ActivityEntry>,
+    #[serde(default)]
+    pub dropped: usize,
 }
 
 /// Resolves protocol ids into the words a person reads — pane titles,

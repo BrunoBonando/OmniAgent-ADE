@@ -1219,7 +1219,14 @@ final class SessionConnection {
             }
         case .remoteActivity:
             if let payload = try? decoder.decode(RemoteActivityPushPayload.self, from: frame.payload) {
-                let entries = payload.entries.compactMap(RemoteActivityLog.Entry.init(wire:))
+                var entries = payload.entries.compactMap(RemoteActivityLog.Entry.init(wire:))
+                // Fix round 1, IMPORTANT 2: a gap this feed fell behind is
+                // put on screen, not silently skipped — and it comes first,
+                // since it covers whatever happened *before* the entries in
+                // this same push.
+                if payload.dropped > 0 {
+                    entries.insert(.init(gapCount: payload.dropped), at: 0)
+                }
                 callbackQueue.async { self.onRemoteActivity?(entries) }
             }
         case .attention:

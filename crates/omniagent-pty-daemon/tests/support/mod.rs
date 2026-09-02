@@ -33,7 +33,7 @@ use omniagent_pty_daemon::{
     ClientTrust, DaemonServer, RemoteActivityPayload, AUTH_ACCOUNT_EMAIL_KEY, BLOCKED_VIEWERS_KEY,
     DEVICE_TOKEN_KEY, LOCAL_ABSENCE_GRACE, REMOTE_SHARING_KEY,
 };
-use tokio::io::DuplexStream;
+use tokio::io::{AsyncWriteExt, DuplexStream};
 use tokio::sync::oneshot;
 
 /// How long any wait in this harness gives the daemon before it calls the
@@ -522,6 +522,40 @@ impl Client {
             )
             .await;
         self.read_reply(request).await;
+    }
+
+    /// Writes one frame's encoded bytes in two pieces, waiting `gap` between
+    /// them — fix round 1's CRITICAL test: the shape that used to expose the
+    /// quiet-flush tick racing `read_frame`'s two `read_exact` calls
+    /// (`server.rs`'s old ticker-in-`select!` branch). A `gap` spanning the
+    /// 1 s ticker means the daemon's `ActivityGuard` ticker fires at least
+    /// once with this frame only half delivered; a clean reply afterward
+    /// (`Self::read_reply_for`) is the proof nothing desynchronised.
+    pub async fn write_frame_split(
+        &mut self,
+        kind: MessageKind,
+        payload: impl serde::Serialize,
+        gap: Duration,
+    ) -> u64 {
+        self.request += 1;
+        let frame = Frame::new(kind, self.request, serde_json::to_vec(&payload).unwrap());
+        let encoded = frame.encode().unwrap();
+        // Mid-header, not mid-payload: this is the exact window the header's
+        // own `read_exact` was pending in when the bug fired, and the
+        // narrowest possible slice of "partially read".
+        let split = 4.min(encoded.len());
+        self.stream.write_all(&encoded[..split]).await.unwrap();
+        tokio::time::sleep(gap).await;
+        self.stream.write_all(&encoded[split..]).await.unwrap();
+        self.request
+    }
+
+    /// The reply to `request` — [`Self::read_reply`], made public for a
+    /// caller (fix round 1's split-frame test) that writes its own frame by
+    /// hand via [`Self::write_frame_split`] rather than through
+    /// [`Self::send`], and so has to ask for the reply separately.
+    pub async fn read_reply_for(&mut self, request: u64) -> Frame {
+        self.read_reply(request).await
     }
 
     /// Sends one JSON-payload request frame and does not wait for its reply —

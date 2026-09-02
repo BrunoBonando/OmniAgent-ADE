@@ -13,9 +13,35 @@ struct RemoteActivityWireEntry: Decodable {
     let detail: String?
 }
 
-/// The `RemoteActivity` (`0x8f`) push payload — `{"entries":[…]}` (spec §8).
+/// The `RemoteActivity` (`0x8f`) push payload — `{"entries":[…],"dropped":…}`
+/// (spec §8). `dropped` (fix round 1, IMPORTANT 2) is how many rows this
+/// push is *not* delivering because this connection's feed fell behind the
+/// daemon's capped in-memory history — almost always `0`. Defaulted rather
+/// than required so a payload from a build that predates this field still
+/// decodes.
 struct RemoteActivityPushPayload: Decodable {
     let entries: [RemoteActivityWireEntry]
+    let dropped: Int
+
+    // Swift's synthesized `Decodable` treats every stored property as
+    // required regardless of a default value in the initializer below — a
+    // default only helps a caller constructing one directly. `dropped` has
+    // to be genuinely optional-if-absent on the wire, so this decodes it by
+    // hand.
+    enum CodingKeys: String, CodingKey {
+        case entries, dropped
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        entries = try container.decode([RemoteActivityWireEntry].self, forKey: .entries)
+        dropped = try container.decodeIfPresent(Int.self, forKey: .dropped) ?? 0
+    }
+
+    init(entries: [RemoteActivityWireEntry], dropped: Int = 0) {
+        self.entries = entries
+        self.dropped = dropped
+    }
 }
 
 /// The daemon-witnessed remote activity log (2026-09-01 remote environment
@@ -57,6 +83,21 @@ final class RemoteActivityLog: ObservableObject {
         init?(wire: RemoteActivityWireEntry) {
             guard let ts = RemoteActivityLog.parseTimestamp(wire.ts) else { return nil }
             self.init(ts: ts, kind: wire.kind, summary: wire.summary, detail: wire.detail)
+        }
+
+        /// A synthetic row for `RemoteActivityPushPayload.dropped` (fix
+        /// round 1, IMPORTANT 2): "N rows not shown" rather than a feed that
+        /// silently jumps ahead when it falls behind the daemon's capped
+        /// history. `kind: "gap"` — `RemoteActivityTable.symbolName(for:)`
+        /// knows it, and it has no `detail`, so it never draws a disclosure
+        /// chevron either.
+        init(gapCount: Int) {
+            self.init(
+                ts: Date(),
+                kind: "gap",
+                summary: gapCount == 1 ? "1 row not shown" : "\(gapCount) rows not shown",
+                detail: nil
+            )
         }
     }
 

@@ -309,6 +309,41 @@ final class RemoteTakeoverPanelTests: XCTestCase {
         XCTAssertEqual(panel.activityLog.entries.map(\.kind), ["attach", "input"])
     }
 
+    /// Activity fix round 1, IMPORTANT 3: a later push must *add* rows to
+    /// the table, never rebuild it from the log's whole accumulated array —
+    /// the old shape was O(n²) over an unbounded live history and collapsed
+    /// every already-expanded row the instant the next one arrived. Two
+    /// pushes' row counts summing, rather than the second push's count alone
+    /// (which the old rebuild-from-`activityLog.entries` shape would also
+    /// have produced, just by re-deriving the same total from scratch), is
+    /// what tells "appended" apart from "rebuilt to the same total".
+    func testASecondPushAppendsRatherThanRebuildingTheTable() {
+        let view = RemoteActivityTableView(frame: NSRect(x: 0, y: 0, width: 400, height: 150))
+        view.append([
+            .init(ts: Date(), kind: "attach", summary: "Opened Terminal 1", detail: nil)
+        ])
+        XCTAssertEqual(view.rowCount, 1)
+        view.append([
+            .init(ts: Date(), kind: "kill", summary: "Closed Terminal 1", detail: nil)
+        ])
+        XCTAssertEqual(view.rowCount, 2, "the second push added a row rather than replacing the table")
+    }
+
+    /// The same fix, through the row itself: expansion is state a
+    /// `RemoteActivityRowView` instance owns, so it can only survive a later
+    /// push if that instance is the same object afterward — proof that
+    /// appending never tears down and rebuilds rows that were already there.
+    func testExpandingARowSurvivesALaterPushBecauseTheRowIsNeverRebuilt() {
+        let row = RemoteActivityRowView(
+            entry: .init(ts: Date(), kind: "input", summary: "Sent a prompt", detail: "hello there"),
+            timeText: "10:00:00",
+            symbolName: "character.cursor.ibeam"
+        )
+        XCTAssertFalse(row.isExpanded)
+        row.toggle()
+        XCTAssertTrue(row.isExpanded, "the same instance, toggled once, stays expanded regardless of what a later push does — it is never rebuilt")
+    }
+
     // MARK: - The panel is never absent while somebody is driving (fix round 1)
 
     /// **A live connection presents the panel on its own.**

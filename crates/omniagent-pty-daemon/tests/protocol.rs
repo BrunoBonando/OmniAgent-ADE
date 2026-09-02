@@ -473,6 +473,7 @@ fn remote_activity_payload_round_trips_with_an_explicit_null_detail() {
                 detail: Some("hello".into()),
             },
         ],
+        dropped: 0,
     };
     let value = serde_json::to_value(&payload).unwrap();
     assert_eq!(
@@ -480,10 +481,32 @@ fn remote_activity_payload_round_trips_with_an_explicit_null_detail() {
         serde_json::json!({"entries": [
             {"ts": ts, "kind": "attach", "summary": "Opened Terminal 1", "detail": null},
             {"ts": ts, "kind": "input", "summary": "Sent a prompt to Terminal 1", "detail": "hello"}
-        ]})
+        ], "dropped": 0})
     );
     let round_tripped: RemoteActivityPayload = serde_json::from_value(value).unwrap();
     assert_eq!(round_tripped, payload);
+}
+
+/// Fix round 1, IMPORTANT 2: `dropped` carries how many rows a push is not
+/// delivering because a slow feed fell behind the capped history — visible
+/// on the wire rather than a feed silently jumping ahead. `#[serde(default)]`
+/// so a payload built before this field existed (there is none in practice,
+/// but the same discipline every other additive field in this file gets)
+/// still decodes.
+#[test]
+fn remote_activity_payload_dropped_count_round_trips_and_defaults_to_zero() {
+    let payload = RemoteActivityPayload {
+        entries: vec![],
+        dropped: 37,
+    };
+    let value = serde_json::to_value(&payload).unwrap();
+    assert_eq!(value, serde_json::json!({"entries": [], "dropped": 37}));
+    let round_tripped: RemoteActivityPayload = serde_json::from_value(value).unwrap();
+    assert_eq!(round_tripped, payload);
+
+    let without_the_field: RemoteActivityPayload =
+        serde_json::from_value(serde_json::json!({"entries": []})).unwrap();
+    assert_eq!(without_the_field.dropped, 0);
 }
 
 #[test]

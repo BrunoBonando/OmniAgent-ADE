@@ -635,18 +635,37 @@ impl ConnectionRegistry {
     /// [`crate::ActivityLog::tick`], produced — never replaces it (see the
     /// field's own doc for why). A no-op for an empty batch: nothing
     /// happened, so there is nothing to append or announce.
+    ///
+    /// **`send_modify`, not `borrow` → clone → `send_replace` (fix round 1,
+    /// IMPORTANT 1).** The three-step version reads the current value,
+    /// mutates a local clone, and only then publishes it — a plain
+    /// read-modify-write with no lock held across the whole span. On the
+    /// multi-thread runtime this connection's own dispatch task and its
+    /// `ActivityGuard` ticker task can both call this concurrently, each
+    /// reading the *same* base value before either publishes: whichever
+    /// `send_replace` lands second silently overwrites the first's batch
+    /// outright, and the entries it added — and the fact it was ever called
+    /// — vanish from every host feed with no trace. `remote-activity.jsonl`
+    /// is unaffected (each entry is appended independently, before this is
+    /// ever called), so the file and the live table would disagree, which is
+    /// worse than either being wrong alone. `Sender::send_modify` holds the
+    /// channel's own internal lock for the whole read-mutate-publish span,
+    /// so two concurrent callers fully serialise through it instead of
+    /// racing: whichever runs second starts from the first's already-
+    /// published result, and neither batch is ever silently dropped.
     pub fn notify_activity(&self, new_entries: Vec<ActivityEntry>) {
         if new_entries.is_empty() {
             return;
         }
-        let mut history = self.activity.borrow().as_ref().clone();
-        history.entries.extend(new_entries);
-        if history.entries.len() > ACTIVITY_HISTORY_CAP {
-            let overflow = history.entries.len() - ACTIVITY_HISTORY_CAP;
-            history.entries.drain(0..overflow);
-            history.trimmed += overflow;
-        }
-        self.activity.send_replace(Arc::new(history));
+        self.activity.send_modify(|history| {
+            let history = Arc::make_mut(history);
+            history.entries.extend(new_entries);
+            if history.entries.len() > ACTIVITY_HISTORY_CAP {
+                let overflow = history.entries.len() - ACTIVITY_HISTORY_CAP;
+                history.entries.drain(0..overflow);
+                history.trimmed += overflow;
+            }
+        });
     }
 
     /// The activity feed for one connection, or `None` when it must never
@@ -816,11 +835,18 @@ impl ActivityFeed {
                 let start = next
                     .saturating_sub(history.trimmed)
                     .min(history.entries.len());
+                // Fix round 1, IMPORTANT 2: `history.trimmed > next` means
+                // some of what this feed had not yet sent was trimmed out
+                // from under it before it ever saw it — put that count on
+                // the wire rather than silently jumping ahead to whatever is
+                // still retained.
+                let dropped = history.trimmed.saturating_sub(next);
                 let fresh = RemoteActivityPayload {
                     entries: history.entries[start..].to_vec(),
+                    dropped,
                 };
                 next = total;
-                if fresh.entries.is_empty() {
+                if fresh.entries.is_empty() && fresh.dropped == 0 {
                     continue;
                 }
                 if write_activity(&writer, &fresh).await.is_err() {

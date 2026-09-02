@@ -300,11 +300,14 @@ final class RemoteTakeoverPanel {
     }
 
     /// One `RemoteActivity` push's worth of rows (Task 19/20, spec §8) —
-    /// appended to `activityLog` and handed straight to the table view, which
-    /// holds scroll position steady unless it was already at the bottom.
+    /// appended to `activityLog` and handed straight to the table view as
+    /// only the new rows (fix round 1, IMPORTANT 3: the view appends, it
+    /// does not rebuild from the whole accumulated log every time), which
+    /// holds scroll position steady unless it was already at the bottom and
+    /// leaves every already-expanded row exactly as it was.
     func appendActivity(_ entries: [RemoteActivityLog.Entry]) {
         activityLog.append(entries)
-        view.applyActivity(RemoteActivityTable(entries: activityLog.entries))
+        view.appendActivity(entries)
     }
 
     // MARK: - The two verbs (spec §7)
@@ -596,11 +599,12 @@ final class RemoteTakeoverPanelView: NSView {
         needsLayout = true
     }
 
-    /// Hands the current activity rows to the table (Task 20). Not gated on
-    /// `needsLayout`: the table rebuilds its own rows and manages its own
-    /// scroll position, independent of this view's outer geometry pass.
-    func applyActivity(_ table: RemoteActivityTable) {
-        activityView.apply(table)
+    /// Hands new activity rows to the table (Task 20; append-only since fix
+    /// round 1). Not gated on `needsLayout`: the table appends its own rows
+    /// and manages its own scroll position, independent of this view's
+    /// outer geometry pass.
+    func appendActivity(_ entries: [RemoteActivityLog.Entry]) {
+        activityView.append(entries)
     }
 
     override func layout() {
@@ -744,7 +748,14 @@ struct RemoteActivityTable: Equatable {
     }
 
     func timeText(at index: Int) -> String {
-        Self.time.string(from: entries[index].ts)
+        Self.timeText(for: entries[index].ts)
+    }
+
+    /// The same formatting, off a bare `Date` — for a caller (the live
+    /// table, fix round 1) that appends one row at a time rather than
+    /// holding a whole `RemoteActivityTable` to index into.
+    static func timeText(for date: Date) -> String {
+        time.string(from: date)
     }
 
     /// An SF Symbol for `kind` (spec §8: "symbol for kind"). A kind this
@@ -765,6 +776,9 @@ struct RemoteActivityTable: Equatable {
         case "brain_search", "brain_list_projects": return "magnifyingglass"
         case "brain_get_context": return "text.book.closed"
         case "resize": return "arrow.up.left.and.arrow.down.right"
+        // Fix round 1, IMPORTANT 2: the synthetic "N rows not shown" marker
+        // (`RemoteActivityLog.Entry.init(gapCount:)`).
+        case "gap": return "ellipsis.circle"
         default: return "circle"
         }
     }
@@ -929,7 +943,10 @@ final class RemoteActivityTableView: NSView {
     private let emptyLabel = ShellFont.label(
         "No activity yet.", font: ShellFont.ui(12), color: ShellPalette.inkFaint
     )
-    private(set) var table = RemoteActivityTable(entries: [])
+    /// How many rows have been appended — readable so a test can pin
+    /// "appended, not rebuilt" without reaching into `stack`. Not the same
+    /// thing as `RemoteActivityTable.count`: this view no longer holds one.
+    private(set) var rowCount = 0
 
     override init(frame frameRect: NSRect) {
         stack.orientation = .vertical
@@ -960,27 +977,31 @@ final class RemoteActivityTableView: NSView {
         emptyLabel.frame = NSRect(x: 0, y: (bounds.height - 16) / 2, width: bounds.width, height: 16)
     }
 
-    /// Rebuilds the row list from `table`, holding scroll position steady
-    /// unless the view was already scrolled to the bottom.
-    func apply(_ table: RemoteActivityTable) {
-        guard table != self.table else { return }
+    /// Appends `entries` as new rows — **never** rebuilds the rows already
+    /// standing (fix round 1, IMPORTANT 3). The old `apply(_:)` took the
+    /// live log's *whole* accumulated array on every single push and
+    /// rebuilt every row from scratch: O(n²) over an unbounded live history,
+    /// and a host who had expanded a row to read its detail watched it
+    /// collapse the instant the next row arrived, because that row view was
+    /// destroyed and a fresh, collapsed one put in its place — the same
+    /// "do not disturb the reader" intent the scroll rule below already
+    /// honours, just not extended to expansion state. Appending only the
+    /// new rows costs O(1) amortised per push and leaves every existing
+    /// `RemoteActivityRowView` — and whatever it has toggled to — untouched.
+    func append(_ entries: [RemoteActivityLog.Entry]) {
+        guard !entries.isEmpty else { return }
         let wasAtBottom = isScrolledToBottom
-        self.table = table
-        for row in stack.arrangedSubviews {
-            stack.removeArrangedSubview(row)
-            row.removeFromSuperview()
-        }
-        for index in table.entries.indices {
-            let entry = table.entries[index]
+        for entry in entries {
             let row = RemoteActivityRowView(
                 entry: entry,
-                timeText: table.timeText(at: index),
+                timeText: RemoteActivityTable.timeText(for: entry.ts),
                 symbolName: RemoteActivityTable.symbolName(for: entry.kind)
             )
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
-        emptyLabel.isHidden = !table.entries.isEmpty
+        rowCount += entries.count
+        emptyLabel.isHidden = rowCount > 0
         layoutSubtreeIfNeeded()
         if wasAtBottom {
             scrollToBottom()

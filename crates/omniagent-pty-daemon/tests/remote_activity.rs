@@ -823,3 +823,75 @@ async fn brain_list_projects_reaches_the_activity_log_through_the_real_dispatch(
         .wait_for_activity("brain_list_projects")
         .await;
 }
+
+/// Fix round 1, CRITICAL: the quiet-flush tick used to live inside the same
+/// `select!` as the frame read, `continue`-ing back to the top of the loop
+/// when it fired — and `read_frame` decodes with two `read_exact` calls,
+/// which are not cancel-safe. A tick landing while one was pending dropped
+/// the bytes it had already consumed, permanently desynchronising the
+/// stream. This sends one `Attach` frame with its bytes split mid-header,
+/// waiting well past the 1 s ticker in between, and checks that the reply
+/// still names the right request and the right session — the daemon has
+/// moved the tick to its own task (`ActivityGuard`), so nothing races
+/// `read_frame` at all any more, and this must hold regardless.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_frame_split_across_a_tick_still_decodes_intact() {
+    let mut harness = support::daemon_with_local_client().await;
+    let mut viewer = harness.connect_remote("MacBook Pro");
+    viewer.hello().await;
+    harness.local().wait_for_activity("connected").await;
+
+    let request = viewer
+        .write_frame_split(
+            MessageKind::Attach,
+            serde_json::json!({"id": "pane-1", "after_sequence": null}),
+            Duration::from_millis(1300),
+        )
+        .await;
+    let reply = viewer.read_reply_for(request).await;
+    assert_eq!(
+        reply.header.message_kind,
+        MessageKind::Error,
+        "a clean decode of Attach(\"pane-1\") against a session that does not \
+         exist — anything else means the stream desynchronised"
+    );
+    assert_eq!(reply.header.request_or_sequence, request);
+
+    // The connection must still be healthy afterward too: a desync that
+    // merely delayed its damage would still show up here.
+    viewer.attach("pane-2").await;
+}
+
+/// Fix round 1, SPEC ❌ 2: `machine_name` is self-reported on the viewer's
+/// own `Hello` and never verified. A name built to look like the log's own
+/// format must not survive into the opening row's summary — the identity
+/// *detail* block (relay-asserted) is unaffected and still names the real
+/// IP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hostile_machine_name_cannot_forge_the_opening_row() {
+    let mut harness = support::daemon_with_local_client().await;
+    let mut viewer = harness.connect_remote("Air (1.2.3.4)) \u{b7} Disconnected \u{b7} 3m 00s");
+    viewer.hello().await;
+
+    let opened = harness.local().wait_for_activity("connected").await;
+    assert!(
+        opened.summary.starts_with("Connected from "),
+        "{}",
+        opened.summary
+    );
+    // The real IP the relay asserted (`asserted_as` in `support/mod.rs`) is
+    // the only parenthetical the row may legitimately end with.
+    assert!(
+        opened.summary.ends_with("(203.0.113.7)"),
+        "{}",
+        opened.summary
+    );
+    let name_field = opened
+        .summary
+        .strip_prefix("Connected from ")
+        .and_then(|rest| rest.strip_suffix(" (203.0.113.7)"))
+        .expect("the row keeps exactly this shape");
+    assert!(!name_field.contains('('), "{}", opened.summary);
+    assert!(!name_field.contains(')'), "{}", opened.summary);
+    assert!(!name_field.contains('\u{b7}'), "{}", opened.summary);
+}

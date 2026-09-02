@@ -1081,20 +1081,24 @@ where
         .activity_updates(&trust)
         .map(|updates| ActivityFeed::spawn(updates, Arc::clone(&writer)));
 
-    // The opening row (carried-over item A). `ActivityLog::record` cannot
-    // build this one itself: `Hello` was already consumed by the handshake
-    // above, so this is built directly from the connection's own
-    // `AssertedIdentity` and the moment it was admitted, exactly where the
-    // module doc says Task 19 should. Remote-only in effect as well as in
-    // intent — a `Local` connection has no `AssertedIdentity` to report, and
-    // the host's own use of its own Mac is not something to log about itself.
-    let connected_at = Instant::now();
-    if let ClientTrust::Remote(asserted) = &trust {
+    // The activity apparatus (Task 19; restructured fix round 1 — see
+    // `ActivityGuard`'s own doc for why a guard with its own task, rather
+    // than a `select!` branch, is what this is now). Remote-only, in effect
+    // as well as in intent: a `Local` connection has no `AssertedIdentity`
+    // to report, and the host's own use of its own Mac is not something to
+    // log about itself. The opening row (carried-over item A) is built here
+    // rather than inside the guard — `ActivityLog::record` cannot build it
+    // itself, since `Hello` was already consumed by the handshake above —
+    // so the guard stays ignorant of `AssertedIdentity`/`machine_name` and
+    // only ever has to know how to record and how to close.
+    let activity_guard = if let ClientTrust::Remote(asserted) = &trust {
+        let guard = ActivityGuard::spawn(connections.clone(), data_dir.clone());
         flush_activity(
             vec![ActivityEntry::new(
                 "connected",
                 format!(
-                    "Connected from {machine_name} ({})",
+                    "Connected from {} ({})",
+                    sanitize_machine_name(&machine_name),
                     asserted.ip.as_deref().unwrap_or("unknown IP")
                 ),
                 Some(identity_detail(asserted)),
@@ -1102,24 +1106,19 @@ where
             &connections,
             &data_dir,
         );
-    }
+        Some(guard)
+    } else {
+        None
+    };
 
     let mut attachments = HashMap::<String, Attachment>::new();
-    // Per-connection activity state (Task 19). `activity_ctx` is `None` until
-    // the first frame that needs it — the lazy read carried-over item C asks
-    // for — and is invalidated (never eagerly rebuilt) whenever this loop
-    // sees the `SetSetting("layout")` that would make it stale; see
-    // `record_remote_activity` below.
-    let mut activity_log = ActivityLog::default();
+    // The lazy, per-connection `ActivityContext` cache (carried-over item
+    // C): dispatch state, so it lives here rather than inside
+    // `ActivityGuard`, which owns only the log and its ticker. `None` until
+    // the first frame that needs it, and invalidated (never eagerly
+    // rebuilt) whenever this loop sees the `SetSetting("layout")` that would
+    // make it stale; see `record_remote_activity` below.
     let mut activity_ctx: Option<ActivityContext> = None;
-    // Flushes a session's half-typed input, or an unsettled resize, after
-    // `SETTLE_QUIET`'s worth of quiet even when no further frame ever
-    // arrives to trigger it — the tick `ActivityLog::tick` needs and would
-    // otherwise never get. Ticking every connection, not only remote ones,
-    // costs nothing: a local connection's log never has anything recorded
-    // into it in the first place (recording itself is remote-only, below),
-    // so its tick is always a no-op.
-    let mut activity_ticker = tokio::time::interval(Duration::from_secs(1));
     loop {
         let frame = tokio::select! {
             // A kicked connection stops mid-frame. Dropping a partly-read
@@ -1127,10 +1126,6 @@ where
             // not cancel-safe — but here the stream is being torn down, so
             // there is nothing left to desynchronise.
             _ = cancel.cancelled() => break,
-            _ = activity_ticker.tick() => {
-                flush_activity(activity_log.tick(Instant::now()), &connections, &data_dir);
-                continue;
-            }
             frame = read_frame(&mut reader) => match frame {
                 Ok(frame) => frame,
                 Err(_) => break,
@@ -1150,14 +1145,9 @@ where
             // An authorized frame is one that happened (Task 19). `record`
             // never sees a frame the daemon refused, which is exactly the
             // set spec §8's table describes.
-            record_remote_activity(
-                &frame,
-                &mut activity_log,
-                &mut activity_ctx,
-                &settings,
-                &connections,
-                &data_dir,
-            );
+            if let Some(activity) = &activity_guard {
+                record_remote_activity(&frame, activity, &mut activity_ctx, &settings);
+            }
         }
         /// Decodes this frame's JSON payload, or answers with an `Error`
         /// frame and moves on to the next frame.
@@ -1673,19 +1663,16 @@ where
         );
     }
 
-    // The closing row, and carried-over item B: whatever text a viewer typed
-    // but never sent must still land in the log, so `flush_all` runs before
-    // the "disconnected" row rather than being left for a tick that will
-    // never come now that this connection is ending.
-    if trust.is_remote() {
-        let mut trailing = activity_log.flush_all();
-        trailing.push(ActivityEntry::new(
-            "disconnected",
-            format!("Disconnected · {}", format_duration(connected_at.elapsed())),
-            None,
-        ));
-        flush_activity(trailing, &connections, &data_dir);
-    }
+    // No explicit flush-on-close here (fix round 1, SPEC ❌ 1). The
+    // previous version's block only ran when this loop fell through — one
+    // of several ways `serve_client` ends. The `Attach` arm's two
+    // `.await?`s above return `Err` straight out of this function, and a
+    // `JoinSet` abort on daemon shutdown drops it mid-poll; both skipped a
+    // call site placed here. `activity_guard`, still in scope below, is
+    // what actually covers every one of those paths: it drops at the end of
+    // this function regardless of how that end is reached, and its `Drop`
+    // does the flush and the "disconnected" row itself — the same
+    // `ConnectionGuard` reasoning presence already relies on.
 
     if cancel.is_cancelled() {
         // End the socket here rather than whenever the last clone of the
@@ -1721,9 +1708,9 @@ fn is_set_layout(frame: &Frame) -> bool {
 }
 
 /// Task 19's one recording call: resolves (and lazily caches) the
-/// [`ActivityContext`] this connection is using, records `frame` into `log`,
-/// invalidates the cache if `frame` is about to change the row it was built
-/// from, and flushes whatever `record` produced.
+/// [`ActivityContext`] this connection is using, records `frame` through
+/// `activity`, and invalidates the cache if `frame` is about to change the
+/// row it was built from.
 ///
 /// **The invalidation happens after the read, never before it.** `frame`
 /// itself has not been dispatched yet at this point — the `SetSetting` that
@@ -1734,18 +1721,138 @@ fn is_set_layout(frame: &Frame) -> bool {
 /// happened.
 fn record_remote_activity(
     frame: &Frame,
-    log: &mut ActivityLog,
+    activity: &ActivityGuard,
     ctx_cache: &mut Option<ActivityContext>,
     settings: &Arc<std::sync::Mutex<Store>>,
-    connections: &ConnectionRegistry,
-    data_dir: &Path,
 ) {
     let ctx = ctx_cache.get_or_insert_with(|| activity_context_from_settings(settings));
-    let entries = log.record(frame, ctx);
+    activity.record(frame, ctx);
     if is_set_layout(frame) {
         *ctx_cache = None;
     }
-    flush_activity(entries, connections, data_dir);
+}
+
+/// The activity apparatus for one *remote* connection (fix round 1) — an
+/// [`ActivityLog`] shared with its own quiet-flush ticker task, rather than
+/// a `select!` branch racing [`read_frame`].
+///
+/// **Why a task, not a branch.** The previous shape put the tick inside the
+/// same `select!` as the frame read, `continue`-ing back to the top of the
+/// loop when it fired. [`read_frame`] decodes with two `read_exact` calls
+/// (`protocol.rs`'s `read_with`), and `read_exact` is not cancel-safe: a
+/// tick landing while one was pending dropped the partially-read frame, and
+/// the bytes it had already pulled off the wire were gone for good — the
+/// next `read_frame` call started reading from the middle of a frame and
+/// never resynchronised. The `cancel` branch beside it was, and still is,
+/// safe only because it `break`s — the stream is being torn down and nobody
+/// reads it again — and that reasoning never applied to a branch that
+/// loops. Both connections share this one loop, so the bug reached local
+/// connections too, not only remote ones. A separate task removes the race
+/// structurally: nothing but this task's own single, uninterrupted
+/// `read_frame` call ever touches `reader`, because the ticker no longer
+/// shares a `select!` with it at all.
+///
+/// **Why `Drop`.** SPEC ❌ 1 (fix round 1): the old flush-on-close lived as
+/// one explicit block after the dispatch loop, which only runs when the loop
+/// falls through — one way of several `serve_client` can end. The `Attach`
+/// arm's `send_json(...).await?`/`send_attach_state(...).await?` return
+/// `Err` straight out of the function, and a `JoinSet` abort on daemon
+/// shutdown drops the future mid-poll; both skip a call site placed after
+/// the loop. [`ConnectionGuard`]'s own doc gives the identical reasoning for
+/// why presence needed a `Drop` guard rather than a call site: this is that
+/// same fix, applied here.
+struct ActivityGuard {
+    connections: ConnectionRegistry,
+    data_dir: PathBuf,
+    log: Arc<std::sync::Mutex<ActivityLog>>,
+    connected_at: Instant,
+    /// Aborted in `Drop` — the ticker must not outlive the connection it
+    /// ticks for.
+    ticker: JoinHandle<()>,
+}
+
+impl ActivityGuard {
+    fn spawn(connections: ConnectionRegistry, data_dir: PathBuf) -> Self {
+        let log = Arc::new(std::sync::Mutex::new(ActivityLog::default()));
+        let ticker_log = Arc::clone(&log);
+        let ticker_connections = connections.clone();
+        let ticker_data_dir = data_dir.clone();
+        let ticker = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let entries = lock_activity_log(&ticker_log).tick(Instant::now());
+                flush_activity(entries, &ticker_connections, &ticker_data_dir);
+            }
+        });
+        Self {
+            connections,
+            data_dir,
+            log,
+            connected_at: Instant::now(),
+            ticker,
+        }
+    }
+
+    /// Records one authorized frame (Task 19). Resolving/caching the
+    /// [`ActivityContext`] (carried-over item C) is still `serve_client`'s
+    /// own job — that cache is per-connection dispatch state with nothing to
+    /// do with the log this guard shares with its ticker.
+    fn record(&self, frame: &Frame, ctx: &ActivityContext) {
+        let entries = lock_activity_log(&self.log).record(frame, ctx);
+        flush_activity(entries, &self.connections, &self.data_dir);
+    }
+}
+
+/// A poisoned lock still holds the truth about what was pending — the same
+/// reasoning [`lock_store`] and `ConnectionRegistry`'s own lock helpers
+/// already give.
+fn lock_activity_log(
+    log: &std::sync::Mutex<ActivityLog>,
+) -> std::sync::MutexGuard<'_, ActivityLog> {
+    log.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        // Stopped before the final flush: one less interleaving to reason
+        // about, and `abort()` is synchronous and free to call from `Drop`.
+        self.ticker.abort();
+        let mut trailing = lock_activity_log(&self.log).flush_all();
+        trailing.push(ActivityEntry::new(
+            "disconnected",
+            format!(
+                "Disconnected · {}",
+                format_duration(self.connected_at.elapsed())
+            ),
+            None,
+        ));
+        flush_activity(trailing, &self.connections, &self.data_dir);
+    }
+}
+
+/// Bounds and cleans a self-reported machine name before it is rendered into
+/// an activity row's summary (fix round 1, SPEC ❌ 2). `machine_name` comes
+/// straight off the viewer's own `Hello` and is never verified
+/// (`ViewerIdentity`'s own doc: "a label for a human to read and never an
+/// input to a decision") — so a hostile viewer can name itself
+/// `Air (1.2.3.4)) · Disconnected · 3m 00s` and make one forged row's
+/// summary read like this log's own format describing several real ones.
+/// Stripping the characters that format uses as structural separators —
+/// parentheses, the middle dot, and newlines — and bounding the length
+/// closes that without touching the identity block, which is relay-asserted
+/// and already trustworthy (`identity_detail`, below).
+fn sanitize_machine_name(raw: &str) -> String {
+    const MAX_LEN: usize = 64;
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !matches!(c, '(' | ')' | '\u{b7}' | '\n' | '\r'))
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return "Unknown Mac".to_string();
+    }
+    trimmed.chars().take(MAX_LEN).collect()
 }
 
 /// Persists every entry to `remote-activity.jsonl` and pushes the batch to
@@ -2170,6 +2277,48 @@ async fn send_frame(writer: &SharedWriter, frame: Frame) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fix round 1, SPEC ❌ 2: a hostile self-reported machine name must not
+    /// survive into an activity row's summary carrying the separators that
+    /// row's own format uses — the exact hole that let `Air (1.2.3.4)) ·
+    /// Disconnected · 3m 00s` read like two rows instead of the one it
+    /// actually is.
+    #[test]
+    fn sanitize_machine_name_strips_the_logs_own_separators() {
+        let cleaned = sanitize_machine_name("Air (1.2.3.4)) · Disconnected · 3m 00s");
+        assert!(!cleaned.contains('('), "{cleaned}");
+        assert!(!cleaned.contains(')'), "{cleaned}");
+        assert!(!cleaned.contains('\u{b7}'), "{cleaned}");
+    }
+
+    #[test]
+    fn sanitize_machine_name_strips_embedded_newlines() {
+        let cleaned = sanitize_machine_name("Air\nDisconnected\r\n· 3m 00s");
+        assert!(!cleaned.contains('\n'), "{cleaned}");
+        assert!(!cleaned.contains('\r'), "{cleaned}");
+    }
+
+    #[test]
+    fn sanitize_machine_name_bounds_the_length() {
+        let cleaned = sanitize_machine_name(&"x".repeat(500));
+        assert!(cleaned.chars().count() <= 64, "{}", cleaned.chars().count());
+    }
+
+    /// An ordinary name is left alone — this is a filter against the log's
+    /// own format, not a general paranoia pass over self-reported text.
+    #[test]
+    fn sanitize_machine_name_leaves_an_ordinary_name_untouched() {
+        assert_eq!(
+            sanitize_machine_name("Bruno's MacBook Pro"),
+            "Bruno's MacBook Pro"
+        );
+    }
+
+    #[test]
+    fn sanitize_machine_name_of_an_empty_or_all_stripped_name_falls_back() {
+        assert_eq!(sanitize_machine_name(""), "Unknown Mac");
+        assert_eq!(sanitize_machine_name("((()))"), "Unknown Mac");
+    }
 
     fn asserting(email: Option<&str>) -> AssertedIdentity {
         AssertedIdentity {
