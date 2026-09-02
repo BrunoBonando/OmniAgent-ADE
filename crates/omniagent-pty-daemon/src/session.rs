@@ -313,7 +313,7 @@ pub enum AttachState {
 
 #[derive(Default)]
 struct QueueState {
-    events: VecDeque<SessionEvent>,
+    events: VecDeque<Arc<SessionEvent>>,
     resync_pending: bool,
     closed: bool,
 }
@@ -326,13 +326,14 @@ struct SubscriptionInner {
 
 impl SubscriptionInner {
     fn push(&self, event: SessionEvent) {
+        let event = Arc::new(event);
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         if state.closed {
             return;
         }
-        if matches!(event, SessionEvent::Output { .. }) {
+        if matches!(*event, SessionEvent::Output { .. }) {
             if state.resync_pending {
                 return;
             }
@@ -341,7 +342,7 @@ impl SubscriptionInner {
                 state.events.clear();
                 state
                     .events
-                    .push_back(SessionEvent::ResyncRequired { sequence });
+                    .push_back(Arc::new(SessionEvent::ResyncRequired { sequence }));
                 state.resync_pending = true;
                 self.ready.notify_one();
                 return;
@@ -350,13 +351,13 @@ impl SubscriptionInner {
             let lost_output = state
                 .events
                 .iter()
-                .any(|queued| matches!(queued, SessionEvent::Output { .. }));
+                .any(|queued| matches!(**queued, SessionEvent::Output { .. }));
             let preserve_resync = state.resync_pending;
             state.events.clear();
             if lost_output || preserve_resync {
-                state.events.push_back(SessionEvent::ResyncRequired {
+                state.events.push_back(Arc::new(SessionEvent::ResyncRequired {
                     sequence: event.sequence(),
-                });
+                }));
                 state.resync_pending = true;
             }
         }
@@ -369,6 +370,45 @@ impl SubscriptionInner {
             state.closed = true;
             self.ready.notify_all();
         }
+    }
+
+    fn push_arc(&self, event: Arc<SessionEvent>) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.closed {
+            return;
+        }
+        if matches!(*event, SessionEvent::Output { .. }) {
+            if state.resync_pending {
+                return;
+            }
+            if state.events.len() >= self.capacity {
+                let sequence = event.sequence();
+                state.events.clear();
+                state
+                    .events
+                    .push_back(Arc::new(SessionEvent::ResyncRequired { sequence }));
+                state.resync_pending = true;
+                self.ready.notify_one();
+                return;
+            }
+        } else if state.events.len() >= self.capacity {
+            let lost_output = state
+                .events
+                .iter()
+                .any(|queued| matches!(**queued, SessionEvent::Output { .. }));
+            let preserve_resync = state.resync_pending;
+            state.events.clear();
+            if lost_output || preserve_resync {
+                state.events.push_back(Arc::new(SessionEvent::ResyncRequired {
+                    sequence: event.sequence(),
+                }));
+                state.resync_pending = true;
+            }
+        }
+        state.events.push_back(event);
+        self.ready.notify_one();
     }
 }
 
@@ -401,10 +441,10 @@ impl SessionSubscription {
                 std::sync::mpsc::RecvTimeoutError::Disconnected
             });
         };
-        if matches!(event, SessionEvent::ResyncRequired { .. }) {
+        if matches!(*event, SessionEvent::ResyncRequired { .. }) {
             state.resync_pending = false;
         }
-        Ok(event)
+        Ok((*event).clone())
     }
 
     pub fn pending_len(&self) -> usize {
@@ -680,6 +720,7 @@ impl ManagedSession {
     }
 
     fn broadcast(&self, event: SessionEvent) {
+        let event = Arc::new(event);
         let subscribers = {
             let Ok(mut subscribers) = self.subscribers.lock() else {
                 return;
@@ -696,7 +737,7 @@ impl ManagedSession {
             live
         };
         for subscriber in subscribers {
-            subscriber.push(event.clone());
+            subscriber.push_arc(Arc::clone(&event));
         }
     }
 
