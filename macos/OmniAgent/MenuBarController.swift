@@ -33,12 +33,15 @@ struct MenuBarSummary: Equatable {
     var recentWorkspaces: [RecentWorkspace] = []
 }
 
-/// The status icon's three states (2026-09-01 remote environment sharing
-/// spec §2): template when sharing is off, **green** when this Mac is
-/// reachable and idle, **blue** for exactly as long as somebody is driving
-/// it — the same span the takeover panel is up for, since both are one
-/// reading of `RemoteSharingModel.liveConnection`.
-enum MenuBarShareState { case off, sharing, connected }
+/// The status icon's states: template when sharing is off, **green** when
+/// this Mac is reachable and idle, **blue** for exactly as long as somebody
+/// is driving it (2026-09-01 remote environment sharing spec §2 — the same
+/// span the takeover panel is up for, since both are one reading of
+/// `RemoteSharingModel.liveConnection`), and **purple** for exactly as long
+/// as *this* Mac is driving somebody else (Task 25's carried item — see
+/// `MenuBarController.shareState`'s doc comment for why this had to become a
+/// fourth state rather than falling out of the first three).
+enum MenuBarShareState { case off, sharing, connected, driving }
 
 /// Pure menu construction, `SessionContextMenu.build`'s pattern: no AppKit
 /// state, no target/action — just data in and closures for what each item
@@ -112,6 +115,14 @@ enum MenuBarMenu {
             case .off: return nil
             case .sharing: return .systemGreen
             case .connected: return .systemBlue
+            // Purple deliberately, not template and not any of the other
+            // three: template would read as "sharing is off", which is
+            // false — this Mac's own daemon has, correctly, dropped its
+            // control channel for the duration (spec §2 condition 3), but
+            // the user is actively mid-feature, just pointed the other way.
+            // Green or blue would each claim a fact about *this* Mac's
+            // reachability that is not true while it is driving.
+            case .driving: return .systemPurple
             }
         }() else {
             let image = base.copy() as! NSImage
@@ -212,13 +223,29 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     /// This controller's own reading of the sharing state.
     ///
-    /// `.connected` wins over `.sharing`: a live connection is only possible
-    /// while sharing is on, and it is the more urgent of the two facts. It is
-    /// asked of the workspace rather than of `RemoteSharingModel` directly,
-    /// `isSharingEnvironment`'s reasoning — one seam, so nothing outside the
-    /// controller has to know the model exists.
+    /// `.driving` is checked **first**, ahead of `.connected` — the bug this
+    /// ordering exists to fix (Task 23's own concern, carried into Task 25):
+    /// `RemoteSharingModel.liveConnection` is a roster the *local* daemon
+    /// pushes, and that daemon is disconnected for the whole of a takeover
+    /// (`WorkspaceWindowController.localConnection`'s doc comment), so it
+    /// simply keeps whatever it last held — stale, not merely quiet. Asking
+    /// `.connected` first would show the icon "someone is driving *this*
+    /// Mac" from a roster nobody has updated since before the takeover
+    /// began, while the truth is closer to the opposite: this Mac's own
+    /// sharing is off for the duration (§2 condition 3 fails with no local
+    /// connection), and it is *this* Mac doing the driving. `isDrivingRemote`
+    /// is asked directly of the connection the window actually holds right
+    /// now, so it cannot go stale the way a push-based roster can.
+    ///
+    /// Below that, `.connected` wins over `.sharing` the same way it always
+    /// has: a live connection is only possible while sharing is on, and it
+    /// is the more urgent of the two facts. Asked of the workspace rather
+    /// than of `RemoteSharingModel` directly — `isSharingEnvironment`'s
+    /// reasoning — one seam, so nothing outside the controller has to know
+    /// the model exists.
     private var shareState: MenuBarShareState {
         guard let workspace else { return .off }
+        if workspace.isDrivingRemote { return .driving }
         if workspace.liveRemoteConnection != nil { return .connected }
         return workspace.isSharingEnvironment ? .sharing : .off
     }

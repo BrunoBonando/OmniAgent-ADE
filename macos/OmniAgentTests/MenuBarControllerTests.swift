@@ -206,6 +206,7 @@ final class MenuBarControllerTests: XCTestCase {
         XCTAssertTrue(MenuBarMenu.shareIcon(.off).isTemplate)
         XCTAssertFalse(MenuBarMenu.shareIcon(.sharing).isTemplate)
         XCTAssertFalse(MenuBarMenu.shareIcon(.connected).isTemplate)
+        XCTAssertFalse(MenuBarMenu.shareIcon(.driving).isTemplate)
     }
 
     /// The menu's own checkmark, `WorkspacesHeaderMenus.groupBy`'s pattern —
@@ -326,6 +327,78 @@ final class MenuBarControllerTests: XCTestCase {
         menuBar.refreshShareIcon()
         let again = try tint(of: XCTUnwrap(menuBar.statusItem.button?.image))
         XCTAssertGreaterThan(again.green, again.blue, "back to green, still sharing")
+    }
+
+    /// The purple state (Task 25's carried item): the icon must not read
+    /// "sharing and idle" — green — while this Mac's own daemon has, quite
+    /// correctly, dropped its control channel because it is busy driving
+    /// somebody else. Built the way `ConnectionSwapTests.makeController`
+    /// does: a local socket that does not exist and a remote WebSocket that
+    /// dials nothing, both parked on a long reconnect delay so the test
+    /// only has to look at `isDrivingRemote`, never a real connect.
+    @MainActor
+    func testTheIconGoesPurpleWhileThisMacIsDrivingAnother() async throws {
+        let store = SettingsStore(client: FakeSettingsClient(
+            rows: ["auth_account_email": "bruno@bonando.com"]
+        ))
+        let local = SessionConnection(
+            socketURL: URL(fileURLWithPath: "/tmp/omniagent-menubar-purple-\(UUID().uuidString).sock"),
+            reconnectDelay: 60
+        )
+        let remote = SessionConnection(
+            transport: .webSocket(URL(string: "wss://127.0.0.1:1/v1/viewer/device-studio")!, bearer: { nil }),
+            reconnectDelay: 60
+        )
+        let controller = WorkspaceWindowController(
+            connection: local,
+            panes: [],
+            remoteSharing: RemoteSharingModel(store: store),
+            authDefaults: try throwawayDefaults()
+        )
+        defer {
+            controller.close()
+            remote.disconnect()
+        }
+        let menuBar = MenuBarController(workspace: controller)
+
+        controller.toggleRemoteSharing()
+        menuBar.refreshShareIcon()
+        let green = try tint(of: XCTUnwrap(menuBar.statusItem.button?.image))
+        XCTAssertGreaterThan(green.green, green.blue, "sharing and idle, before the takeover")
+
+        // A roster from *before* the takeover began, left standing — the
+        // exact staleness `MenuBarController.shareState`'s doc comment
+        // describes: `RemoteViewers` is a local-only push
+        // (`applyRemoteViewers`'s own `isDrivingRemote` guard), so nothing
+        // ever corrects it once the local connection is gone for the
+        // takeover. If `.connected` were checked ahead of `.driving`, this
+        // stale roster is exactly what would make the icon lie.
+        controller.applyRemoteViewers([RemoteViewer(
+            viewerID: "v-air", machineName: "Air", sessions: ["s1"],
+            since: "2026-09-01T09:00:00Z", accountEmail: "bruno@bonando.com"
+        )])
+        XCTAssertNotNil(controller.liveRemoteConnection)
+
+        controller.remoteConnectionProvider = { _ in remote }
+        try await controller.connectRemote(to: RemoteMachine(
+            deviceID: "device-studio", name: "Mac Studio",
+            projection: RemoteControlProjection.Payload(workspaces: [])
+        ))
+        XCTAssertTrue(controller.isDrivingRemote)
+        XCTAssertNotNil(controller.liveRemoteConnection, "still stale, untouched by the takeover")
+        menuBar.refreshShareIcon()
+        let purple = try tint(of: XCTUnwrap(menuBar.statusItem.button?.image))
+        XCTAssertGreaterThan(purple.red, purple.green, "purple reads red-and-blue, not green")
+        XCTAssertGreaterThan(purple.blue, purple.green, "purple reads red-and-blue, not green")
+
+        controller.disconnectRemote()
+        XCTAssertFalse(controller.isDrivingRemote, "back on this Mac's own daemon")
+        menuBar.refreshShareIcon()
+        let backToLocal = try tint(of: XCTUnwrap(menuBar.statusItem.button?.image))
+        XCTAssertFalse(
+            backToLocal.red > backToLocal.green && backToLocal.blue > backToLocal.green,
+            "no longer purple — `isDrivingRemote` alone is what the icon read while it was"
+        )
     }
 
     /// The colour of the most opaque pixel in a status icon — the mark is
