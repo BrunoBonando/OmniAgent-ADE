@@ -599,6 +599,20 @@ final class SessionConnection {
         }
     }
 
+    // MARK: - Host state (spec §4, Task 22)
+
+    /// Publishes this host's own state — `HostStatePublisher.payload()` —
+    /// to whichever remote connection currently holds the lease. `payload`
+    /// is sent **verbatim**, never through `sendCodable`: it is already the
+    /// wire JSON, and re-encoding it here would be a second pass through the
+    /// same promise the daemon already keeps — that it never parses this
+    /// payload. Local-only, like `disconnectViewer`.
+    func publishHostState(_ payload: Data, completion: ((Result<Void, Error>) -> Void)? = nil) {
+        request(kind: .publishHostState, payload: payload) {
+            self.finishResponse($0, completion: completion)
+        }
+    }
+
     // MARK: - Brain reads (Task 6a)
 
     /// Every ingested project — `mcp_server::tools::list_projects`'s frozen

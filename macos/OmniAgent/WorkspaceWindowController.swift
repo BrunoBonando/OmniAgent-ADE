@@ -547,6 +547,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// this controller has no reference to.
     var onRemoteSharingChanged: (() -> Void)?
 
+    /// Publishes this machine's own gauges/limits/engines to the lease
+    /// holder (spec §4, Task 22). `start()`/`stop()` are called from nowhere
+    /// but `syncTakeoverPanel()`, on the same `remoteSharing.liveConnection`
+    /// transition that puts up and takes down the takeover panel — a machine
+    /// with no viewer never starts it.
+    private let hostStatePublisher: HostStatePublisher
+
     /// `panes` may be empty: the app delegate opens the window before the
     /// socket is up, and `start()` fills it from the `layout` row once the
     /// connection lands. A non-empty seed is for callers that already know
@@ -563,6 +570,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         daemonPersistence: DaemonPersistenceController = DaemonPersistenceController(),
         remoteMachines: RemoteMachinesModel = RemoteMachinesModel(),
         remoteSharing: RemoteSharingModel = .shared,
+        hostStateSources: HostStateSources = LiveHostStateSources(),
         settingsClient: SettingsClient? = nil,
         authDefaults: UserDefaults = .standard
     ) {
@@ -571,6 +579,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         self.daemonPersistence = daemonPersistence
         self.remoteMachines = remoteMachines
         self.remoteSharing = remoteSharing
+        let hostStatePublisher = HostStatePublisher(sources: hostStateSources)
+        hostStatePublisher.publish = { [connection] payload in
+            connection.publishHostState(payload)
+        }
+        self.hostStatePublisher = hostStatePublisher
         accountRoot = daemonPersistence.paths.dataDir
         currentAccountID = AccountDirectory.readCurrentAccount(root: daemonPersistence.paths.dataDir)
         let settingsStore = SettingsStore(client: settingsClient ?? connection)
@@ -4523,6 +4536,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// down the moment it is not — driven off the daemon's roster rather than
     /// off the click that ended it, so a Terminate that did not land leaves
     /// the panel exactly where it was.
+    ///
+    /// **Also the one place `hostStatePublisher` starts and stops** (spec
+    /// §4, Task 22). It shares this function rather than getting its own
+    /// `onChange` hook because the two must never disagree about whether
+    /// somebody is here: the panel and the publisher are two readings of the
+    /// same `liveConnection` transition, taken in the same call.
     private func syncTakeoverPanel() {
         // `liveConnection` **alone**, and never `isSharing` with it.
         //
@@ -4543,6 +4562,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         guard let info = remoteSharing.liveConnection else {
             takeoverPanel?.dismiss()
             takeoverPanel = nil
+            hostStatePublisher.stop()
             return
         }
         if let panel = takeoverPanel {
@@ -4554,6 +4574,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         // stale the instant a Block lands.
         panel.onBlocked = { [weak self] in self?.remoteSharing.refreshBlockedList() }
         takeoverPanel = panel
+        hostStatePublisher.start()
         if let takeoverPanelPresenter {
             takeoverPanelPresenter(panel)
         } else {

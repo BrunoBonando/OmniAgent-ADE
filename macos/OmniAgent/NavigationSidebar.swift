@@ -546,6 +546,74 @@ enum MachineStats {
     }
 }
 
+/// The one timer that samples [`MachineStats`] — every consumer of the
+/// gauges reads *this*, rather than calling `cpuFraction()`/`memoryFraction()`/
+/// `gpuFraction()` on its own.
+///
+/// That is not a style preference: `MachineStats.cpuFraction()` computes a
+/// delta against `lastTicks`, one piece of static state shared by every
+/// caller. Two independent samplers — the sidebar's own two-second `Timer`
+/// and a second one added for remote sharing (spec §4, Task 22) — would each
+/// silently overwrite the other's baseline, so *both* readings would be
+/// deltas against whichever caller happened to sample most recently rather
+/// than against their own last sample. `HostMetricsSource` is what makes that
+/// impossible instead of merely unlikely: one timer, one call to each
+/// `MachineStats` function per tick, fanned out to every observer.
+///
+/// Runs only while it has an observer, and stops the moment it has none —
+/// the sidebar's dial while its window is on screen, `HostStatePublisher`
+/// while the remote lease is held. Neither needing it is a machine with no
+/// visible sidebar and no viewer, which must do no work at all.
+final class HostMetricsSource {
+    static let shared = HostMetricsSource()
+
+    struct Snapshot {
+        var cpu: Double?
+        var memory: Double?
+        var gpu: Double?
+    }
+
+    private(set) var latest = Snapshot(cpu: nil, memory: nil, gpu: nil)
+
+    private var observers: [ObjectIdentifier: (Snapshot) -> Void] = [:]
+    private var timer: Timer?
+
+    private init() {}
+
+    /// Registers `owner` for every future sample, starting the timer if this
+    /// is the first observer. Idempotent per owner, like
+    /// `ClaudeUsageLimitsPoller.addObserver`: re-registering replaces that
+    /// owner's block and nobody else's.
+    func addObserver(_ owner: AnyObject, _ block: @escaping (Snapshot) -> Void) {
+        observers[ObjectIdentifier(owner)] = block
+        guard timer == nil else { return }
+        // A throwaway read establishes `MachineStats`'s delta baseline now,
+        // so the first real sample one tick later is a fraction over the
+        // second that just elapsed rather than `nil` for want of one.
+        _ = MachineStats.cpuFraction()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.sample() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    /// Unregisters `owner`, stopping the timer once nobody is left watching.
+    func removeObserver(_ owner: AnyObject) {
+        observers.removeValue(forKey: ObjectIdentifier(owner))
+        guard observers.isEmpty else { return }
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func sample() {
+        latest = Snapshot(
+            cpu: MachineStats.cpuFraction(),
+            memory: MachineStats.memoryFraction(),
+            gpu: MachineStats.gpuFraction()
+        )
+        for observer in observers.values { observer(latest) }
+    }
+}
+
 /// One machine stat in the hover card's git-tab language (`HoverGitStatView`):
 /// the big number over a small caption. Except there the colour names the
 /// column and here it *is* the reading — green while comfortable, amber past
@@ -844,16 +912,14 @@ final class SidebarStatGaugeView: NSView {
 
 /// The machine gauges pinned just above the account row: CPU, memory and GPU
 /// side by side in the hover card's three-numbers arrangement — equal-width
-/// columns split by hairlines — resampled every two seconds while the sidebar
-/// is on screen.
+/// columns split by hairlines — resampled once a second, through
+/// [`HostMetricsSource`], while the sidebar is on screen.
 final class SidebarSystemStatsView: NSView {
     static let height: CGFloat = 76
 
     let cpuGauge = SidebarStatGaugeView(name: "CPU")
     let memoryGauge = SidebarStatGaugeView(name: "MEM")
     let gpuGauge = SidebarStatGaugeView(name: "GPU")
-
-    private var timer: Timer?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -902,36 +968,26 @@ final class SidebarSystemStatsView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("System stats")
-
-        // A throwaway CPU read, so the first ticking sample has a baseline
-        // and the gauge shows a number two seconds in, not four.
-        _ = MachineStats.cpuFraction()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
-    /// Samples only while there is a window to show them in.
+    /// Watches [`HostMetricsSource`] only while there is a window to show
+    /// readings in — unregistering, not merely ignoring what arrives, so a
+    /// sidebar with no window is one fewer reason for the shared timer to
+    /// keep running at all.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        timer?.invalidate()
-        timer = nil
+        HostMetricsSource.shared.removeObserver(self)
         guard window != nil else { return }
-        sample()
-        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.sample() }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        HostMetricsSource.shared.addObserver(self) { [weak self] snapshot in
+            self?.apply(cpu: snapshot.cpu, memory: snapshot.memory, gpu: snapshot.gpu)
+        }
     }
 
-    private func sample() {
-        apply(
-            cpu: MachineStats.cpuFraction(),
-            memory: MachineStats.memoryFraction(),
-            gpu: MachineStats.gpuFraction()
-        )
-    }
-
-    /// Split from `sample` so a test can feed fractions without a kernel.
+    /// Split from the `HostMetricsSource` callback so a test can feed
+    /// fractions without a kernel.
     func apply(cpu: Double?, memory: Double?, gpu: Double?, animated: Bool = true) {
         cpuGauge.apply(cpu, animated: animated)
         memoryGauge.apply(memory, animated: animated)

@@ -4,7 +4,14 @@ import Foundation
 ///
 /// Every field optional: a failed fetch, a timeout, or a changed output format
 /// must leave the readout stale rather than blank, and must never throw.
-struct ClaudeUsageLimits: Equatable {
+///
+/// `Encodable` (2026-09-01 remote environment sharing spec §4, Task 22):
+/// these six fields are, byte for byte, `HostState`'s `limits` object —
+/// `sessionPercent`/`sessionResets`/`weekPercent`/`weekResets`/`modelName`/
+/// `modelPercent` — so `HostStatePublisher` encodes this type directly
+/// rather than copying its shape into a second struct that could drift from
+/// it.
+struct ClaudeUsageLimits: Equatable, Encodable {
     let sessionPercent: Int?
     let sessionResets: String?
     let weekPercent: Int?

@@ -64,6 +64,15 @@ enum MessageKind: UInt8 {
     /// Kicks one remote viewer and blocks it until Remote Control is turned
     /// on again (phase 2 §5). Local-only. Mirrors `DisconnectViewer`.
     case disconnectViewer = 0x1b
+    /// Publishes the host's own state — the gauges, the Claude usage limits
+    /// and engine availability the app computes in-process (2026-09-01
+    /// remote environment sharing spec §4, Task 22). The payload is opaque
+    /// JSON the daemon stores and forwards to the lease holder without ever
+    /// parsing it. Local-only, like `listViewers`/`disconnectViewer`: it is
+    /// in `authorize_remote`'s deny arm, so a remote client's own attempt is
+    /// refused. Mirrors
+    /// `omniagent_pty_daemon::protocol::MessageKind::PublishHostState`.
+    case publishHostState = 0x1c
     case helloAck = 0x81
     case sessionList = 0x82
     case sessionCreated = 0x83
@@ -85,9 +94,14 @@ enum MessageKind: UInt8 {
     /// local connections only — a viewer never learns about other viewers.
     /// Mirrors `RemoteViewers`.
     case remoteViewers = 0x8d
-    // 0x8e is reserved for phase 5's `HostState` push (spec §4) — left as a
-    // hole, never renumbered, the same reasoning `RemoteViewers`/
-    // `RemoteActivity` are appended rather than slotted in.
+    /// The host's own state — `publishHostState`'s opaque JSON payload,
+    /// forwarded byte-for-byte (spec §4, Task 22). Pushed to the lease
+    /// holder only, on attach and again on every publish; the app's own
+    /// (local) connection never receives its own publishes echoed back to
+    /// it, which is why nothing in this app decodes this kind today — that
+    /// is the *viewer* side, a later task. Mirrors
+    /// `omniagent_pty_daemon::protocol::MessageKind::HostState`.
+    case hostState = 0x8e
     /// One batch of daemon-witnessed activity rows,
     /// `{"entries":[{"ts","kind","summary","detail"}]}` (phase 3 spec §8 —
     /// Task 19). Sent to local connections only — a remote viewer must never
