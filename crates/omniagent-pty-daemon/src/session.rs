@@ -1078,6 +1078,80 @@ fn strip_inherited_agent_identity(command: &mut CommandBuilder) {
     }
 }
 
+/// Resolves a *bare* engine name (`"claude"`, no `/`) to an absolute path on
+/// **this** machine — the daemon's own host — rather than trusting whatever
+/// `PATH` happened to arrive in `request.env`.
+///
+/// The only caller that ever sends a bare name is a remote viewer driving
+/// this Mac (2026-09-01 remote environment sharing spec §4/§6, the Task 28
+/// carried gap): a local launch always resolves to an absolute path before
+/// it reaches the daemon at all (`EngineLauncher.resolveBinary`, the Swift
+/// side), so `spawn_session` never sees a bare name from this machine's own
+/// app. A viewer's own `PATH` names directories on *its* disk, not this
+/// one — sending it here and letting `portable_pty` search it the ordinary
+/// way would just move the "wrong machine's facts" bug from argv[0] to the
+/// search path instead of fixing it, and would silently "work" only by
+/// coincidence when both Macs happen to use identical install layouts. So
+/// this Mac resolves the name itself, using only what actually exists on
+/// its own disk.
+///
+/// **Why not spawn a login shell.** `EngineLauncher.loginShellPath()` on
+/// the Swift side runs `$SHELL -ilc 'printf %s "$PATH"'` once per app
+/// launch and caches the result — fine for a foreground app the user is
+/// watching start up. This function runs synchronously inside a
+/// session-create RPC; a slow or hung login shell (an rc chain that touches
+/// the network, or — with no controlling terminal under launchd — one that
+/// never returns at all, exactly the failure `loginShellPath()`'s own
+/// timeout exists to survive) would stall every terminal a viewer tries to
+/// open on this machine. A fixed list of directories has no process to
+/// hang.
+///
+/// **Why the daemon's own inherited `PATH` almost never has these.** It
+/// runs as a `LaunchAgent` (`macos/embed-daemon.sh`'s production plist),
+/// which ships with **no `EnvironmentVariables` key at all** — deliberately,
+/// so the daemon computes its data paths from its own runtime `$HOME`
+/// rather than one baked into the plist at build time (see that script's
+/// comment). launchd's default environment for a plist with no
+/// `EnvironmentVariables` is `/usr/bin:/bin:/usr/sbin:/sbin` plus session
+/// variables such as `HOME` — none of the places Homebrew, `cargo`,
+/// `nvm`/`bun`, or `pip --user` actually install a CLI. Checked anyway,
+/// first, because it costs nothing and covers an unusual setup (a
+/// hand-edited plist, a future build that does set `PATH`).
+fn resolve_engine_binary(name: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(path_var) = std::env::var("PATH") {
+        candidates.extend(std::env::split_paths(&path_var));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(home);
+        candidates.push(home.join(".local/bin"));
+        candidates.push(home.join(".bun/bin"));
+        candidates.push(home.join(".cargo/bin"));
+    }
+    for fixed in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        candidates.push(PathBuf::from(fixed));
+    }
+
+    candidates.into_iter().find_map(|dir| {
+        let candidate = dir.join(name);
+        is_executable_file(&candidate).then_some(candidate)
+    })
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
     let engine = infer_engine(&request.command);
     let pair = NativePtySystem::default()
@@ -1089,7 +1163,20 @@ fn spawn_session(request: &CreateSession) -> Result<SpawnedSession> {
         })
         .context("open PTY")?;
     let mut command = if let Some(program) = request.command.first() {
-        let mut command = CommandBuilder::new(program);
+        // An absolute path is a local launch's already-resolved binary —
+        // used exactly as given, unchanged from before this function
+        // existed. A bare name only ever arrives from a remote viewer's
+        // `CreateSession` (see `resolve_engine_binary`'s doc), and is
+        // resolved against *this* machine's own disk before anything is
+        // spawned.
+        let resolved = if program.starts_with('/') {
+            program.clone()
+        } else {
+            resolve_engine_binary(program)
+                .map(|path| path.to_string_lossy().into_owned())
+                .ok_or_else(|| anyhow!("{program} is not installed on this Mac"))?
+        };
+        let mut command = CommandBuilder::new(&resolved);
         command.args(request.command.iter().skip(1));
         command
     } else {

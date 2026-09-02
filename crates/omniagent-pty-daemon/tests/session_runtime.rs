@@ -348,3 +348,74 @@ fn transcript_redacts_secrets_before_persisting_them() {
     assert!(!transcript.contains("abc123"), "{transcript}");
     assert!(transcript.contains("[redacted]"), "{transcript}");
 }
+
+// MARK: - Bare-name engine resolution (Task 28's carried gap, 2026-09-01
+// remote environment sharing spec §4/§6): a remote viewer sends the engine
+// *name*; the daemon resolves it against its own host disk, never the
+// client-sent `env["PATH"]`.
+
+/// A remote viewer sends `"claude"`, not `/opt/homebrew/bin/claude` — proven
+/// here by handing the daemon a name alongside a client `PATH` that could
+/// not possibly resolve it, and expecting the daemon's own on-disk lookup to
+/// find it anyway.
+#[test]
+fn a_bare_engine_name_is_resolved_against_this_machines_own_disk_not_the_clients_path() {
+    let registry = SessionRegistry::new();
+    let result = registry.create_session(CreateSession {
+        id: "bare-name-resolve".into(),
+        command: vec!["sh".into(), "-c".into(), "exit 0".into()],
+        cwd: None,
+        // If the daemon trusted this (the *sender's* own machine's PATH)
+        // rather than resolving on its own, session creation would fail.
+        env: HashMap::from([("PATH".to_string(), "/definitely/not/a/real/dir".to_string())]),
+        cols: 80,
+        rows: 24,
+        transcript_path: None,
+    });
+    assert!(result.is_ok(), "{:?}", result.err());
+}
+
+/// A name this machine genuinely does not have is a clear, host-scoped
+/// error — not the raw `ENOENT` `portable_pty::spawn_command` would
+/// otherwise surface a layer down, and not a silent success against the
+/// wrong file.
+#[test]
+fn a_bare_name_this_machine_does_not_have_is_a_clear_error() {
+    let registry = SessionRegistry::new();
+    let result = registry.create_session(CreateSession {
+        id: "bare-name-missing".into(),
+        command: vec!["definitely-not-a-real-omniagent-engine-binary".into()],
+        cwd: None,
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        transcript_path: None,
+    });
+    let error = match result {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("expected a resolution failure for a binary that does not exist"),
+    };
+    assert!(
+        error.contains("definitely-not-a-real-omniagent-engine-binary")
+            && error.contains("not installed"),
+        "{error}"
+    );
+}
+
+/// An absolute path — every local launch, unchanged — bypasses resolution
+/// entirely: no lookup, no dependence on `PATH` at all, exactly as before
+/// this function existed.
+#[test]
+fn an_absolute_path_bypasses_resolution_entirely_the_local_case_unchanged() {
+    let registry = SessionRegistry::new();
+    let result = registry.create_session(CreateSession {
+        id: "absolute-path-unchanged".into(),
+        command: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+        cwd: None,
+        env: HashMap::from([("PATH".to_string(), "/definitely/not/a/real/dir".to_string())]),
+        cols: 80,
+        rows: 24,
+        transcript_path: None,
+    });
+    assert!(result.is_ok(), "{:?}", result.err());
+}

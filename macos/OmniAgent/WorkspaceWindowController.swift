@@ -8221,7 +8221,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             let command = EngineLauncher.command(
                 for: engine,
                 conversationID: resuming ? ClaudeConversation.uuid(forSessionID: sessionID) : claimed,
-                resuming: resuming
+                resuming: resuming,
+                // While driving, this Mac's own resolved path names a file
+                // on the wrong disk (Task 28's carried gap) — the daemon
+                // resolves the bare name against the HOST's own instead.
+                isDrivingRemote: isDrivingRemote
             )
         else {
             let message = "\(engine.rawValue) is not installed — \(EngineLauncher.binaryName(for: engine)) is not on your PATH"
