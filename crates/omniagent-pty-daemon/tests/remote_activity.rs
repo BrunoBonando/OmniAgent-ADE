@@ -269,6 +269,23 @@ fn a_multi_line_paste_split_across_two_frames_still_produces_every_line() {
     assert_eq!(second[1].detail.as_deref(), Some("third line"));
 }
 
+/// Carried-over item D: `\r\n` must count as one terminator, not two — the
+/// `\n` must not leak into the next line as a stray leading newline, and must
+/// not linger as its own whitespace-only row once the connection eventually
+/// flushes.
+#[test]
+fn crlf_terminated_lines_produce_clean_rows_with_no_stray_newline() {
+    let mut log = ActivityLog::default();
+    let ctx = ActivityContext::fixture();
+    let entries = log.record(&input_frame("pane-1", b"line1\r\nline2\r\n"), &ctx);
+    assert_eq!(entries.len(), 2, "two CRLF-terminated lines");
+    assert_eq!(entries[0].detail.as_deref(), Some("line1"));
+    assert_eq!(entries[1].detail.as_deref(), Some("line2"));
+    // Nothing pending, and nothing whitespace-only was ever buffered up
+    // behind it — a full flush must find nothing left to say.
+    assert!(log.flush_all().is_empty());
+}
+
 #[test]
 fn rows_that_say_everything_have_no_detail_to_expand() {
     let mut log = ActivityLog::default();
@@ -784,4 +801,25 @@ async fn disconnecting_flushes_pending_input_then_logs_the_close() {
     let flushed = harness.local().wait_for_activity("input").await;
     assert_eq!(flushed.detail.as_deref(), Some("never sent"));
     harness.local().wait_for_activity("disconnected").await;
+}
+
+/// Carried-over item E: `BrainListProjects` is a disclosing read exactly like
+/// `BrainGetContext`/`BrainSearch`/`ListDirectory`, so it must reach the host
+/// too — proven here through the real dispatch, not only through
+/// `ActivityLog::record` directly, since Task 19 is what actually wires
+/// `record` into `serve_client`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn brain_list_projects_reaches_the_activity_log_through_the_real_dispatch() {
+    let mut harness = support::daemon_with_local_client().await;
+    let mut viewer = harness.connect_remote("MacBook Pro");
+    viewer.hello().await;
+    harness.local().wait_for_activity("connected").await;
+    viewer
+        .send_and_forget(MessageKind::BrainListProjects, serde_json::json!({}))
+        .await;
+
+    harness
+        .local()
+        .wait_for_activity("brain_list_projects")
+        .await;
 }

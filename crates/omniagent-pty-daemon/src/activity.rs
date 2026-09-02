@@ -12,11 +12,12 @@
 //! for exactly the mutating frames a remote client can reach
 //! (`crate::authorize_remote`'s allowlist): every kind that only *reads* the
 //! machine without disclosing anything about it (`ListSessions`,
-//! `GetSetting`, `BrainListProjects`, the read-only `Roots*` status queries)
-//! produces no row, because nothing happened worth logging. `BrainGetContext`
-//! and `BrainSearch` are reads too, but ones that hand brain content to the
-//! remote client — the same reasoning `ListDirectory` gets — so they are
-//! logged for disclosure, not mutation. `Detach` is silent: it drops a
+//! `GetSetting`, the read-only `Roots*` status queries) produces no row,
+//! because nothing happened worth logging. `BrainListProjects`,
+//! `BrainGetContext` and `BrainSearch` are reads too, but ones that hand
+//! brain content — a project list, a brief, search results — to the remote
+//! client, the same reasoning `ListDirectory` gets, so all four are logged
+//! for disclosure, not mutation. `Detach` is silent: it drops a
 //! subscription, not the session underneath it. `Resize` is a real mutation
 //! (it ioctls the host pty, `session.resize`), so it is **not** silent
 //! either — but a raw `Resize` frame arrives once per pixel of a window drag,
@@ -582,6 +583,19 @@ impl ActivityLog {
                     None,
                 )]
             }
+            MessageKind::BrainListProjects => {
+                // No argument to name in the summary (the request payload is
+                // `{}`), but a read that hands back every project's name and
+                // path is exactly the disclosure `ListDirectory` is logged
+                // for — leaving it silent while `BrainGetContext`/
+                // `BrainSearch` are logged is the inconsistent read policy
+                // this arm exists to close (carried-over item, Task 19).
+                vec![ActivityEntry::new(
+                    "brain_list_projects",
+                    "Listed the brain's projects".to_string(),
+                    None,
+                )]
+            }
             MessageKind::BrainGetContext => {
                 let Ok(payload) = serde_json::from_slice::<BrainGetContextPayload>(&frame.payload)
                 else {
@@ -622,10 +636,10 @@ impl ActivityLog {
                 }
             }
             // Every other reachable kind is a read that discloses nothing
-            // beyond its own success (`ListSessions`, `GetSetting`,
-            // `BrainListProjects`, the read-only `Roots*` status queries), or
-            // a mutation the table deliberately leaves silent (`Detach` —
-            // see the module doc) — nothing happened here worth a row.
+            // beyond its own success (`ListSessions`, `GetSetting`, the
+            // read-only `Roots*` status queries), or a mutation the table
+            // deliberately leaves silent (`Detach` — see the module doc) —
+            // nothing happened here worth a row.
             _ => Vec::new(),
         }
     }
@@ -711,13 +725,31 @@ impl ActivityLog {
         entries
     }
 
-    /// Buffers `bytes` for `session`, flushing one row per `\r` found in
-    /// them — a frame is not always one keystroke: a pasted multi-line
-    /// prompt arrives as a single `Input` frame carrying every embedded
-    /// `\r` at once, and each one completes a line exactly as if it had
-    /// arrived on its own. Whatever follows the last `\r` (or all of
-    /// `bytes`, if there is none) stays buffered for the next frame,
+    /// Buffers `bytes` for `session`, flushing one row per line terminator
+    /// found in them — a frame is not always one keystroke: a pasted
+    /// multi-line prompt arrives as a single `Input` frame carrying every
+    /// embedded terminator at once, and each one completes a line exactly as
+    /// if it had arrived on its own. Whatever follows the last terminator (or
+    /// all of `bytes`, if there is none) stays buffered for the next frame,
     /// `Interrupt`, or the quiet tick.
+    ///
+    /// A terminator is `\r`, and `\r\n` counts as **one** — the `\n`
+    /// immediately following a `\r` is consumed with it rather than becoming
+    /// the next line's leading character. Without this, `"line1\r\nline2\r\n"`
+    /// produced "line1", then "\nline2" with a stray leading newline, then a
+    /// lone "\n" left pending that later flushed as its own whitespace-only
+    /// row — no text was ever lost, but on a log whose evidence *is* the
+    /// typed text that stray newline is noise in the wrong place. `\n` on its
+    /// own, not preceded by a `\r`, is still not a terminator: only `\r` (bare
+    /// or CRLF) ends a line here.
+    ///
+    /// The pairing only looks inside `bytes`: a `\r` that happens to be the
+    /// very last byte of one `Input` frame, with its `\n` arriving as the
+    /// first byte of the next, is treated as two frames' worth of ordinary
+    /// terminators rather than one split pair — a PTY write is not expected
+    /// to split a two-byte sequence at exactly that byte, and no text is
+    /// lost either way, only (in that one pathological split) an extra blank
+    /// line.
     fn push_input(
         &mut self,
         session: &str,
@@ -733,7 +765,9 @@ impl ActivityLog {
                     if let Some(entry) = self.flush_input(session) {
                         entries.push(entry);
                     }
-                    remaining = &remaining[cr_at + 1..];
+                    let after_cr = cr_at + 1;
+                    let crlf = remaining.get(after_cr) == Some(&b'\n');
+                    remaining = &remaining[after_cr + usize::from(crlf)..];
                 }
                 None => {
                     self.append_pending(session, remaining, ctx);
