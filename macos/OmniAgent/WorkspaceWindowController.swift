@@ -1697,11 +1697,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             switch state {
             case .connected:
                 applyConnectionStatus(nil)
-                // Step 3 → 4 of the connect ceremony (spec §6): `.connected`
-                // is only ever reached on a real `HelloAck` — see
-                // `SessionConnection.handle(_:)`'s own `.helloAck` branch —
-                // so the lease is genuinely granted by the time this runs.
-                // The loaded-handler is armed *before*
+                // Carries the connect ceremony from `.securing` straight to
+                // `.loading` (spec §6) — `helloAcknowledged()`'s own doc
+                // comment explains why that is two real steps landing
+                // together rather than one. `.connected` is only ever
+                // reached on a real `HelloAck` — see `SessionConnection
+                // .handle(_:)`'s own `.helloAck` branch — so both the secure
+                // line and the credential check are genuinely true by the
+                // time this runs. The loaded-handler is armed *before*
                 // `restoreAccountStateIfNeeded()` below, so it is in place
                 // before the `getSetting(layout)` round trip it is waiting
                 // on can possibly complete.
@@ -1766,13 +1769,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 }
             case .connecting:
                 applyConnectionStatus("Connecting")
-                // Steps 1 → 2 → 3 of the connect ceremony. Today's transport
-                // gives the app exactly one pre-`HelloAck` signal — this one
-                // — so both `webSocketOpened()` and `dataChannelOpened()`
-                // fire from it; see their doc comments in
-                // `RemoteConnectCeremony` for why that is a real, if
-                // currently un-splittable, pair of milestones rather than a
-                // synthetic one.
+                // Step 1 → 2 of the connect ceremony, **and only that far**.
+                // `.connecting` fires at the very top of `SessionConnection
+                // .openConnection()`, before the socket exists — it proves
+                // the dial has *started*, nothing more. Fix round 1 found
+                // this calling `dataChannelOpened()` here too, in the same
+                // synchronous breath as `webSocketOpened()`: that checked
+                // "Establishing a secure line…" off before any secure line
+                // existed, at the instant the attempt began, with
+                // "Confirming credentials…" then spinning for the entire
+                // real wait — a milestone marked done ahead of its fact,
+                // exactly the failure this file's one rule forbids. Today's
+                // transport gives the app no signal between this one and
+                // `HelloAck`, so `.securing` is left **active**, covering
+                // that whole real span, until `helloAcknowledged()` (below)
+                // carries it — and `.confirming` with it — to done together
+                // on the one signal that actually proves both are true. See
+                // `RemoteConnectCeremony.webSocketOpened()`'s doc comment for
+                // the full reasoning and what protocol work would let this
+                // split into two real steps.
                 //
                 // A `.connecting` that is not the *first* one for this
                 // ceremony is a fresh dial `SessionConnection`'s own backoff
@@ -1786,7 +1801,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
                 if let ceremony = connectCeremony, isDrivingRemote {
                     if ceremony.step != .dialling { ceremony.retry() }
                     ceremony.webSocketOpened()
-                    ceremony.dataChannelOpened()
                 }
             case .disconnected:
                 applyConnectionStatus("Reconnecting")

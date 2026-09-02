@@ -216,6 +216,52 @@ final class ConnectionSwapTests: XCTestCase {
         XCTAssertTrue(panel.connection === local)
     }
 
+    // MARK: - The connect ceremony never checks a step off ahead of its fact
+
+    /// Fix round 1: the ceremony's `.securing` row must stay **active** —
+    /// never read as done — until `.connected` genuinely arrives. This pins
+    /// the real production wiring (`WorkspaceWindowController
+    /// .beginConnecting` → `installConnectionHandlers`'s `.connecting`/
+    /// `.connected` cases), not just `RemoteConnectCeremony`'s own state
+    /// machine, because the bug this fixes was in the wiring: it used to
+    /// call `dataChannelOpened()` from the same synchronous `.connecting`
+    /// event as `webSocketOpened()`, which checked "Establishing a secure
+    /// line…" off at the very instant the dial *started* — before any
+    /// secure line existed — with "Confirming credentials…" then spinning
+    /// through the entire real wait behind it.
+    func testSecuringStaysActiveUntilTheConnectionIsGenuinelyUp() async throws {
+        let (controller, _, remote) = try makeController()
+        defer { controller.close() }
+        controller.remoteConnectionProvider = { _ in remote }
+
+        controller.beginConnecting(to: studio)
+        // `beginConnecting` dials through a `Task`; `connectRemote` itself
+        // has no suspension point once scheduled (Task 23's own design —
+        // it swaps and returns), so a bounded run of cooperative yields is
+        // enough to let it complete without a wall-clock wait.
+        for _ in 0..<20 where !controller.isDrivingRemote {
+            await Task.yield()
+        }
+        XCTAssertTrue(controller.isDrivingRemote, "the swap has to have happened for the wiring under test to run at all")
+        let ceremony = try XCTUnwrap(controller.connectCeremony)
+
+        // The real event: `SessionConnection.openConnection()` fires
+        // `.connecting` at the very top, before the socket even exists.
+        remote.onStateChange?(.connecting)
+        XCTAssertEqual(ceremony.step, .securing)
+        XCTAssertNotEqual(
+            ceremony.step, .confirming,
+            "confirming credentials cannot be true before the socket has even opened"
+        )
+
+        // Only now — a genuine `HelloAck` — does the wait actually end.
+        remote.onStateChange?(.connected)
+        XCTAssertEqual(
+            ceremony.step, .loading,
+            "both the secure line and confirming credentials become true together, on the one signal that proves either"
+        )
+    }
+
     // MARK: - The poll does not pull the rug
 
     /// A machine the window is driving is no longer the model's to close. Its

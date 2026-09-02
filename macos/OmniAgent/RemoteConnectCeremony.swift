@@ -7,14 +7,19 @@ import AppKit
 // production caller.
 //
 // **The one rule this file exists to keep: every step is a real milestone,
-// never a progress animation.** There is no timer anywhere in
-// `RemoteConnectCeremony` — `step` only ever changes because one of
-// `webSocketOpened()`, `dataChannelOpened()`, `helloAcknowledged()` or
+// never a progress animation, and never marked done ahead of its fact.**
+// There is no timer anywhere in `RemoteConnectCeremony` — `step` only ever
+// changes because `webSocketOpened()`, `helloAcknowledged()` or
 // `environmentLoaded()` was called, and `WorkspaceWindowController` calls
-// each of those only from a real `SessionConnection` event. See those four
-// methods' doc comments for exactly what "happened" means for each, and
-// `installConnectionHandlers`'s own comment in `WorkspaceWindowController`
-// for what today's wire protocol does and does not let a viewer tell apart.
+// each of those only from a real `SessionConnection` event.
+// `dataChannelOpened()` also exists (pinned by its own unit test) but is not
+// called by any production path today — see its doc comment and
+// `webSocketOpened()`'s for why checking a step off the moment its *sibling*
+// event fires, rather than its own, is exactly the fake-progress failure
+// this file exists to rule out. See those methods' doc comments for exactly
+// what "happened" means for each, and `installConnectionHandlers`'s own
+// comment in `WorkspaceWindowController` for what today's wire protocol does
+// and does not let a viewer tell apart.
 
 /// The four milestones of spec §6, plus the resting state once they have all
 /// landed. Ordered so `<` reads "earlier than" — `RemoteConnectCeremonyOverlayView`
@@ -76,27 +81,55 @@ final class RemoteConnectCeremony {
     /// Step 1 → 2. Driven off `SessionConnection.onStateChange`'s
     /// `.connecting` — the WebSocket dial to `/v1/viewer/{device_id}` spec
     /// §6 step 1 describes has genuinely begun (`SessionConnection.connect()`
-    /// dispatches asynchronously; this is not fired at construction).
+    /// dispatches asynchronously; this is not fired at construction — and
+    /// `.connecting` itself fires at the very top of `openConnection()`,
+    /// before the socket exists, so even this is "the dial has started", not
+    /// "the dial has finished").
     ///
-    /// Today's transport gives the app exactly one signal before `HelloAck`
-    /// — this one — so `dataChannelOpened()` is called in the very same
-    /// breath rather than waiting on a second wire event
-    /// (`crates/omniagent-pty-daemon/src/relay.rs`'s data-channel splice)
-    /// that exists on the wire but is not, today, surfaced to a viewer as a
-    /// frame of its own. Nothing here is claimed before `.connecting`
-    /// itself is real; the two milestones the design lists separately are
-    /// simply not independently observable yet at this end of the pipe.
+    /// **`.securing` is left active here, not advanced past.** Today's
+    /// transport gives the app exactly one signal before `HelloAck` — this
+    /// one — so there is nothing standing for "the relay opened the data
+    /// channel" (`crates/omniagent-pty-daemon/src/relay.rs`'s splice) other
+    /// than the eventual `HelloAck` itself. `dataChannelOpened()` used to be
+    /// called from this same event, in the same synchronous breath as this
+    /// one — which checked "Establishing a secure line…" off *before* any
+    /// secure line existed, at the very instant the attempt began, with
+    /// "Confirming credentials…" then spinning for the entire real wait
+    /// (socket, TLS, the Hello round trip). That is fake progress with extra
+    /// steps: a milestone marked done ahead of its fact, exactly the thing
+    /// this file's one rule forbids. `helloAcknowledged()` is what now
+    /// carries `.securing` through to done — see its own doc comment.
+    ///
+    /// A future daemon/relay protocol version that gives the viewer a real
+    /// frame for the data-channel splice (distinct from `HelloAck`) is what
+    /// would let this call `dataChannelOpened()` honestly; until then, one
+    /// step covers the span the protocol cannot split, rather than two steps
+    /// where the second is a lie about the first.
     func webSocketOpened() { advance(to: .securing) }
 
-    /// Step 2 → 3. See `webSocketOpened()`'s doc comment for why this is
-    /// called from the same real `.connecting` event rather than a second
-    /// one — there is no synthetic delay standing in for the missing signal.
+    /// Step 2 → 3, in isolation: exists as a real, distinct milestone —
+    /// pinned by `testEachStepAdvancesOnItsRealMilestone` — for the day a
+    /// protocol version gives the viewer its own frame for the relay's
+    /// data-channel splice. **Not called by any production code path
+    /// today.** `webSocketOpened()`'s doc comment explains why: there is no
+    /// wire signal to call it from that would not be earlier than the fact
+    /// it claims. `helloAcknowledged()` reaches `.confirming` (and past it)
+    /// directly, on the one signal that genuinely proves both this step and
+    /// the one before it are true.
     func dataChannelOpened() { advance(to: .confirming) }
 
-    /// Step 3 → 4. Called only from `SessionConnection.onStateChange`'s
-    /// `.connected`, which `SessionConnection.handle(_:)` reaches only on an
-    /// actual `HelloAck` frame — the lease is genuinely granted by the time
-    /// this runs.
+    /// Step 3 → 4 — and, today, the step that also retires `.securing`.
+    /// Called only from `SessionConnection.onStateChange`'s `.connected`,
+    /// which `SessionConnection.handle(_:)` reaches only on an actual
+    /// `HelloAck` frame — the lease is genuinely granted by the time this
+    /// runs. Because production never calls `dataChannelOpened()` (see
+    /// `webSocketOpened()`), `step` is still `.securing` when this runs;
+    /// `advance(to: .loading)` moves it directly there, and
+    /// `ConnectStep`'s ordering is what makes every row-rendering call site
+    /// (`RemoteConnectCeremonyOverlayView.rowState`) read both `.securing`
+    /// *and* `.confirming` as done in the same repaint — one honest label
+    /// covering the span the protocol cannot yet split, checked only once
+    /// the fact it stands for has actually happened.
     func helloAcknowledged() { advance(to: .loading) }
 
     /// Step 4 → done. Called once `WorkspaceWindowController
