@@ -487,6 +487,12 @@ final class HomeSurfaceView: NSView {
     /// match what a fresh terminal pane defaults to.
     private var selectedEngine = EngineLauncher.defaultEngine()
     private var selectedModel: ModelChoice?
+    /// What "installed" means right now (2026-09-01 remote environment
+    /// sharing spec §4, Task 26) — `EngineLauncher.isInstalled` while this
+    /// window is on its own machine, the host's own answer while driving
+    /// another. Set by `WorkspaceWindowController`, which is the one place
+    /// that knows both `isDrivingRemote` and the live `HostStateModel`.
+    var enginePicker: () -> EnginePickerModel = { EnginePickerModel(hostState: nil, isDrivingRemote: false) }
     private let engineIconView = NSImageView()
     private let engineNameLabel = ShellFont.label(font: ShellFont.ui(12.5, .medium), color: ShellPalette.inkSecondary)
     private let modelLabel = ShellFont.label(font: ShellFont.ui(12.5), color: ShellPalette.inkTertiary)
@@ -670,11 +676,23 @@ final class HomeSurfaceView: NSView {
     /// Home has no conversation to lose by switching, so there is nothing
     /// to ask about first.
     private func presentEngineMenu(from anchor: NSView) {
+        let picker = enginePicker()
         let rows = EngineLauncher.selectable.map { engine -> HomeDropdown.Row in
-            let installed = EngineLauncher.isInstalled(engine)
+            let installed = picker.isAvailable(engine)
+            let title: String
+            if installed {
+                title = engine.badgeTitle
+            } else if picker.isDrivingRemote, let reason = picker.unavailableReason(engine) {
+                // Names the host (spec §4, Task 26): an engine missing on
+                // the machine being driven must read differently from one
+                // simply missing on this Mac's own `PATH`.
+                title = "\(engine.badgeTitle) — \(reason)"
+            } else {
+                title = "\(engine.badgeTitle) — not installed"
+            }
             return HomeDropdown.Row(
                 icon: engine.iconImage,
-                title: installed ? engine.badgeTitle : "\(engine.badgeTitle) — not installed",
+                title: title,
                 isCurrent: engine == selectedEngine,
                 isEnabled: installed
             ) { [weak self] in self?.applyEngine(engine) }

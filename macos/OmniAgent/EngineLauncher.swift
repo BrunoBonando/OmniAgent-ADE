@@ -808,3 +808,52 @@ enum EngineLauncher {
         return nil
     }
 }
+
+/// Whether an engine can be picked right now, and why not (2026-09-01 remote
+/// environment sharing spec §4, Task 26).
+///
+/// While `isDrivingRemote`, "installed" means installed on the **host** —
+/// this machine's own `PATH` answers for the wrong computer, so an engine the
+/// host does not have must show as unavailable even when it sits right here
+/// on this Mac's disk. Every engine picker (`HomeView.presentEngineMenu`,
+/// `WorkspaceWindowController.engineMenu(for:)`) builds one of these instead
+/// of calling `EngineLauncher.isInstalled` directly.
+struct EnginePickerModel {
+    /// The window's own reading of the host, or `nil` before the first
+    /// `HostState` has landed. `isAvailable`/`unavailableReason` fall back to
+    /// the local answer whenever this is `nil`, the same "stale beats blank"
+    /// rule the rest of `HostStateModel` follows — a picker must never grey
+    /// out every engine for the one tick before the first push arrives.
+    let hostState: HostStateModel?
+    let isDrivingRemote: Bool
+    /// Seam for tests — `EngineLauncher.isInstalled` in production.
+    var localAvailability: (Engine) -> Bool = { EngineLauncher.isInstalled($0) }
+
+    /// Whether `engine` can be picked right now.
+    ///
+    /// An engine the host has never reported at all — `.shell`/`.copilot`,
+    /// which `HostStatePublisher.Engines` does not carry — has no host
+    /// reading to contradict the local one, so this falls back to it rather
+    /// than blocking an engine the host was simply never asked about.
+    func isAvailable(_ engine: Engine) -> Bool {
+        guard isDrivingRemote,
+              let available = hostState?.engineAvailability[engine.rawValue]
+        else { return localAvailability(engine) }
+        return available
+    }
+
+    /// Why `engine` is greyed out, or `nil` when it is not. Names the host
+    /// only while this is actually reading the host's own "not available"
+    /// answer; the local fallback (an engine the host never mentioned, or
+    /// not driving at all) gets the plain local wording instead, since there
+    /// is no other machine to name.
+    func unavailableReason(_ engine: Engine) -> String? {
+        guard !isAvailable(engine) else { return nil }
+        if isDrivingRemote,
+           hostState?.engineAvailability[engine.rawValue] == false,
+           let name = hostState?.host?.name {
+            return "Not installed on \(name)"
+        }
+        return "\(engine.badgeTitle) is not installed"
+    }
+}

@@ -1041,8 +1041,57 @@ final class SidebarSystemStatsView: NSView {
         HostMetricsSource.shared.removeObserver(self)
         guard window != nil else { return }
         HostMetricsSource.shared.addObserver(self, interval: Self.sampleInterval) { [weak self] snapshot in
-            self?.apply(cpu: snapshot.cpu, memory: snapshot.memory, gpu: snapshot.gpu)
+            // While driving another Mac (spec §4/§5, Task 26), this Mac's
+            // own kernel readings answer for the wrong machine — the dial
+            // stays on whatever `applyHostState` last put there instead.
+            guard let self, !self.isDrivingRemote else { return }
+            self.apply(cpu: snapshot.cpu, memory: snapshot.memory, gpu: snapshot.gpu)
         }
+    }
+
+    /// Whether this window is currently driving another machine (spec §5,
+    /// Task 26) — set by `WorkspaceWindowController` alongside the takeover
+    /// panel. Flipping it re-applies whatever `applyHostState` last held, so
+    /// the dial catches up the instant a takeover begins or ends rather than
+    /// waiting for the next tick from either source — **instantly**, never
+    /// animated: the local and host readings are two different machines'
+    /// numbers, and travelling a needle between them would read as this
+    /// machine's own load lurching rather than as what it actually is, a
+    /// changed subject.
+    var isDrivingRemote = false {
+        didSet {
+            guard isDrivingRemote != oldValue else { return }
+            if isDrivingRemote {
+                applyHostState(lastHostState, animated: false)
+            } else {
+                // Resumes this Mac's own reading immediately rather than
+                // waiting out `sampleInterval`'s next tick — the same
+                // "no lasting blank" rule `SidebarClaudeLimitsView`'s own
+                // `isDrivingRemote` follows.
+                let snapshot = HostMetricsSource.shared.latest
+                apply(cpu: snapshot.cpu, memory: snapshot.memory, gpu: snapshot.gpu, animated: false)
+            }
+        }
+    }
+
+    private var lastHostState: HostStateModel?
+
+    /// The host's own gauges, read from `HostStateModel` — called on every
+    /// `HostState` push. A no-op while not driving: this only ever *narrows*
+    /// what is shown to what the model holds, so there is nothing to reapply
+    /// once a takeover ends besides the kernel readings already resuming on
+    /// their own next tick. `lastHostState` is still recorded either way, so
+    /// a takeover that begins between two pushes has something to show
+    /// immediately rather than waiting out a whole tick.
+    func applyHostState(_ hostState: HostStateModel?, animated: Bool = true) {
+        lastHostState = hostState
+        guard isDrivingRemote else { return }
+        apply(
+            cpu: hostState?.metrics?.cpu,
+            memory: hostState?.metrics?.mem,
+            gpu: hostState?.metrics?.gpu,
+            animated: animated
+        )
     }
 
     /// Split from the `HostMetricsSource` callback so a test can feed
