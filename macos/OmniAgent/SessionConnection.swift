@@ -196,6 +196,21 @@ enum SessionConnectionError: Error, LocalizedError {
     /// a 403 means the host is not registered *yet* and keeps retrying
     /// (`isTokenRefusal`).
     case unauthorized
+    /// A `Hello` the daemon refused — `refusedAtHello`'s own case, carrying
+    /// the machine-readable `code` (Task 14 item 2) alongside the display
+    /// text, rather than folding into `.daemon(String)` and losing it.
+    ///
+    /// `.daemon` stays exactly what it was for every *other* kind of
+    /// failure (an ordinary request the daemon rejected); this case exists
+    /// because one caller — the 2026-09-01 remote environment sharing
+    /// spec's connect ceremony (`RemoteConnectCeremony`, §6) — must *decide
+    /// behaviour* from a refusal ("in use by ‹machine›" resolves on its
+    /// own; "update OmniAgent on ‹machine›" does not) rather than merely
+    /// display it, and `isTerminalRefusal` already reads the same `code` a
+    /// step earlier for exactly that reason. Re-parsing `message` for the
+    /// same answer would be a second, driftable copy of the classification
+    /// this file already owns.
+    case helloRefused(code: String?, message: String)
 
     var errorDescription: String? {
         switch self {
@@ -210,6 +225,8 @@ enum SessionConnectionError: Error, LocalizedError {
         case let .invalidResponse(kind):
             return "Unexpected daemon response: \(kind)."
         case let .daemon(message):
+            return message
+        case let .helloRefused(_, message):
             return message
         }
     }
@@ -1089,7 +1106,7 @@ final class SessionConnection {
             shouldReconnect = false
             nextReconnectDelay = reconnectDelay
         }
-        closeConnection(error: SessionConnectionError.daemon(message))
+        closeConnection(error: SessionConnectionError.helloRefused(code: payload?.code, message: message))
     }
 
     private func connectionFailed(_ error: Error) {
