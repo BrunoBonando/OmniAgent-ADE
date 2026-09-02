@@ -866,32 +866,47 @@ async fn a_frame_split_across_a_tick_still_decodes_intact() {
 /// own `Hello` and never verified. A name built to look like the log's own
 /// format must not survive into the opening row's summary — the identity
 /// *detail* block (relay-asserted) is unaffected and still names the real
-/// IP.
+/// IP. Fix round 2 widened the hostile name past round 1's denylist to the
+/// lookalikes and bidi controls a denylist could never finish enumerating —
+/// fullwidth parentheses, a second dot-lookalike separator, U+2028 LINE
+/// SEPARATOR, and U+202E RIGHT-TO-LEFT OVERRIDE, which could otherwise
+/// visually reorder the real IP sitting right next to the name — and checks
+/// the allowlist property directly (every surviving codepoint in the name
+/// field is ASCII alphanumeric or one of five punctuation marks) rather
+/// than re-listing the specific characters this one test happened to try.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hostile_machine_name_cannot_forge_the_opening_row() {
     let mut harness = support::daemon_with_local_client().await;
-    let mut viewer = harness.connect_remote("Air (1.2.3.4)) \u{b7} Disconnected \u{b7} 3m 00s");
+    let mut viewer = harness.connect_remote(
+        "Air\u{ff08}1.2.3.4\u{ff09}\u{ff09} \u{2022} Disconnected \u{2219} \u{2028}\u{202e}3m 00s",
+    );
     viewer.hello().await;
 
     let opened = harness.local().wait_for_activity("connected").await;
     assert!(
-        opened.summary.starts_with("Connected from "),
+        opened.summary.starts_with("Connected from \""),
         "{}",
         opened.summary
     );
     // The real IP the relay asserted (`asserted_as` in `support/mod.rs`) is
-    // the only parenthetical the row may legitimately end with.
+    // the only parenthetical the row may legitimately end with, and the
+    // quote closing the name is what makes that boundary unambiguous.
     assert!(
-        opened.summary.ends_with("(203.0.113.7)"),
+        opened.summary.ends_with("\" (203.0.113.7)"),
         "{}",
         opened.summary
     );
     let name_field = opened
         .summary
-        .strip_prefix("Connected from ")
-        .and_then(|rest| rest.strip_suffix(" (203.0.113.7)"))
+        .strip_prefix("Connected from \"")
+        .and_then(|rest| rest.strip_suffix("\" (203.0.113.7)"))
         .expect("the row keeps exactly this shape");
-    assert!(!name_field.contains('('), "{}", opened.summary);
-    assert!(!name_field.contains(')'), "{}", opened.summary);
-    assert!(!name_field.contains('\u{b7}'), "{}", opened.summary);
+    for c in name_field.chars() {
+        assert!(
+            c == '?' || c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\''),
+            "disallowed codepoint U+{:04X} ({c:?}) survived into the row: {}",
+            c as u32,
+            opened.summary
+        );
+    }
 }

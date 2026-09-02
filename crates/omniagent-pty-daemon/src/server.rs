@@ -1097,7 +1097,12 @@ where
             vec![ActivityEntry::new(
                 "connected",
                 format!(
-                    "Connected from {} ({})",
+                    // Quoted (fix round 2): the name's extent stays
+                    // unambiguous even if `sanitize_machine_name`'s
+                    // allowlist is widened later, since `"` is not in it —
+                    // the name can never contain one to be confused with
+                    // the quotes wrapping it.
+                    "Connected from \"{}\" ({})",
                     sanitize_machine_name(&machine_name),
                     asserted.ip.as_deref().unwrap_or("unknown IP")
                 ),
@@ -1831,22 +1836,50 @@ impl Drop for ActivityGuard {
     }
 }
 
-/// Bounds and cleans a self-reported machine name before it is rendered into
-/// an activity row's summary (fix round 1, SPEC ❌ 2). `machine_name` comes
-/// straight off the viewer's own `Hello` and is never verified
-/// (`ViewerIdentity`'s own doc: "a label for a human to read and never an
-/// input to a decision") — so a hostile viewer can name itself
-/// `Air (1.2.3.4)) · Disconnected · 3m 00s` and make one forged row's
-/// summary read like this log's own format describing several real ones.
-/// Stripping the characters that format uses as structural separators —
-/// parentheses, the middle dot, and newlines — and bounding the length
-/// closes that without touching the identity block, which is relay-asserted
-/// and already trustworthy (`identity_detail`, below).
+/// Bounds and cleans a self-reported machine name before it is rendered
+/// into an activity row's summary (fix round 1, SPEC ❌ 2; rewritten as an
+/// allowlist in fix round 2). `machine_name` comes straight off the
+/// viewer's own `Hello` and is never verified (`ViewerIdentity`'s own doc:
+/// "a label for a human to read and never an input to a decision").
+///
+/// **An allowlist, not a denylist.** Round 1 denied five specific
+/// codepoints — `(`, `)`, the middle dot, and the two newlines — and a
+/// hostile name walks straight around a denylist with lookalikes it can
+/// never finish enumerating: fullwidth parentheses (U+FF08/U+FF09), other
+/// dot-shaped separators (U+30FB, U+2022, U+2219, U+22C5), U+2028 LINE
+/// SEPARATOR, and — worst — the bidi override/embedding controls
+/// (U+202A-U+202E, U+2066-U+2069), which can visually *reorder* the rest of
+/// the rendered row, including the relay-asserted IP address sitting next
+/// to it — turning a field marked "verified" into one that displays as
+/// something it is not. There is always another lookalike; there is not
+/// another letter, digit, space, hyphen, underscore, period, or apostrophe,
+/// which is everything a real machine name needs ("Bruno's MacBook Pro",
+/// "Mac-mini_2").
+///
+/// **Restricted to ASCII on purpose**, not merely Unicode "alphabetic":
+/// ASCII has no separators, no format/control codepoints, and no
+/// bidirectional text at all, so there is no residual category of
+/// lookalike or reordering codepoint left to reason about. Anything outside
+/// the allowlist is replaced one-for-one with `?` rather than dropped — a
+/// hostile name reads as visibly odd ("Air????????") rather than silently
+/// losing the evidence that something was stripped out of it, the same
+/// reasoning the identity block's own verified glyph exists for. The caller
+/// additionally quotes the result when it renders it (`"{name}"`), so the
+/// name's extent stays unambiguous even if this allowlist is widened
+/// later — `"` itself is not in the allowlist, so the name can never
+/// contain one to be confused with the quotes wrapping it.
 fn sanitize_machine_name(raw: &str) -> String {
     const MAX_LEN: usize = 64;
+    const PLACEHOLDER: char = '?';
     let cleaned: String = raw
         .chars()
-        .filter(|c| !matches!(c, '(' | ')' | '\u{b7}' | '\n' | '\r'))
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'') {
+                c
+            } else {
+                PLACEHOLDER
+            }
+        })
         .collect();
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
@@ -2278,14 +2311,33 @@ async fn send_frame(writer: &SharedWriter, frame: Frame) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The property every `sanitize_machine_name` test in this round leans
+    /// on, so a test failure names the actual offending codepoint instead of
+    /// just failing a `contains` check on the one character the test author
+    /// happened to think of (fix round 2's own instruction: "assert on
+    /// codepoint categories where you can").
+    fn assert_only_allowed_chars(cleaned: &str) {
+        for c in cleaned.chars() {
+            assert!(
+                c == '?' || c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\''),
+                "disallowed codepoint U+{:04X} ({c:?}) survived sanitization in {cleaned:?}",
+                c as u32
+            );
+        }
+    }
+
     /// Fix round 1, SPEC ❌ 2: a hostile self-reported machine name must not
     /// survive into an activity row's summary carrying the separators that
-    /// row's own format uses — the exact hole that let `Air (1.2.3.4)) ·
-    /// Disconnected · 3m 00s` read like two rows instead of the one it
-    /// actually is.
+    /// row's own format uses — the original hole that let
+    /// `Air (1.2.3.4)) · Disconnected · 3m 00s` read like two rows instead
+    /// of the one it actually is. Round 1's denylist caught exactly these
+    /// five codepoints; the allowlist below catches them as a special case
+    /// of "not ASCII alphanumeric or one of five punctuation marks", which
+    /// is the point.
     #[test]
     fn sanitize_machine_name_strips_the_logs_own_separators() {
         let cleaned = sanitize_machine_name("Air (1.2.3.4)) · Disconnected · 3m 00s");
+        assert_only_allowed_chars(&cleaned);
         assert!(!cleaned.contains('('), "{cleaned}");
         assert!(!cleaned.contains(')'), "{cleaned}");
         assert!(!cleaned.contains('\u{b7}'), "{cleaned}");
@@ -2294,8 +2346,61 @@ mod tests {
     #[test]
     fn sanitize_machine_name_strips_embedded_newlines() {
         let cleaned = sanitize_machine_name("Air\nDisconnected\r\n· 3m 00s");
-        assert!(!cleaned.contains('\n'), "{cleaned}");
-        assert!(!cleaned.contains('\r'), "{cleaned}");
+        assert_only_allowed_chars(&cleaned);
+    }
+
+    /// Fix round 2, SPEC ❌ 2 (not addressed by round 1's denylist):
+    /// fullwidth parentheses read as the ASCII ones a reader expects
+    /// `sanitize_machine_name` to have already dealt with.
+    #[test]
+    fn sanitize_machine_name_neutralises_fullwidth_parentheses() {
+        let cleaned =
+            sanitize_machine_name("Air\u{ff08}1.2.3.4\u{ff09}\u{ff09} \u{ff61}Disconnected");
+        assert_only_allowed_chars(&cleaned);
+    }
+
+    /// Every one of these reads as a "·"-shaped separator to a person
+    /// skimming the row, and none of them is the one codepoint round 1
+    /// happened to deny.
+    #[test]
+    fn sanitize_machine_name_neutralises_dot_lookalike_separators() {
+        for dot in ['\u{30fb}', '\u{2022}', '\u{2219}', '\u{22c5}'] {
+            let cleaned = sanitize_machine_name(&format!("Air {dot} Disconnected {dot} 3m 00s"));
+            assert_only_allowed_chars(&cleaned);
+        }
+    }
+
+    /// U+2028 breaks the line without being `\n` — a denylist keyed on the
+    /// ASCII newlines alone never catches it.
+    #[test]
+    fn sanitize_machine_name_neutralises_line_separator() {
+        let cleaned = sanitize_machine_name("Air\u{2028}Disconnected");
+        assert_only_allowed_chars(&cleaned);
+    }
+
+    /// The worst of the round 1 gap: bidi override/embedding controls can
+    /// visually *reorder* the rest of the rendered row, including the
+    /// relay-asserted IP sitting next to it — a verified field displaying as
+    /// something it is not. All nine explicit bidi format controls, not only
+    /// U+202E RIGHT-TO-LEFT OVERRIDE.
+    #[test]
+    fn sanitize_machine_name_neutralises_bidi_override_controls() {
+        for bidi in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}',
+        ] {
+            let cleaned = sanitize_machine_name(&format!("Air{bidi}Disconnected"));
+            assert_only_allowed_chars(&cleaned);
+        }
+    }
+
+    /// One name touching every category the review named at once, rather
+    /// than each in isolation — the realistic shape of an actual attack.
+    #[test]
+    fn sanitize_machine_name_neutralises_a_combined_hostile_name() {
+        let hostile =
+            "Air\u{ff08}1.2.3.4\u{ff09}\u{ff09}\u{2022}Disconnected\u{2028}\u{202e}3m 00s";
+        assert_only_allowed_chars(&sanitize_machine_name(hostile));
     }
 
     #[test]
@@ -2315,9 +2420,21 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_machine_name_of_an_empty_or_all_stripped_name_falls_back() {
+    fn sanitize_machine_name_of_an_empty_or_whitespace_only_name_falls_back() {
         assert_eq!(sanitize_machine_name(""), "Unknown Mac");
-        assert_eq!(sanitize_machine_name("((()))"), "Unknown Mac");
+        assert_eq!(sanitize_machine_name("   "), "Unknown Mac");
+    }
+
+    /// Fix round 2: replaced one-for-one, never dropped — collapsing an
+    /// all-disallowed name to "Unknown Mac" would itself be an invisible
+    /// alteration, the same failure this whole function exists to avoid. A
+    /// name that is nothing but disallowed codepoints reads as visibly odd
+    /// (`"??????"`), not like an ordinary, unremarkable machine name.
+    #[test]
+    fn sanitize_machine_name_of_an_all_disallowed_name_is_visibly_odd_not_a_normal_fallback() {
+        let cleaned = sanitize_machine_name("\u{ff08}\u{ff09}\u{2022}\u{2028}\u{202e}");
+        assert_ne!(cleaned, "Unknown Mac");
+        assert!(cleaned.chars().all(|c| c == '?'), "{cleaned}");
     }
 
     fn asserting(email: Option<&str>) -> AssertedIdentity {
