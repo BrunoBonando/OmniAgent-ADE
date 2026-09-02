@@ -1,11 +1,13 @@
 //! Versioned persistent PTY daemon transport for OmniAgent ADE.
 
+mod activity;
 mod connections;
 pub mod protocol;
 mod relay;
 mod server;
 mod session;
 
+pub use activity::{ActivityContext, ActivityEntry, ActivityLog};
 pub use connections::{AssertedIdentity, ConnectionRegistry, LeaseHolder, ViewerIdentity};
 pub use relay::{relay_config, run_relay, run_relay_with, DeviceCredential, DEVICE_TOKEN_KEY};
 pub use server::{
