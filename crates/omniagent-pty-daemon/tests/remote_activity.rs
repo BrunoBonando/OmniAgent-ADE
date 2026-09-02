@@ -1,19 +1,19 @@
-//! Frames become rows — Task 17,
+//! Frames become rows (Task 17), then rows survive the connection (Task 18) —
 //! `docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`
 //! §8.
 //!
 //! Pure unit-level tests: no daemon, no socket. `ActivityLog::record` maps a
-//! [`Frame`] straight to an [`ActivityEntry`] — testable without
-//! `serve_client` at all.
+//! [`Frame`] straight to an [`ActivityEntry`], and [`append`] is a plain
+//! function over a directory — both testable without `serve_client` at all.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use omniagent_pty_daemon::protocol::{
     encode_raw_payload, AttachPayload, BrainSearchPayload, Frame, ListDirectoryPayload,
     MessageKind, RootsAddProjectPayload, RootsReingestProjectPayload, RootsRenameProjectPayload,
     RootsSetPausedPayload, RootsStartIngestPayload, SessionIdPayload, SettingValue,
 };
-use omniagent_pty_daemon::{ActivityContext, ActivityLog, CreateSession};
+use omniagent_pty_daemon::{append, ActivityContext, ActivityEntry, ActivityLog, CreateSession};
 
 fn frame(kind: MessageKind, payload: impl serde::Serialize) -> Frame {
     Frame::new(kind, 0, serde_json::to_vec(&payload).unwrap())
@@ -470,4 +470,52 @@ fn resize_and_detach_are_deliberately_silent() {
     let ctx = ActivityContext::fixture();
     assert!(log.record(&resize_frame("pane-1"), &ctx).is_none());
     assert!(log.record(&detach_frame("pane-1"), &ctx).is_none());
+}
+
+// ---------------------------------------------------------------------
+// Task 18: the log survives the connection
+// ---------------------------------------------------------------------
+
+fn entry(kind: &'static str, summary: &str) -> ActivityEntry {
+    ActivityEntry {
+        ts: SystemTime::now(),
+        kind,
+        summary: summary.to_string(),
+        detail: None,
+    }
+}
+
+#[test]
+fn entries_append_one_json_object_per_line() {
+    let dir = tempfile::tempdir().unwrap();
+    append(&entry("attach", "Opened Terminal 1"), dir.path()).unwrap();
+    append(&entry("input", "Sent a prompt"), dir.path()).unwrap();
+
+    let text = std::fs::read_to_string(dir.path().join("remote-activity.jsonl")).unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[0]).unwrap()["kind"],
+        "attach"
+    );
+}
+
+#[test]
+fn the_file_rotates_once_and_keeps_exactly_one_previous() {
+    let dir = tempfile::tempdir().unwrap();
+    for _ in 0..40_000 {
+        append(&entry("input", &"x".repeat(256)), dir.path()).unwrap();
+    }
+    assert!(dir.path().join("remote-activity.jsonl").exists());
+    assert!(dir.path().join("remote-activity.1.jsonl").exists());
+    assert!(!dir.path().join("remote-activity.2.jsonl").exists());
+}
+
+#[test]
+fn a_fresh_data_dir_appends_without_error() {
+    let dir = tempfile::tempdir().unwrap();
+    // No prior file at all — `append` must create it rather than requiring
+    // it to already exist.
+    append(&entry("attach", "Opened Terminal 1"), dir.path()).unwrap();
+    assert!(dir.path().join("remote-activity.jsonl").exists());
 }

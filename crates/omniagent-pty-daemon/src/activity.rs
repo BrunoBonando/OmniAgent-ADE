@@ -1,13 +1,12 @@
-//! Frames become rows — spec §8
+//! Frames become rows, then rows survive the connection — spec §8
 //! (`docs/superpowers/specs/2026-09-01-remote-environment-sharing-design.md`).
 //!
 //! **The whole argument for this file is who witnesses what.** Nothing here
 //! is reported by the viewer about itself: [`ActivityLog::record`] maps a
-//! [`Frame`] the daemon actually received into an [`ActivityEntry`]. A
-//! self-reported audit trail on a security surface is worse than none,
-//! because it looks like evidence — so a row exists only when the wire
-//! carried the frame that caused it. A following change persists these rows
-//! to disk so they survive the connection.
+//! [`Frame`] the daemon actually received into an [`ActivityEntry`], and
+//! [`append`] persists it. A self-reported audit trail on a security surface
+//! is worse than none, because it looks like evidence — so a row exists only
+//! when the wire carried the frame that caused it.
 //!
 //! [`ActivityLog::record`] is one `match` on [`MessageKind`], producing
 //! exactly the mutating frames a remote client can reach
@@ -33,6 +32,9 @@
 //! are not frames.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use brain_core::redact::redact;
@@ -548,4 +550,45 @@ impl ActivityLog {
             detail: Some(redact(&text)),
         })
     }
+}
+
+/// The active log file [`append`] writes to, and the one previous file it
+/// keeps once that grows past [`ACTIVITY_LOG_ROTATE_AT`].
+const ACTIVITY_LOG_FILE_NAME: &str = "remote-activity.jsonl";
+const ACTIVITY_LOG_ROTATED_NAME: &str = "remote-activity.1.jsonl";
+const ACTIVITY_LOG_ROTATE_AT: u64 = 8 * 1024 * 1024;
+
+/// Appends one JSON object per line to `<data_dir>/remote-activity.jsonl`,
+/// rotating to `remote-activity.1.jsonl` (replacing any previous one) once
+/// the active file reaches 8 MB — so the log never keeps more than one
+/// previous file and never grows without bound. Task 20 reads this file.
+///
+/// There is deliberately no RPC that reads it back over the wire (spec §12
+/// invariant 8): `ListDirectory` returns names and kinds only, never
+/// contents — see its own doc in `protocol.rs` — and that boundary is what
+/// keeps this file's redacted leftovers safe to write at all.
+///
+/// A write failure here must never be the reason a remote session drops. It
+/// is logged at `warn` on the way out so the fact is on record even if a
+/// caller composes this with `?`, but the caller — the daemon's dispatch
+/// loop — must still swallow the returned `Err` rather than let it end the
+/// connection; a full disk is not a reason to lose someone's terminal.
+pub fn append(entry: &ActivityEntry, data_dir: &Path) -> io::Result<()> {
+    append_inner(entry, data_dir).inspect_err(|error| {
+        tracing::warn!(error = %error, "failed to append to the remote activity log");
+    })
+}
+
+fn append_inner(entry: &ActivityEntry, data_dir: &Path) -> io::Result<()> {
+    let path = data_dir.join(ACTIVITY_LOG_FILE_NAME);
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        if metadata.len() >= ACTIVITY_LOG_ROTATE_AT {
+            std::fs::rename(&path, data_dir.join(ACTIVITY_LOG_ROTATED_NAME))?;
+        }
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut line = serde_json::to_string(entry)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    line.push('\n');
+    file.write_all(line.as_bytes())
 }
