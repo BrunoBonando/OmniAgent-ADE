@@ -1150,9 +1150,6 @@ final class NavigationSidebarView: NSView {
     /// A session row's right-click, same contract: the pin state, the
     /// installed apps and the delete path all live on the controller.
     var sessionMenuProvider: ((SessionGroupNode) -> NSMenu?)?
-    /// A remote machine's session row was clicked — device id, session id,
-    /// title — forwarded to the controller, which owns the remote panes.
-    var onOpenRemoteSession: ((String, String, String) -> Void)?
     /// The plus menu's "Resume remote session…" — the controller opens the
     /// picker of the other Macs' shared sessions
     /// (`RemoteSessionPickerController`).
@@ -1262,9 +1259,6 @@ final class NavigationSidebarView: NSView {
         workspacesTree.workspaceMenuProvider = { [weak self] id in self?.workspaceMenuProvider?(id) }
         workspacesTree.sessionMenuProvider = { [weak self] session in
             self?.sessionMenuProvider?(session)
-        }
-        workspacesTree.onOpenRemoteSession = { [weak self] deviceID, sessionID, title in
-            self?.onOpenRemoteSession?(deviceID, sessionID, title)
         }
         workspacesTree.onShowViewers = { [weak self] id in self?.onShowViewers?(id) }
 
@@ -1388,7 +1382,6 @@ final class NavigationSidebarView: NSView {
         eventTimes: [String: Double] = [:],
         customizations: [String: WorkspaceCustomization] = [:],
         sessionMeta: [String: SessionMeta] = [:],
-        remoteMachines: [RemoteMachineTreeEntry] = [],
         /// Which machines are watching each workspace right now, workspace
         /// id -> machine names (the phase 2 spec's §5). Empty for all but the
         /// rare shared workspace with a viewer on it.
@@ -1429,8 +1422,7 @@ final class NavigationSidebarView: NSView {
             focusedPaneID: focusedPaneID,
             statuses: statuses,
             eventTimes: eventTimes,
-            meta: sessionMeta,
-            remoteMachines: remoteMachines
+            meta: sessionMeta
         )
     }
 

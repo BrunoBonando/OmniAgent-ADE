@@ -380,10 +380,7 @@ final class MenuBarControllerTests: XCTestCase {
         XCTAssertNotNil(controller.liveRemoteConnection)
 
         controller.remoteConnectionProvider = { _ in remote }
-        try await controller.connectRemote(to: RemoteMachine(
-            deviceID: "device-studio", name: "Mac Studio",
-            projection: RemoteControlProjection.Payload(workspaces: [])
-        ))
+        try await controller.connectRemote(to: RemoteMachine(deviceID: "device-studio", name: "Mac Studio"))
         XCTAssertTrue(controller.isDrivingRemote)
         XCTAssertNotNil(controller.liveRemoteConnection, "still stale, untouched by the takeover")
         menuBar.refreshShareIcon()

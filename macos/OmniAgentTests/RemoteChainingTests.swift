@@ -24,7 +24,7 @@ final class RemoteChainingTests: XCTestCase {
 
         let rows = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil,
-            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio", workspaces: [])],
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio")],
             activeRemoteSession: model.activeRemoteSession
         )
         let connect = try XCTUnwrap(rows.first { $0.title.hasPrefix("Connect to") })
@@ -42,7 +42,7 @@ final class RemoteChainingTests: XCTestCase {
 
         let rows = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil,
-            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio", workspaces: [])]
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio")]
         )
         let connect = try XCTUnwrap(rows.first { $0.title.hasPrefix("Connect to") })
         XCTAssertEqual(connect.isEnabled, true)
@@ -54,7 +54,7 @@ final class RemoteChainingTests: XCTestCase {
     func testTheDisabledRowsSubtitleIsTheReason() throws {
         let rows = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil,
-            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio", workspaces: [])],
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio")],
             activeRemoteSession: RemoteSessionInfo(machineName: "Mac Studio", since: .now)
         )
         let connect = try XCTUnwrap(rows.first { $0.title.hasPrefix("Connect to") })
@@ -68,8 +68,8 @@ final class RemoteChainingTests: XCTestCase {
         let rows = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil,
             remoteMachines: [
-                PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio", workspaces: []),
-                PaletteRemoteMachine(deviceID: "d2", name: "MacBook Air", workspaces: []),
+                PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio"),
+                PaletteRemoteMachine(deviceID: "d2", name: "MacBook Air"),
             ]
         )
         let titles = rows.filter { $0.title.hasPrefix("Connect to") }.map(\.title)

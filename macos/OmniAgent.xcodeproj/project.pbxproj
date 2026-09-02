@@ -119,7 +119,6 @@
 		F14F7EAC88714C078186E91F /* Legal in Resources */ = {isa = PBXBuildFile; fileRef = 77CF5C0FD5C94551B0417D0C /* Legal */; };
 		C3024C087D6F4DADA9845AB1 /* WebInspectorPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81B5B5348C434CA695944307 /* WebInspectorPolicy.swift */; };
 		18B748EEB5DE415291BCB67E /* RelayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5598A0B7CA74385AE68E475 /* RelayClient.swift */; };
-		176CDA10539F4F8EBF64D0C3 /* RemoteControlProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89BE6AB17AE744BD8E7AB2B2 /* RemoteControlProjection.swift */; };
 		76D969FAC8EE465EADA8C6B2 /* RemoteMachinesModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E0141C344F4A5D8B4E053D /* RemoteMachinesModel.swift */; };
 		6E03320AECB47DF4B1CDAC5C /* RemoteSharingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E23E2D1FCA68A5D7E5A271F /* RemoteSharingModel.swift */; };
 		F0B34726F69E4D4E90427E2C /* PredictiveEchoModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 667DDB0CD8F44D5F8AAE32AD /* PredictiveEchoModel.swift */; };
@@ -133,7 +132,6 @@
 		3EBCCF1D18484408B3FD3D10 /* WebInspectorPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DB576BDDDFE4FE891EC5B0E /* WebInspectorPolicyTests.swift */; };
 		A86BB6E324284F228230ED97 /* SessionConnectionWebSocketTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 386551E034894649836C21ED /* SessionConnectionWebSocketTests.swift */; };
 		006571FD75CE4F37A952663C /* RelayClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0589B469C1D24C85B483D7FA /* RelayClientTests.swift */; };
-		EF869FA5F880464AAF60464C /* RemoteControlProjectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E75C20F7A074C768581A8A6 /* RemoteControlProjectionTests.swift */; };
 		99AA164ED3A349D5ABDD963D /* RemoteMachinesModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA557DDC2EDC466F84FBB88A /* RemoteMachinesModelTests.swift */; };
 		3EB0A5592ECBC0CAD61862B3 /* RemoteSharingModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A88A7569486D470AE987450A /* RemoteSharingModelTests.swift */; };
 		A1B2C3D40003470AE987450A /* RemoteTakeoverPanelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40004470AE987450A /* RemoteTakeoverPanelTests.swift */; };
@@ -348,7 +346,6 @@
 		77CF5C0FD5C94551B0417D0C /* Legal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Legal; path = Resources/Legal; sourceTree = "<group>"; };
 		81B5B5348C434CA695944307 /* WebInspectorPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebInspectorPolicy.swift; sourceTree = "<group>"; };
 		B5598A0B7CA74385AE68E475 /* RelayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayClient.swift; sourceTree = "<group>"; };
-		89BE6AB17AE744BD8E7AB2B2 /* RemoteControlProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlProjection.swift; sourceTree = "<group>"; };
 		04E0141C344F4A5D8B4E053D /* RemoteMachinesModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteMachinesModel.swift; sourceTree = "<group>"; };
 		1E23E2D1FCA68A5D7E5A271F /* RemoteSharingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSharingModel.swift; sourceTree = "<group>"; };
 		667DDB0CD8F44D5F8AAE32AD /* PredictiveEchoModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoModel.swift; sourceTree = "<group>"; };
@@ -362,7 +359,6 @@
 		7DB576BDDDFE4FE891EC5B0E /* WebInspectorPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebInspectorPolicyTests.swift; sourceTree = "<group>"; };
 		386551E034894649836C21ED /* SessionConnectionWebSocketTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionConnectionWebSocketTests.swift; sourceTree = "<group>"; };
 		0589B469C1D24C85B483D7FA /* RelayClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayClientTests.swift; sourceTree = "<group>"; };
-		8E75C20F7A074C768581A8A6 /* RemoteControlProjectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlProjectionTests.swift; sourceTree = "<group>"; };
 		EA557DDC2EDC466F84FBB88A /* RemoteMachinesModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteMachinesModelTests.swift; sourceTree = "<group>"; };
 		A88A7569486D470AE987450A /* RemoteSharingModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSharingModelTests.swift; sourceTree = "<group>"; };
 		A1B2C3D40004470AE987450A /* RemoteTakeoverPanelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTakeoverPanelTests.swift; sourceTree = "<group>"; };
@@ -540,7 +536,6 @@
 				77CF5C0FD5C94551B0417D0C /* Legal */,
 				81B5B5348C434CA695944307 /* WebInspectorPolicy.swift */,
 				B5598A0B7CA74385AE68E475 /* RelayClient.swift */,
-				89BE6AB17AE744BD8E7AB2B2 /* RemoteControlProjection.swift */,
 				04E0141C344F4A5D8B4E053D /* RemoteMachinesModel.swift */,
 				1E23E2D1FCA68A5D7E5A271F /* RemoteSharingModel.swift */,
 				0716BD968C55A96312DF6F84 /* RemoteConnectCeremony.swift */,
@@ -614,7 +609,6 @@
 				7DB576BDDDFE4FE891EC5B0E /* WebInspectorPolicyTests.swift */,
 				386551E034894649836C21ED /* SessionConnectionWebSocketTests.swift */,
 				0589B469C1D24C85B483D7FA /* RelayClientTests.swift */,
-				8E75C20F7A074C768581A8A6 /* RemoteControlProjectionTests.swift */,
 				EA557DDC2EDC466F84FBB88A /* RemoteMachinesModelTests.swift */,
 				A88A7569486D470AE987450A /* RemoteSharingModelTests.swift */,
 				A1B2C3D40004470AE987450A /* RemoteTakeoverPanelTests.swift */,
@@ -873,7 +867,6 @@
 				10000000000000000000027 /* UsageAnalytics.swift in Sources */,
 				C3024C087D6F4DADA9845AB1 /* WebInspectorPolicy.swift in Sources */,
 				18B748EEB5DE415291BCB67E /* RelayClient.swift in Sources */,
-				176CDA10539F4F8EBF64D0C3 /* RemoteControlProjection.swift in Sources */,
 				76D969FAC8EE465EADA8C6B2 /* RemoteMachinesModel.swift in Sources */,
 				6E03320AECB47DF4B1CDAC5C /* RemoteSharingModel.swift in Sources */,
 				F0B34726F69E4D4E90427E2C /* PredictiveEchoModel.swift in Sources */,
@@ -937,7 +930,6 @@
 				3EBCCF1D18484408B3FD3D10 /* WebInspectorPolicyTests.swift in Sources */,
 				A86BB6E324284F228230ED97 /* SessionConnectionWebSocketTests.swift in Sources */,
 				006571FD75CE4F37A952663C /* RelayClientTests.swift in Sources */,
-				EF869FA5F880464AAF60464C /* RemoteControlProjectionTests.swift in Sources */,
 				99AA164ED3A349D5ABDD963D /* RemoteMachinesModelTests.swift in Sources */,
 				3EB0A5592ECBC0CAD61862B3 /* RemoteSharingModelTests.swift in Sources */,
 				A1B2C3D40003470AE987450A /* RemoteTakeoverPanelTests.swift in Sources */,

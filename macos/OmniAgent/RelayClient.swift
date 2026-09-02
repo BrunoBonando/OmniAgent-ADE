@@ -178,7 +178,7 @@ final class RelayClient {
                 withJSONObject: row,
                 // `.sortedKeys` for `write(_:to:)`'s change detection;
                 // `.withoutEscapingSlashes` so the URL in the row reads as a
-                // URL — `RemoteControlProjection.encode`'s reasoning.
+                // URL rather than `https:\/\/…`.
                 options: [.sortedKeys, .withoutEscapingSlashes]
             ),
             let json = String(data: data, encoding: .utf8)

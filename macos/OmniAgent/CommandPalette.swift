@@ -85,10 +85,6 @@ enum PaletteAction: Equatable {
     /// project, the closest real "go look at this" action available without
     /// a map/graph view.
     case revealProjectContext(project: String)
-    /// One of another machine's shared sessions (the remote-session-control
-    /// spec's §4 "Spotlight"), opened — or re-focused — on this Desk through
-    /// `WorkspaceWindowController.openRemoteSession`.
-    case openRemoteSession(deviceID: String, sessionID: String, title: String)
     /// A Help page — the privacy policy or the third-party notices — opened
     /// in the default browser.
     case openLegal(LegalDocument)
@@ -246,32 +242,14 @@ struct PaletteWatchedWorkspace: Equatable {
     let viewerNames: [String]
 }
 
-/// One **pane** another machine shares — a terminal, since that is the only
-/// kind a viewer can attach to. A small struct rather than a tuple because
-/// rows are compared in tests, and tuples are not `Equatable`.
-///
-/// Named for the pane on purpose: `id` is a daemon session id, never the
-/// host's session-*group* id, and a row built from the wrong one attaches to
-/// nothing.
-struct PaletteRemotePane: Equatable {
-    let id: String
-    let title: String
-}
-
-/// One projected workspace on a remote machine.
-struct PaletteRemoteWorkspace: Equatable {
-    let id: String
-    let name: String
-    let panes: [PaletteRemotePane]
-}
-
-/// One online machine from the relay's device list with what it shares —
-/// the spotlight's own copy of `RemoteMachine`, flattened to the names its
-/// rows print and match.
+/// One online machine from the relay's device list — the spotlight's own
+/// copy of `RemoteMachine`. Task 29 collapses the projection this used to
+/// carry (workspaces, sessions, panes) away entirely: a viewer's app now
+/// swaps its whole connection onto the host's daemon, so there is nothing
+/// below the machine for a row to name any more — see `connectRemoteMachine`.
 struct PaletteRemoteMachine: Equatable {
     let deviceID: String
     let name: String
-    let workspaces: [PaletteRemoteWorkspace]
 }
 
 struct PaletteCommand: Equatable {
@@ -465,55 +443,6 @@ struct CommandPaletteModel: Equatable {
                         keywords: projectLabel,
                         section: .sessions,
                         subtitle: projectLabel
-                    )
-                )
-            }
-        }
-        // Another machine's shared sessions, under the same Sessions heading:
-        // one row per machine, then one per attachable pane, each saying
-        // which machine and workspace it lives on (spec §4 "Spotlight").
-        for machine in remoteMachines {
-            let panes = machine.workspaces.flatMap { workspace in
-                workspace.panes.map { (workspace: workspace, pane: $0) }
-            }
-            commands.append(
-                PaletteCommand(
-                    id: "remote-machine:\(machine.deviceID)",
-                    title: machine.name,
-                    detail: "remote",
-                    // The machine row opens its first attachable pane — the
-                    // closest thing to "go to that Mac" a pane-shaped app
-                    // has. A machine sharing nothing (or sharing only
-                    // editors) is still findable; it just has nowhere to go
-                    // yet.
-                    action: panes.first.map { first in
-                        PaletteAction.openRemoteSession(
-                            deviceID: machine.deviceID,
-                            sessionID: first.pane.id,
-                            title: first.pane.title
-                        )
-                    } ?? PaletteAction.noop,
-                    keywords: "remote \(machine.name)",
-                    section: .sessions,
-                    subtitle: "Remote machine",
-                    symbol: "desktopcomputer.and.arrow.down"
-                )
-            )
-            for entry in panes {
-                commands.append(
-                    PaletteCommand(
-                        id: "remote:\(machine.deviceID)/\(entry.pane.id)",
-                        title: entry.pane.title,
-                        detail: "remote",
-                        action: .openRemoteSession(
-                            deviceID: machine.deviceID,
-                            sessionID: entry.pane.id,
-                            title: entry.pane.title
-                        ),
-                        keywords: "remote \(machine.name) \(entry.workspace.name)",
-                        section: .sessions,
-                        subtitle: "\(machine.name) · \(entry.workspace.name)",
-                        symbol: "desktopcomputer.and.arrow.down"
                     )
                 )
             }

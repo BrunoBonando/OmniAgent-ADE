@@ -23,12 +23,6 @@ use std::time::Duration;
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
 
-/// A phase-2 (v2) projection sharing workspace `/a`, whose one session group
-/// holds the single attachable pane `s1`.
-const PROJECTION: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
-"sessions":[{"id":"g1","label":"Session 1","order":0,
-"panes":[{"id":"s1","title":"shell","engine":"shell","kind":"terminal","order":0}]}]}]}"#;
-
 fn command_session(id: &str, script: &str) -> CreateSession {
     CreateSession {
         id: id.into(),
@@ -167,11 +161,6 @@ async fn local_and_remote_clients_asserting(
     tokio::spawn(server.run_until(stopped));
     ctx.registry
         .create_session(command_session("s1", "cat"))
-        .unwrap();
-    ctx.settings
-        .lock()
-        .unwrap()
-        .set_setting("remote_control", PROJECTION)
         .unwrap();
     // The switch and the token: the other two thirds of spec §2's condition,
     // without which the viewer below is refused before it can be seen.

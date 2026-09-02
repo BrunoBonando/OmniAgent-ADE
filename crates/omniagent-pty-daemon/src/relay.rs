@@ -505,11 +505,9 @@ mod tests {
     }
 
     /// Sharing is machine-wide now, not per-workspace: turning it on opens
-    /// the tunnel with `remote_control` never touched at all, and that
-    /// machine must still be reachable — it is exactly the idle Mac a viewer
-    /// wants to open a session *on*. The tunnel (`relay_config`) and the
-    /// per-session authorization list (`remote_session_ids`) are decoupled
-    /// concerns: the former no longer reads `remote_control` at all.
+    /// the tunnel with no projection row involved at all, and that machine
+    /// must still be reachable — it is exactly the idle Mac a viewer wants
+    /// to open a session *on*.
     #[test]
     fn sharing_enabled_opens_the_tunnel_with_no_projection_at_all() {
         let store = Store::open_in_memory().unwrap();
@@ -523,8 +521,5 @@ mod tests {
             .set_setting(crate::server::REMOTE_SHARING_KEY, r#"{"enabled":true}"#)
             .unwrap();
         assert_eq!(relay_config(&store), Some(cred("https://r")));
-        // …and it stays an authorization boundary of its own: no projection
-        // shares no sessions, even with the tunnel up.
-        assert!(crate::server::remote_session_ids(&store).is_empty());
     }
 }

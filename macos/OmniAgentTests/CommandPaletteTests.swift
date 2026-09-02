@@ -43,31 +43,38 @@ final class CommandPaletteTests: XCTestCase {
         )
     }
 
-    /// The standing rule reaching across machines: every session another Mac
-    /// shares (the remote-session-control spec's §4 "Spotlight") is a row,
-    /// named by the machine and workspace it lives in — and the machine
-    /// itself is one too.
-    func testRemoteSessionsAreSpotlightRowsNamedByMachineAndWorkspace() throws {
+    /// The standing rule reaching across machines, collapsed to one row per
+    /// machine (2026-09-01 remote environment sharing spec §1/§10, Task 29):
+    /// there is nothing below the machine any more — a viewer's whole app
+    /// swaps onto the host's daemon rather than browsing a projection of its
+    /// panes — so the spotlight offers **Connect to ‹machine›** once per
+    /// online device, never one row per pane.
+    func testTheRemotePaletteRowsAreOneMachineEachNotOnePaneEach() {
+        let rows = CommandPaletteModel.build(
+            panes: [], paneOrder: [], focusedPaneID: nil,
+            remoteMachines: [
+                PaletteRemoteMachine(deviceID: "d1", name: "Studio"),
+                PaletteRemoteMachine(deviceID: "d2", name: "Air"),
+            ]
+        )
+
+        let remote = rows.filter { $0.title.hasPrefix("Connect to") }
+        XCTAssertEqual(remote.count, 2)
+    }
+
+    /// The one row a machine gets: named, findable by the machine's name, and
+    /// wired to `connectRemoteMachine`.
+    func testTheConnectRowNamesTheMachineAndConnects() throws {
         let commands = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil,
-            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Studio", workspaces: [
-                PaletteRemoteWorkspace(id: "/a", name: "Alpha", panes: [.init(id: "s1", title: "migrate")])
-            ])])
-        let row = try XCTUnwrap(commands.first { $0.id == "remote:d1/s1" })
-        XCTAssertEqual(row.title, "migrate")
-        XCTAssertEqual(row.subtitle, "Studio · Alpha")
-        XCTAssertEqual(row.symbol, "desktopcomputer.and.arrow.down")
-        XCTAssertEqual(row.keywords, "remote Studio Alpha")
-        XCTAssertEqual(row.action, .openRemoteSession(deviceID: "d1", sessionID: "s1", title: "migrate"))
-        XCTAssertEqual(row.section, .sessions)
-        XCTAssertEqual(row.detail, "remote")
-        let machineRow = try XCTUnwrap(commands.first { $0.id == "remote-machine:d1" })
-        XCTAssertEqual(machineRow.title, "Studio")
-        XCTAssertEqual(machineRow.subtitle, "Remote machine")
-        XCTAssertEqual(
-            machineRow.action, .openRemoteSession(deviceID: "d1", sessionID: "s1", title: "migrate"),
-            "the machine row opens its first session"
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Studio")]
         )
+        let row = try XCTUnwrap(commands.first { $0.id == "remote-connect:d1" })
+        XCTAssertEqual(row.title, "Connect to Studio")
+        XCTAssertEqual(row.symbol, "desktopcomputer.and.arrow.down")
+        XCTAssertEqual(row.keywords, "connect remote takeover drive machine Studio")
+        XCTAssertEqual(row.action, .connectRemoteMachine(deviceID: "d1"))
+        XCTAssertEqual(row.section, .places)
     }
 
     /// Settings › Accounts' one button is a spotlight row of its own — the
@@ -488,7 +495,7 @@ final class CommandPaletteTests: XCTestCase {
     func testConnectAndEndRemoteSessionAreSpotlightRows() throws {
         let idle = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil,
-            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio", workspaces: [])]
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio")]
         )
         let connect = try XCTUnwrap(idle.first { $0.id == "remote-connect:d1" })
         XCTAssertEqual(connect.title, "Connect to Mac Studio")
@@ -500,7 +507,7 @@ final class CommandPaletteTests: XCTestCase {
 
         let driving = CommandPaletteModel.build(
             panes: [], paneOrder: [], focusedPaneID: nil,
-            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio", workspaces: [])],
+            remoteMachines: [PaletteRemoteMachine(deviceID: "d1", name: "Mac Studio")],
             activeRemoteSession: RemoteSessionInfo(machineName: "Mac Studio", since: .now)
         )
         let end = try XCTUnwrap(driving.first { $0.id == "remote:end-session" })

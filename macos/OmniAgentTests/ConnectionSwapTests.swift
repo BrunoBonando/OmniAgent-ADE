@@ -21,14 +21,10 @@ import XCTest
 final class ConnectionSwapTests: XCTestCase {
     // MARK: - Fixtures
 
-    /// A machine to drive. The projection is empty on purpose: nothing in the
-    /// swap reads it — the viewer sees the host's real workspaces because it
-    /// is reading the host's own rows over the same RPCs (spec §1).
-    private let studio = RemoteMachine(
-        deviceID: "device-studio",
-        name: "Mac Studio",
-        projection: RemoteControlProjection.Payload(workspaces: [])
-    )
+    /// A machine to drive. The viewer sees the host's real workspaces because
+    /// it is reading the host's own rows over the same RPCs (spec §1) — this
+    /// type carries nothing but what the relay itself knows any more.
+    private let studio = RemoteMachine(deviceID: "device-studio", name: "Mac Studio")
 
     private let air = RemoteViewer(
         viewerID: "v-air",
@@ -262,37 +258,6 @@ final class ConnectionSwapTests: XCTestCase {
         )
     }
 
-    // MARK: - The poll does not pull the rug
-
-    /// A machine the window is driving is no longer the model's to close. Its
-    /// connection is the one the whole window is running on, and a relay list
-    /// that flickers — a Core deploy, a lost call — must not end the session.
-    func testThePollLeavesTheDrivenMachinesConnectionAlone() async {
-        let driven = RecordingRemoteConnection()
-        let other = RecordingRemoteConnection()
-        let model = RemoteMachinesModel(
-            relay: RelayClient(
-                baseURL: URL(string: "http://127.0.0.1:1")!,
-                session: .shared,
-                accessToken: { "tok" }
-            ),
-            makeConnection: { url in url.absoluteString.contains("device-studio") ? driven : other },
-            isSignedIn: { true },
-            projectionReader: { _, completion in completion(.success(nil)) }
-        )
-        model.apply([
-            RelayClient.Device(deviceID: "device-studio", name: "Mac Studio", online: true, lastSeenAt: nil),
-            RelayClient.Device(deviceID: "device-air", name: "MacBook Air", online: true, lastSeenAt: nil),
-        ])
-        model.drivenDeviceID = "device-studio"
-
-        // Both drop off the relay's answer at once.
-        model.apply([])
-
-        XCTAssertEqual(driven.disconnects, 0, "the window is running on this one")
-        XCTAssertEqual(other.disconnects, 1, "every other machine is closed as before")
-    }
-
     // MARK: - A session's cwd never guesses this Mac's own disk (Task 28 fix
     // round 2, 2026-09-01 remote environment sharing spec §4/§6)
 
@@ -473,20 +438,5 @@ final class ConnectionSwapTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
         addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
         return defaults
-    }
-}
-
-/// A `RemoteConnection` that only counts what the model asked it to do.
-private final class RecordingRemoteConnection: RemoteConnection {
-    var onStateChange: ((ConnectionState) -> Void)?
-    var onError: ((Error) -> Void)?
-    var connects = 0
-    var disconnects = 0
-
-    func connect() { connects += 1 }
-    func disconnect() { disconnects += 1 }
-
-    func getSetting(key: String, completion: @escaping (Result<String?, Error>) -> Void) {
-        completion(.success(nil))
     }
 }

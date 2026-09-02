@@ -49,11 +49,13 @@ async fn start_daemon_with_relay(
     start_daemon_with_projection(root, port, ping_every, PROJECTION, true).await
 }
 
-/// [`start_daemon_with_relay`] with the `remote_control` row and the
+/// [`start_daemon_with_relay`] with the stale `remote_control` row and the
 /// `remote_sharing` switch spelled out separately — the seam the "sharing is
-/// decoupled from the projection" cases need. `remote_control` still gates
-/// which sessions a connected viewer may attach to; `sharing_enabled` alone
-/// gates whether the control socket dials at all.
+/// decoupled from the projection" cases need. `remote_control` gates nothing
+/// any more (Task 6 removed session-id confinement from `authorize_remote`,
+/// and Task 29 deleted the reader entirely); it is written here only to prove
+/// a leftover row from before that deletion cannot narrow access.
+/// `sharing_enabled` alone gates whether the control socket dials at all.
 async fn start_daemon_with_projection(
     root: &std::path::Path,
     port: u16,

@@ -40,46 +40,16 @@ struct WorkspaceTreeEntry: Equatable {
     }
 }
 
-/// One online machine and what it shares — the input shape of the sidebar's
-/// remote sections (the remote-session-control spec's §4 "Viewer side").
-/// Assembled by `WorkspaceWindowController` from `RemoteMachinesModel`'s
-/// live device list; the tree renders it after the local rows.
-struct RemoteMachineTreeEntry: Equatable {
-    let deviceID: String
-    let name: String
-    let workspaces: [WorkspaceTreeEntry]
-}
-
 /// A workspace row: disclosure chevron, folder icon (the open variant while
 /// expanded), display name. Pressing it folds — selection belongs to the
 /// session rows underneath.
 final class WorkspaceRowView: ShellRowView {
-    /// What the trailing mark says. `.shared` is this Mac offering the
-    /// workspace to other machines (the globe); `.viewing` is a workspace
-    /// that lives on *another* Mac and is being watched from here. The glyph
-    /// is one of only two things a remote row is allowed to differ by — the
-    /// other is where a click goes (the phase-2 spec's §2 "Rendering",
-    /// docs/superpowers/specs/2026-08-31-remote-session-control-phase-2-design.md).
-    enum RemoteMark: String {
-        case shared = "globe"
-        case viewing = "desktopcomputer.and.arrow.down"
-    }
-
     let workspaceID: String
-    /// Which mark the row wears when it wears one — readable so a test can
-    /// tell a shared workspace from a watched one without decoding an image.
-    let mark: RemoteMark
     private(set) var isExpanded: Bool
     /// Held so the fold state is a fact a test can read off the icon.
     private(set) var folderGlyph: ShellGlyphView
     private let chevron: ShellGlyphView
     private let titleField: NSTextField
-    /// The Remote Control marker, trailing. An `NSImageView` over an SF
-    /// Symbol rather than a `ShellGlyphView`: the vocabulary has no globe,
-    /// and one drawn by hand would be a lot of bezier for a 16 pt mark.
-    /// Held (not conditionally added) so a test can read the fact off the
-    /// row the way `folderGlyph` reads the fold.
-    private(set) var remoteGlyph: NSImageView
     /// How many other Macs are watching a pane of this workspace, beside the
     /// globe (the phase 2 spec's §5). Hidden at zero, which is nearly always
     /// — presence is news, and a permanent "0" would be noise on every row.
@@ -99,23 +69,12 @@ final class WorkspaceRowView: ShellRowView {
         label: String,
         expanded: Bool,
         tint: NSColor? = nil,
-        remoteControl: Bool = false,
-        mark: RemoteMark = .shared,
         viewerNames: [String] = []
     ) {
         workspaceID = id
-        self.mark = mark
         isExpanded = expanded
         chevron = ShellGlyphView(.chevronRight, color: ShellPalette.chevron, size: 15, lineWidth: 1.8)
         viewerBadge = WorkspaceViewerBadgeView(count: viewerNames.count)
-        remoteGlyph = NSImageView(
-            image: NSImage(
-                systemSymbolName: mark.rawValue,
-                accessibilityDescription: mark == .shared
-                    ? "Remote Control on"
-                    : "Shared from another Mac"
-            ) ?? NSImage()
-        )
         folderGlyph = ShellGlyphView(
             expanded ? .folderOpen : .folder,
             color: tint ?? ShellPalette.folderGlyph,
@@ -134,26 +93,14 @@ final class WorkspaceRowView: ShellRowView {
         layer?.cornerCurve = .continuous
         chevron.rotated = expanded
 
-        remoteGlyph.translatesAutoresizingMaskIntoConstraints = false
-        remoteGlyph.contentTintColor = ShellPalette.folderGlyph
-        remoteGlyph.isHidden = !remoteControl
-        remoteGlyph.toolTip = mark == .shared
-            ? "Remote Control is on for this workspace"
-            : "This workspace lives on another Mac"
-
-        // Only a workspace *this* Mac shares can be watched — a `.viewing`
-        // row is somebody else's workspace, and its viewers are their
-        // business, not something this sidebar has a roster for.
-        viewerBadge.isHidden = mark != .shared || viewerNames.isEmpty
+        viewerBadge.isHidden = viewerNames.isEmpty
         viewerBadge.toolTip = viewerNames.isEmpty
             ? nil
             : "Watched by \(viewerNames.joined(separator: ", "))"
-
-        // A stack rather than a chain of constraints: the badge comes and
-        // goes with the roster, and `NSStackView` takes a hidden arranged
-        // subview out of the layout, so the name reclaims the space instead
-        // of stopping short of a badge that is not there.
-        let marks = NSStackView(views: [viewerBadge, remoteGlyph])
+        // `NSStackView` takes a hidden arranged subview out of the layout, so
+        // the name reclaims the space instead of stopping short of a badge
+        // that is not there.
+        let marks = NSStackView(views: [viewerBadge])
         marks.orientation = .horizontal
         marks.alignment = .centerY
         marks.spacing = 5
@@ -170,7 +117,7 @@ final class WorkspaceRowView: ShellRowView {
             folderGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             titleField.leadingAnchor.constraint(equalTo: folderGlyph.trailingAnchor, constant: 6),
-            // The title stops short of the marks whether or not the globe is
+            // The title stops short of the marks whether or not the badge is
             // shown: a hidden view still holds its frame, so one pair of
             // constraints serves both states and the name never slides under
             // the mark.
@@ -179,12 +126,9 @@ final class WorkspaceRowView: ShellRowView {
 
             marks.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             marks.centerYAnchor.constraint(equalTo: centerYAnchor),
-            remoteGlyph.widthAnchor.constraint(equalToConstant: 16),
-            remoteGlyph.heightAnchor.constraint(equalToConstant: 16),
         ])
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        // VoiceOver keeps the one fact the glyph carries: whose Mac this is.
-        setAccessibilityLabel(mark == .shared ? "Workspace \(label)" : "Remote workspace \(label)")
+        setAccessibilityLabel("Workspace \(label)")
     }
 
     @available(*, unavailable)
@@ -361,9 +305,6 @@ final class WorkspacesTreeView: NSView {
     /// A session row's right-click, same contract: the menu reads live state
     /// (the pin, the installed apps) the row never holds.
     var sessionMenuProvider: ((SessionGroupNode) -> NSMenu?)?
-    /// A remote session row's click — the machine's device id, the daemon
-    /// session id and its title, for `openRemoteSession` on the controller.
-    var onOpenRemoteSession: ((_ deviceID: String, _ sessionID: String, _ title: String) -> Void)?
     /// The viewer count on a workspace row was pressed: whoever mounts the
     /// tree opens the list of machines watching it (the phase 2 spec's §5).
     /// Routed up like `workspaceMenuProvider` — the roster lives on the
@@ -392,9 +333,6 @@ final class WorkspacesTreeView: NSView {
     /// The Status-mode bucket headers on screen, in order — empty in the
     /// other two modes.
     private(set) var renderedBucketTitles: [String] = []
-    /// The remote machines the last `reload` drew sections for, in order —
-    /// empty while no other Mac is sharing anything.
-    private(set) var renderedRemoteMachineNames: [String] = []
 
     /// What `reload` was last handed, so toggling a disclosure or switching
     /// the group mode can re-render without the controller having to push the
@@ -405,7 +343,6 @@ final class WorkspacesTreeView: NSView {
         var statuses: [String: RemoteSessionStatus] = [:]
         var eventTimes: [String: Double] = [:]
         var meta: [String: SessionMeta] = [:]
-        var remoteMachines: [RemoteMachineTreeEntry] = []
     }
 
     private var lastRender = Render()
@@ -439,16 +376,14 @@ final class WorkspacesTreeView: NSView {
         focusedPaneID: String?,
         statuses: [String: RemoteSessionStatus],
         eventTimes: [String: Double] = [:],
-        meta: [String: SessionMeta] = [:],
-        remoteMachines: [RemoteMachineTreeEntry] = []
+        meta: [String: SessionMeta] = [:]
     ) {
         lastRender = Render(
             entries: entries,
             focusedPaneID: focusedPaneID,
             statuses: statuses,
             eventTimes: eventTimes,
-            meta: meta,
-            remoteMachines: remoteMachines
+            meta: meta
         )
         renderedWorkspaceIDs = []
         renderedSessionIDs = []
@@ -464,7 +399,6 @@ final class WorkspacesTreeView: NSView {
         case .status: renderStatusBuckets(entries)
         case .lastUpdated: renderLastUpdated(entries)
         }
-        renderRemoteMachines(remoteMachines)
     }
 
     /// The header's group-by choice. Persists, then re-renders on the spot
@@ -522,56 +456,6 @@ final class WorkspacesTreeView: NSView {
         }
     }
 
-    /// The remote sections, after whichever local shape is chosen: one
-    /// bucket-voice header per machine — "<name> · remote" — then its
-    /// projected workspaces, drawn through the *same* rows the local tree
-    /// uses. Same disclosure row, same fold, same folder tint, same session
-    /// rows with a dot per pane, same empty placeholder: the phase-2 spec's
-    /// §2 leaves a remote row exactly two ways to differ — the trailing
-    /// glyph, and that a click opens the session on its own machine instead
-    /// of selecting one of ours.
-    ///
-    /// Rendered in every group mode, because another Mac's sessions have no
-    /// local status or event times to bucket by. Their order is the host's
-    /// and is never re-sorted here: `SessionMeta.arrange` reads *this* Mac's
-    /// pins, and applying them to another machine's tree is exactly the
-    /// drift the shared projection exists to prevent.
-    private func renderRemoteMachines(_ machines: [RemoteMachineTreeEntry]) {
-        renderedRemoteMachineNames = machines.map(\.name)
-        for machine in machines {
-            add(WorkspacesBucketHeaderView(title: "\(machine.name) · remote"))
-            for workspace in machine.workspaces {
-                // The ids arrive prefixed per machine, so the fold is stored
-                // per remote workspace and cannot collide with a local one.
-                let expanded = !collapsed.contains(workspace.id)
-                let workspaceRow = WorkspaceRowView(
-                    id: workspace.id,
-                    label: workspace.label,
-                    expanded: expanded,
-                    tint: workspace.tint,
-                    remoteControl: true,
-                    mark: .viewing
-                )
-                workspaceRow.onPress = { [weak self] in self?.toggle(workspace.id) }
-                add(workspaceRow)
-
-                guard expanded else { continue }
-                if workspace.sessions.isEmpty {
-                    // An enabled workspace with nothing running is projected
-                    // with no sessions — the host draws the same placeholder.
-                    add(WorkspaceEmptyRowView())
-                    continue
-                }
-                for session in workspace.sessions {
-                    addSessionRow(
-                        session,
-                        remote: (deviceID: machine.deviceID, tint: workspace.tint)
-                    )
-                }
-            }
-        }
-    }
-
     /// Last-updated mode: one flat list, most recent status event first.
     private func renderLastUpdated(_ entries: [WorkspaceTreeEntry]) {
         let sessions = WorkspacesGrouping.lastUpdatedFirst(
@@ -581,18 +465,11 @@ final class WorkspacesTreeView: NSView {
         for session in sessions { addSessionRow(session) }
     }
 
-    /// One session row. `remote` names the machine a session lives on when it
-    /// is not this one: the row itself is identical — same dots, indent,
-    /// tint and label — but the press opens the session over that machine's
-    /// connection, and the local-only wiring is left off. Rename would write
-    /// *this* Mac's session meta for an id that is not ours, and the hover
-    /// card reads local statuses and event times; neither is a fact about
-    /// the other Mac.
+    /// One session row.
     private func addSessionRow(
         _ session: SessionGroupNode,
         nested: Bool = false,
-        workspaceLabel: String? = nil,
-        remote: (deviceID: String, tint: NSColor?)? = nil
+        workspaceLabel: String? = nil
     ) {
         renderedSessionIDs.append(session.id)
         let row = SessionRowView(
@@ -609,30 +486,14 @@ final class WorkspacesTreeView: NSView {
             workspaceName: nested ? workspaceLabel : nil,
             // The rail wears the workspace's folder colour; looked up here so
             // the Status and Last-updated modes get it too, not just the tree.
-            // A remote session's workspace is not in `entries` at all — its
-            // tint is the host's, carried by the projection.
-            tint: remote?.tint ?? lastRender.entries.first { $0.id == session.project }?.tint
+            tint: lastRender.entries.first { $0.id == session.project }?.tint
         )
-        if let remote {
-            // The attachable id is a pane's, as the projection schema says —
-            // and only a *terminal* pane's: an editor or browser id names
-            // nothing the daemon has a session behind, so a press on it would
-            // open an empty pane that never attaches. A session of nothing
-            // but editors still renders, with its dots; it simply has no door
-            // in it.
-            if let paneID = session.terminalPaneIDs.first {
-                row.onPress = { [weak self] in
-                    self?.onOpenRemoteSession?(remote.deviceID, paneID, session.label)
-                }
-            }
-        } else {
-            row.onPress = { [weak self] in self?.onSelectSession?(session) }
-            row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
-            row.onHover = { [weak self] inside in
-                self?.onHoverTarget?(inside ? .session(session.id) : nil)
-            }
-            row.onContextMenu = { [weak self] in self?.sessionMenuProvider?(session) }
+        row.onPress = { [weak self] in self?.onSelectSession?(session) }
+        row.onRename = { [weak self] name in self?.onRenameSession?(session, name) }
+        row.onHover = { [weak self] inside in
+            self?.onHoverTarget?(inside ? .session(session.id) : nil)
         }
+        row.onContextMenu = { [weak self] in self?.sessionMenuProvider?(session) }
         add(row)
     }
 
@@ -647,8 +508,7 @@ final class WorkspacesTreeView: NSView {
             focusedPaneID: lastRender.focusedPaneID,
             statuses: lastRender.statuses,
             eventTimes: lastRender.eventTimes,
-            meta: lastRender.meta,
-            remoteMachines: lastRender.remoteMachines
+            meta: lastRender.meta
         )
     }
 

@@ -19,9 +19,8 @@ import Foundation
 ///   because a mismatch here silently disables remote sharing on the
 ///   daemon's side).
 /// - `remote_control_blocked` (`SettingsKey.remoteControlBlocked`) — viewer
-///   ids this Mac refuses, `["<viewer_id>", …]` (`RemoteControlProjection`'s
-///   `encodeEnabled`/`decodeEnabled` shape — the same sorted-JSON-array
-///   convention, reused rather than re-implemented). The daemon only ever
+///   ids this Mac refuses, `["<viewer_id>", …]` (`ClosedWorkspacesCodec`'s
+///   sorted-JSON-array shape, reused rather than re-implemented). The daemon only ever
 ///   *adds* to this row (a kick has to hold with the app closed); the app
 ///   only ever removes from it, and only through `unblock(_:)`.
 ///
@@ -244,7 +243,7 @@ final class RemoteSharingModel {
         guard let store else { return }
         store.get(SettingsKey.remoteControlBlocked) { [weak self] result in
             guard let self, case let .success(raw) = result else { return }
-            apply(blocked: RemoteControlProjection.decodeEnabled(raw).sorted())
+            apply(blocked: ClosedWorkspacesCodec.deserialize(raw).sorted())
         }
     }
 
@@ -298,7 +297,7 @@ final class RemoteSharingModel {
                 if case let .failure(error) = result { onWriteFailed?(error) }
                 return
             }
-            var ids = Set(RemoteControlProjection.decodeEnabled(raw))
+            var ids = Set(ClosedWorkspacesCodec.deserialize(raw))
             guard ids.contains(viewerID) else {
                 // Nothing to remove, but the read is still worth keeping:
                 // the daemon may have added something since the last one.
@@ -309,7 +308,7 @@ final class RemoteSharingModel {
             let sorted = ids.sorted()
             store.set(
                 SettingsKey.remoteControlBlocked,
-                RemoteControlProjection.encodeEnabled(ids)
+                ClosedWorkspacesCodec.serialize(ids)
             ) { [weak self] result in
                 guard let self else { return }
                 switch result {
@@ -356,7 +355,7 @@ final class RemoteSharingModel {
                     guard let self else { return }
                     switch result {
                     case let .success(raw):
-                        blockedViewerIDs = RemoteControlProjection.decodeEnabled(raw).sorted()
+                        blockedViewerIDs = ClosedWorkspacesCodec.deserialize(raw).sorted()
                         restoreCompleted = true
                         onChange?()
                     case .failure:

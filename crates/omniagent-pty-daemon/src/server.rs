@@ -113,16 +113,6 @@ pub struct ClientContext {
 /// and every attachment's forwarding task.
 pub type SharedWriter = Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>;
 
-/// The settings row holding the remote-control projection: the host's tree of
-/// workspaces, session groups and panes.
-///
-/// It was the phase-1/2 authorization boundary — the only sessions a remote
-/// client could see or attach to. **It is not any more** (phase 3 spec §3):
-/// [`authorize_remote`] does not read it, and the lease holder reaches every
-/// session on the host. The row survives only because the viewer's sidebar
-/// still renders from it, and it goes with that sidebar in a later task.
-pub const REMOTE_CONTROL_KEY: &str = "remote_control";
-
 /// The settings row holding the machine-wide sharing switch (spec §2):
 /// `{"enabled": true|false}`. It replaces the phase-1/2 pair of
 /// `remote_control` (the projection) and `remote_control_workspaces` (the
@@ -191,57 +181,6 @@ fn block_viewer(store: &Store, viewer_id: &str) -> Result<()> {
     store
         .set_setting(BLOCKED_VIEWERS_KEY, &serde_json::to_string(&ids)?)
         .map_err(Into::into)
-}
-
-/// The session ids the `remote_control` projection names. Missing row,
-/// unparsable JSON or an unexpected shape all mean "nothing".
-///
-/// **No longer an authorization input** (phase 3 spec §3): this was the
-/// allowlist every remote `Attach`/`Input`/`Interrupt` was checked against,
-/// and session-id confinement is gone. It is kept for the viewer's sidebar,
-/// which still renders the projection, and goes with it in a later task.
-///
-/// Two projection shapes are read, because a Mac that has not updated yet
-/// still writes the first one (phase 2 spec §2, "Compatibility"):
-///
-/// - **v2** (`"version": 2`) carries the host's real tree, so a `sessions[]`
-///   entry is a session *group* whose `panes[]` hold the attachable ids. The
-///   group's own id is a UI grouping and is never a daemon session, so it is
-///   deliberately not collected — an idle group (`"panes": []`) shares
-///   nothing at all, and the machine stays reachable through
-///   [`remote_control_active`] instead.
-/// - **v1** flattened panes into `sessions[]`, so there each entry *is* the
-///   attachable id. The absence of a `panes` array is what selects this.
-///
-/// Either way the id collected is a **pane** id rather than a session-group
-/// id. Not every pane is a PTY, though: an editor or browser pane carries an
-/// id in the projection exactly like a terminal pane does. Those are harmless
-/// because the daemon never registers a session under them — a remote `Attach`
-/// passes the allowlist and then gets "session not found" from the registry
-/// (`a_shared_pane_with_no_session_behind_it_cannot_be_attached`) — but what
-/// this returns is a set of shared pane ids, not a promise that each one names
-/// a terminal.
-pub fn remote_session_ids(store: &Store) -> HashSet<String> {
-    let Some(raw) = store.get_setting(REMOTE_CONTROL_KEY).ok().flatten() else {
-        return HashSet::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return HashSet::new();
-    };
-    value["workspaces"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|workspace| workspace["sessions"].as_array())
-        .flatten()
-        .flat_map(|session| {
-            let panes = session["panes"].as_array();
-            let v2 = panes.into_iter().flatten();
-            let v1 = panes.is_none().then_some(session);
-            v2.chain(v1)
-        })
-        .filter_map(|pane| pane["id"].as_str().map(str::to_owned))
-        .collect()
 }
 
 /// How long sharing survives the last local connection going away (spec §2).

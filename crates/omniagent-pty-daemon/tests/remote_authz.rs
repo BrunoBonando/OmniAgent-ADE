@@ -34,19 +34,13 @@ use std::time::Duration;
 use tokio::io::DuplexStream;
 use tokio::sync::oneshot;
 
-/// A phase-1 `remote_control` projection naming only session `s1`. Phase 3
-/// keeps writing this row (the viewer's sidebar still reads it) but the
-/// authorizer no longer consults it — which is exactly why the end-to-end
-/// cases below set it: reaching `s2` *through* a projection that names only
-/// `s1` is the proof that confinement is gone.
+/// A phase-1 `remote_control` projection naming only session `s1`. Task 29
+/// deletes the reader (`remote_session_ids`) and the sidebar that used to
+/// render this row, but a stale row like this one can still sit on a user's
+/// disk from before that deletion — the end-to-end cases below write it for
+/// exactly that reason: reaching `s2` *through* a projection that names only
+/// `s1` is the proof that a leftover row cannot narrow access.
 const PROJECTION: &str = r#"{"workspaces":[{"id":"w1","name":"w1","sessions":[{"id":"s1","title":"one","engine":"shell","group":null}]}]}"#;
-/// The phase-2 shape (`2026-08-31` spec §2 "Projection schema v2"): the host's
-/// real tree, where the id a client names is the **pane** id, not the
-/// session-group id.
-const PROJECTION_V2: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
-"sessions":[{"id":"g1","label":"Session 1","order":0,
-"panes":[{"id":"s1","title":"claude","engine":"claude","kind":"terminal","order":0},
-         {"id":"s3","title":"shell","engine":"shell","kind":"terminal","order":1}]}]}]}"#;
 
 fn command_session(id: &str, script: &str) -> CreateSession {
     CreateSession {
@@ -559,37 +553,3 @@ async fn an_id_with_no_session_behind_it_cannot_be_attached() {
 // listed, so nothing is ever published) and a local connection subscribed to
 // the feed. This file's clients are anonymous, so the same test written here
 // would pass against a daemon that pushed the roster to everybody.
-
-// ---------------------------------------------------------------------------
-// The projection reader, which no longer takes part in authorization
-// ---------------------------------------------------------------------------
-
-/// `remote_session_ids` survives phase 3 only because the viewer's sidebar
-/// still reads the row it parses; it is no longer consulted by
-/// [`authorize_remote`], and it goes with the projection in a later task.
-/// Until then it stays covered: it walks the **pane** level of a v2 row, and
-/// a v1 row from a Mac that has not updated yet must still parse.
-#[test]
-fn projection_v2_shares_every_pane_and_v1_still_parses() {
-    let store = brain_core::Store::open_in_memory().unwrap();
-    store.set_setting("remote_control", PROJECTION_V2).unwrap();
-    assert_eq!(
-        omniagent_pty_daemon::remote_session_ids(&store),
-        ["s1".to_string(), "s3".to_string()].into_iter().collect(),
-        "a pane is what a viewer attaches to; the session group is a UI grouping"
-    );
-
-    // A phase-1 row from a Mac that has not updated yet.
-    store.set_setting("remote_control", PROJECTION).unwrap();
-    assert_eq!(
-        omniagent_pty_daemon::remote_session_ids(&store),
-        ["s1".to_string()].into_iter().collect()
-    );
-
-    // An idle session group: nothing to attach to, and — since phase 3 —
-    // nothing about reachability either, which `remote_sharing.rs` owns.
-    const IDLE: &str = r#"{"version":2,"workspaces":[{"id":"/a","name":"Alpha","tint":null,"order":0,
-    "sessions":[{"id":"g1","label":"Session 1","order":0,"panes":[]}]}]}"#;
-    store.set_setting("remote_control", IDLE).unwrap();
-    assert!(omniagent_pty_daemon::remote_session_ids(&store).is_empty());
-}

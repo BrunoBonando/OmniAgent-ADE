@@ -95,20 +95,6 @@ final class WorkspaceContextMenuTests: XCTestCase {
         XCTAssertEqual(fired, ["new", "finder", "customize", "remove"])
     }
 
-    // MARK: - The projection (2026-09-01 remote environment sharing spec §1/§2)
-    //
-    // `WorkspaceWindowController.persistRemoteControlProjection` is still
-    // wired to `persistLayout`, but stays behind a gate
-    // (`remoteControlEverEnabled`) that nothing in this task ever opens —
-    // the per-workspace toggle that used to open it is deleted, and wiring
-    // the replacement (`RemoteSharingModel.shared.isSharing`) is later work.
-    // A controller-level "starting a session joins the projection" test
-    // therefore has nothing to assert here yet: no code path in this build
-    // ever writes `remote_control`. `RemoteControlProjection.build`'s own
-    // "every workspace, unconditionally" behavior is covered directly in
-    // `RemoteControlProjectionTests.swift`, which needs no controller and no
-    // gate to exercise.
-
     // MARK: - GitHub remote parsing
 
     /// Every shape `git remote get-url origin` actually answers with, mapped

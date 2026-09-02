@@ -49,99 +49,49 @@ enum RemoteSessionPicker {
 /// connections."* This is that list. The spotlight rows stay exactly as they
 /// were — they are the keyboard path, this is the discoverable one.
 ///
-/// The rows are a pure function of the relay's machine list
+/// **Collapsed to a machine list** (2026-09-01 remote environment sharing
+/// spec §1, Task 29): earlier phases browsed a workspace/session/pane tree
+/// projected from the host's `remote_control` row. That projection is gone —
+/// a viewer now points its whole app at the host's daemon, so there is
+/// nothing to pick *below* the machine. One row per known machine: **Connect**
+/// for one the relay reports online, a plain "offline" line for one that
+/// is not.
+///
+/// The rows are a pure function of the relay's device list
 /// (`RemoteSessionPickerModel.rows`) so that what the picker offers can be
 /// asserted without a window; `RemoteSessionPickerView` is the glass and the
 /// keyboard, and `RemoteSessionPickerController` is the mount point.
 struct RemoteSessionPickerModel: Equatable {
-    /// One line of the list. Headings and empty states are rows too — they
-    /// are what makes the list a *tree* rather than a flat pile of session
-    /// names, and keeping them in the same array is what lets the view skip
-    /// them for selection in one place instead of three.
+    /// One line of the list. Empty states are rows too — they are what makes
+    /// the list read as a real answer rather than a blank pile, and keeping
+    /// them in the same array is what lets the view skip them for selection
+    /// in one place instead of three.
     enum Row: Equatable {
-        /// A machine section heading.
+        /// A known, online machine — connectable.
         case machine(deviceID: String, name: String)
-        /// One of that machine's shared workspaces.
-        case workspace(name: String)
-        /// A terminal pane on that machine — the only openable row. `paneID`
-        /// is a *pane* id: the only id a viewer may `Attach` with, and what
-        /// `WorkspaceWindowController.openRemoteSession` looks up inside its
-        /// session.
-        case session(deviceID: String, paneID: String, label: String, detail: String)
-        /// Why there is nothing here, in plain words.
+        /// Why there is nothing (more) here, in plain words — also how a
+        /// known-but-offline machine is shown: it has nothing to open.
         case empty(message: String)
     }
 
-    /// The host's tree, per machine, in the host's order — the same
-    /// projection §2 defines and the sidebar renders, so the picker and the
-    /// sidebar cannot disagree about what is on the other Mac.
-    ///
-    /// Nothing is re-sorted here. `order` is the host's answer, and deriving
-    /// a second ordering on this side is exactly the drift schema v2 exists
-    /// to prevent. `machines` arrives from `RemoteMachinesModel` already
-    /// sorted by name, which is the only ordering this side owns.
-    static func rows(machines: [RemoteMachine], signedIn: Bool) -> [Row] {
+    /// The relay's device list, turned into rows: online machines first (in
+    /// `machines`' own order — `RemoteMachinesModel` already sorts by name),
+    /// then one line per machine the relay knows about but is not reachable
+    /// right now.
+    static func rows(
+        machines: [RemoteMachine],
+        offlineMachineNames: [String] = [],
+        signedIn: Bool
+    ) -> [Row] {
         // Signed out is not "nothing shared" — the relay has not been asked
         // yet. Saying so is the difference between "wait a moment" and "give
         // up".
         guard signedIn else { return [.empty(message: "Signing in…")] }
-        guard !machines.isEmpty else {
-            return [.empty(message: "No other Macs are sharing sessions")]
+        guard !machines.isEmpty || !offlineMachineNames.isEmpty else {
+            return [.empty(message: "No other Macs are sharing")]
         }
-
-        var rows: [Row] = []
-        for machine in machines {
-            rows.append(.machine(deviceID: machine.deviceID, name: machine.name))
-            let workspaces = machine.projection.workspaces.sorted { $0.order < $1.order }
-            // A projection with no workspace at all means the tunnel is down:
-            // the daemon holds its control channel open *iff* the row lists
-            // ≥ 1 workspace (`remote_control_active`), so a machine still on
-            // the relay's list with an empty projection is one that has just
-            // stopped sharing, or is on its way off the list. "Offline" is
-            // what a user can act on; a blank section is not.
-            guard !workspaces.isEmpty else {
-                rows.append(.empty(message: "\(machine.name) is offline"))
-                continue
-            }
-            for workspace in workspaces {
-                rows.append(.workspace(name: workspace.name))
-                let sessions = workspace.sessions.sorted { $0.order < $1.order }
-                var offered = 0
-                for session in sessions {
-                    for pane in session.panes.sorted(by: { $0.order < $1.order })
-                    where pane.kind == PaneKind.terminal.rawValue {
-                        // Only a terminal pane is attachable (spec §2); an
-                        // editor or browser pane is carried by the projection
-                        // for structural fidelity and is not openable here.
-                        offered += 1
-                        rows.append(
-                            .session(
-                                deviceID: machine.deviceID,
-                                paneID: pane.id,
-                                label: pane.title,
-                                detail: detail(for: pane, in: session.label)
-                            )
-                        )
-                    }
-                }
-                // Shared but idle: listed, because it *is* the host's tree and
-                // dropping it would leave a user wondering where the workspace
-                // they just enabled went.
-                if offered == 0 {
-                    rows.append(.empty(message: "Nothing is running in \(workspace.name)"))
-                }
-            }
-        }
-        return rows
-    }
-
-    /// The right-hand line: which session this pane belongs to, and what is
-    /// running in it. A one-pane session whose pane is named after it — the
-    /// common case — would otherwise print its own name twice, so the session
-    /// half is dropped when it adds nothing.
-    private static func detail(for pane: RemoteControlProjection.Pane, in sessionLabel: String) -> String {
-        let engine = Engine(rawValue: pane.engine)?.displayName ?? pane.engine
-        return pane.title == sessionLabel ? engine : "\(sessionLabel) · \(engine)"
+        return machines.map { .machine(deviceID: $0.deviceID, name: $0.name) }
+            + offlineMachineNames.map { .empty(message: "\($0) is offline") }
     }
 }
 
@@ -151,13 +101,10 @@ struct RemoteSessionPickerModel: Equatable {
 ///
 /// Deliberately not an `NSAlert` and not an `NSTableView` in a plain panel —
 /// every modal question in this app wears this glass, and "which of these
-/// sessions do you want?" is a modal question. What is behind the glass is
-/// this Mac's Desk, which is exactly the context for "open one of the other
-/// Mac's sessions here".
+/// Macs do you want?" is a modal question.
 final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
-    /// The chosen session: device id, pane id, and the label the pane should
-    /// carry until the host says otherwise.
-    var onOpen: ((String, String, String) -> Void)?
+    /// The chosen machine's device id.
+    var onOpen: ((String) -> Void)?
     /// Escape, a click on the glass, or Cancel.
     var onCancel: (() -> Void)?
 
@@ -165,18 +112,14 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
     /// The indexes of `rows` a user can actually open, in list order.
     let openableRowIndexes: [Int]
 
-    private static let cardWidth: CGFloat = 460
+    private static let cardWidth: CGFloat = 420
     private static let padding: CGFloat = 22
     private static let iconSize: CGFloat = 30
     private static let buttonHeight: CGFloat = 26
     private static let cardRadius: CGFloat = 16
-    private static let sessionRowHeight: CGFloat = 46
-    /// Taller than the workspace heading under it: it is what separates one
-    /// machine's section from the sessions of the machine above.
-    private static let machineRowHeight: CGFloat = 34
-    private static let workspaceRowHeight: CGFloat = 24
+    private static let machineRowHeight: CGFloat = 46
     private static let emptyRowHeight: CGFloat = 38
-    /// Enough for roughly six sessions; past that the list scrolls rather
+    /// Enough for roughly six machines; past that the list scrolls rather
     /// than the card growing taller than the window it sits in.
     private static let maxListHeight: CGFloat = 286
 
@@ -206,7 +149,7 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
     init(rows: [RemoteSessionPickerModel.Row]) {
         self.rows = rows
         openableRowIndexes = rows.indices.filter {
-            if case .session = rows[$0] { return true }
+            if case .machine = rows[$0] { return true }
             return false
         }
         titleLabel = Self.label(
@@ -216,14 +159,14 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
         )
         messageLabel = Self.label(
             openableRowIndexes.isEmpty
-                ? "Sessions shared by your other Macs show up here."
-                : "Pick a session running on one of your other Macs.",
+                ? "Macs sharing their environment show up here."
+                : "Pick a Mac to connect to.",
             font: ShellFont.ui(13),
             color: NSColor(srgbRed: 176 / 255, green: 180 / 255, blue: 198 / 255, alpha: 1)
         )
         // Nothing to open, nothing to choose between: one button that closes,
-        // rather than a dead "Open" beside it.
-        buttons = (openableRowIndexes.isEmpty ? [("Close", true)] : [("Cancel", false), ("Open", true)])
+        // rather than a dead "Connect" beside it.
+        buttons = (openableRowIndexes.isEmpty ? [("Close", true)] : [("Cancel", false), ("Connect", true)])
             .map { PaneApprovalButton(title: $0.0, isPrimary: $0.1, tint: PaneAskOverlayView.accent) }
         if #available(macOS 26.0, *) {
             let pane = NSGlassEffectView()
@@ -268,11 +211,11 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
         listWell.layer?.borderColor = NSColor(white: 1, alpha: 0.12).cgColor
         listWell.layer?.masksToBounds = true
 
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("remote-session"))
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("remote-machine"))
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
         tableView.headerView = nil
-        tableView.rowHeight = Self.sessionRowHeight
+        tableView.rowHeight = Self.machineRowHeight
         // Spotlight's inset pill rather than a full-bleed band — this is the
         // same kind of list and it should not look like a different app.
         tableView.style = .inset
@@ -283,7 +226,7 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
         tableView.delegate = self
         tableView.target = self
         tableView.doubleAction = #selector(rowDoubleClicked)
-        tableView.setAccessibilityLabel("Remote sessions")
+        tableView.setAccessibilityLabel("Other Macs")
         tableView.onReturn = { [weak self] in self?.activateSelection() }
         tableView.onEscape = { [weak self] in self?.cancel() }
 
@@ -294,9 +237,9 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
         scrollView.automaticallyAdjustsContentInsets = false
         listWell.addSubview(scrollView)
 
-        // The primary button is Open on a list with something in it and Close
-        // on one without — the same two paths Return takes. `isPrimary` is
-        // read here rather than inside the closure so the button does not
+        // The primary button is Connect on a list with something in it and
+        // Close on one without — the same two paths Return takes. `isPrimary`
+        // is read here rather than inside the closure so the button does not
         // capture itself.
         for button in buttons {
             let opens = button.isPrimary && !openableRowIndexes.isEmpty
@@ -364,7 +307,7 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
     // MARK: - Answering
 
     /// Opens whatever is selected — the one path Return, a double-click and
-    /// the Open button share.
+    /// the Connect button share.
     ///
     /// A list with nothing openable in it closes rather than beeping: there
     /// is no answer to give, and the button on that sheet says Close. A list
@@ -374,12 +317,12 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
     /// picked one yet".
     func activateSelection() {
         guard !isAnswered else { return }
-        guard case let .session(deviceID, paneID, label, _)? = selectedRow() else {
+        guard case let .machine(deviceID, _)? = selectedRow() else {
             guard openableRowIndexes.isEmpty else { return NSSound.beep() }
             return cancel()
         }
         isAnswered = true
-        onOpen?(deviceID, paneID, label)
+        onOpen?(deviceID)
     }
 
     /// Escape, the glass, Cancel, Close.
@@ -399,8 +342,8 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
         )
     }
 
-    /// Whether row `index` is one a user can land on — a heading and an
-    /// empty state are not.
+    /// Whether row `index` is one a user can land on — an offline/empty row
+    /// is not.
     func canSelectRow(_ index: Int) -> Bool { openableRowIndexes.contains(index) }
 
     /// What a click in the empty space under the last row leaves behind —
@@ -422,8 +365,8 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
     }
 
     /// A double-click opens the row that was *clicked*, and only if it is a
-    /// session. Without the second half, double-clicking a heading — which
-    /// cannot take the selection — would open whatever happened to be
+    /// machine. Without the second half, double-clicking an offline row —
+    /// which cannot take the selection — would open whatever happened to be
     /// selected somewhere else in the list.
     @objc private func rowDoubleClicked() {
         guard canSelectRow(tableView.clickedRow) else { return }
@@ -437,14 +380,12 @@ final class RemoteSessionPickerView: NSView, NSTableViewDataSource, NSTableViewD
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         switch rows[row] {
         case .machine: return Self.machineRowHeight
-        case .workspace: return Self.workspaceRowHeight
-        case .session: return Self.sessionRowHeight
         case .empty: return Self.emptyRowHeight
         }
     }
 
-    /// Headings and empty states are not answers, so arrow keys pass over
-    /// them and a click on one selects nothing.
+    /// An offline/empty row is not an answer, so arrow keys pass over it and
+    /// a click on one selects nothing.
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         canSelectRow(row)
     }
@@ -557,19 +498,14 @@ private final class PickerTableView: NSTableView {
     }
 }
 
-/// One line of the picker. Deliberately the spotlight's row shape for the
-/// openable rows (`PaletteRowView`) — plate, title, detail — so the two lists
-/// of the same things look like the same app.
+/// One line of the picker: a machine's name and Connect, or a plain
+/// offline/empty line.
 final class RemoteSessionPickerRowView: NSTableCellView {
     init(row: RemoteSessionPickerModel.Row) {
         super.init(frame: .zero)
         switch row {
         case let .machine(_, name):
-            build(heading: name, symbol: "desktopcomputer.and.arrow.down", indent: 0, alpha: 0.78)
-        case let .workspace(name):
-            build(heading: name, symbol: "folder", indent: 14, alpha: 0.55)
-        case let .session(_, _, label, detail):
-            build(title: label, detail: detail)
+            build(machine: name)
         case let .empty(message):
             build(empty: message)
         }
@@ -580,34 +516,7 @@ final class RemoteSessionPickerRowView: NSTableCellView {
         fatalError("init(coder:) is unavailable")
     }
 
-    private func build(heading: String, symbol: String, indent: CGFloat, alpha: CGFloat) {
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 10.5, weight: .semibold))
-        icon.contentTintColor = NSColor(white: 1, alpha: alpha)
-        addSubview(icon)
-
-        let title = NSTextField(labelWithString: heading)
-        title.font = ShellFont.ui(11.5, .semibold)
-        title.textColor = NSColor(white: 1, alpha: alpha)
-        title.lineBreakMode = .byTruncatingMiddle
-        addSubview(title)
-        textField = title
-
-        setAccessibilityElement(true)
-        setAccessibilityLabel(heading)
-
-        [icon, title].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
-        NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12 + indent),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7),
-            title.centerYAnchor.constraint(equalTo: centerYAnchor),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-        ])
-    }
-
-    private func build(title text: String, detail: String) {
+    private func build(machine name: String) {
         let plate = NSView()
         plate.wantsLayer = true
         plate.layer?.cornerRadius = 8
@@ -616,30 +525,24 @@ final class RemoteSessionPickerRowView: NSTableCellView {
         addSubview(plate)
 
         let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)?
+        icon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
         icon.contentTintColor = NSColor(white: 1, alpha: 0.85)
         plate.addSubview(icon)
 
-        let title = NSTextField(labelWithString: text)
+        let title = NSTextField(labelWithString: name)
         title.font = ShellFont.ui(13.5, .medium)
         title.textColor = NSColor(white: 1, alpha: 0.97)
         title.lineBreakMode = .byTruncatingTail
         addSubview(title)
         textField = title
 
-        let subtitle = NSTextField(labelWithString: detail)
-        subtitle.font = ShellFont.ui(11.5)
-        subtitle.textColor = NSColor(white: 1, alpha: 0.5)
-        subtitle.lineBreakMode = .byTruncatingMiddle
-        addSubview(subtitle)
-
         setAccessibilityElement(true)
-        setAccessibilityLabel([text, detail].filter { !$0.isEmpty }.joined(separator: ", "))
+        setAccessibilityLabel("\(name), Connect")
 
-        [plate, icon, title, subtitle].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        [plate, icon, title].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         NSLayoutConstraint.activate([
-            plate.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26),
+            plate.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             plate.centerYAnchor.constraint(equalTo: centerYAnchor),
             plate.widthAnchor.constraint(equalToConstant: 28),
             plate.heightAnchor.constraint(equalToConstant: 28),
@@ -647,11 +550,8 @@ final class RemoteSessionPickerRowView: NSTableCellView {
             icon.centerYAnchor.constraint(equalTo: plate.centerYAnchor),
 
             title.leadingAnchor.constraint(equalTo: plate.trailingAnchor, constant: 11),
-            title.topAnchor.constraint(equalTo: plate.topAnchor, constant: -2),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
             title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 1),
-            subtitle.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
         ])
     }
 
@@ -693,14 +593,15 @@ final class RemoteSessionPickerController {
     func present(
         over window: NSWindow?,
         rows: [RemoteSessionPickerModel.Row],
-        onOpen: @escaping (String, String, String) -> Void
+        onOpen: @escaping (String) -> Void
     ) -> Bool {
         guard view == nil, let content = window?.contentView else { return false }
         let sheet = RemoteSessionPickerView(rows: rows)
-        sheet.onOpen = { [weak self] deviceID, paneID, title in
-            // Down first, so the pane the caller opens gets the keyboard.
+        sheet.onOpen = { [weak self] deviceID in
+            // Down first, so the connect ceremony that follows gets the
+            // keyboard.
             self?.dismiss()
-            onOpen(deviceID, paneID, title)
+            onOpen(deviceID)
         }
         sheet.onCancel = { [weak self] in self?.dismiss() }
         sheet.frame = content.bounds

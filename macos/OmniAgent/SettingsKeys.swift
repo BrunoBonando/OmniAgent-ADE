@@ -142,26 +142,12 @@ enum SettingsKey {
     /// — see `ReviewPanelStateCodec`. No TypeScript twin, by design.
     static let reviewPanel = "review_panel_native"
 
-    /// **A contract with the Rust daemon, not with the web build** — the
-    /// remote-session-control spec's §2
-    /// (docs/superpowers/specs/2026-08-30-remote-session-control-design.md).
-    /// What this Mac offers to remote viewers, derived from the live layout —
-    /// every workspace, unconditionally, since the 2026-09-01 remote
-    /// environment sharing spec (§1/§2) deletes the per-workspace enable set
-    /// this used to be filtered by:
-    /// `{"workspaces":[{"id","name","sessions":[{"id","title","engine","group"}]}]}`
-    /// — see `RemoteControlProjection`. The daemon deserializes this row on
-    /// every authorization decision for a remote connection, so the key names
-    /// inside it are snake_case-exact and may not be renamed on one side
-    /// alone. No TypeScript twin, by design.
-    static let remoteControl = "remote_control"
-
     /// The machine-wide sharing switch (2026-09-01 remote environment
     /// sharing spec §2): `{"enabled":true|false}`. Replaces
     /// `remoteControlWorkspaces` (deleted with this change — sharing is one
-    /// switch, not a set of enabled workspaces) and, eventually,
-    /// `remoteControl` above, which survives until Phase 5 only because the
-    /// viewer's sidebar still reads it. Read and written by
+    /// switch, not a set of enabled workspaces) and `remoteControl`, the
+    /// per-workspace projection row Task 29 deleted along with the mirrored
+    /// sidebar tree that was its only reader. Read and written by
     /// `RemoteSharingModel`; the daemon's `remote_control_active` reads this
     /// exact row and shape.
     static let remoteSharing = "remote_sharing"

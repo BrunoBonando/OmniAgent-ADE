@@ -208,32 +208,6 @@ final class WorkspaceShellTests: XCTestCase {
         XCTAssertEqual(WorkspaceRowView(id: "p1", label: "A", expanded: false).folderGlyph.glyph, .folder)
     }
 
-    /// The globe is gone from the local tree (2026-09-01 remote environment
-    /// sharing spec §1: sharing is one machine-wide switch, not a
-    /// per-workspace checkmark) — but `WorkspaceRowView` still carries the
-    /// remote glyph itself, since the mirrored tree's `.viewing` rows
-    /// (`renderRemoteMachines`) still wear it for a workspace shared *from
-    /// another Mac*. This pins both halves: the glyph mechanism still works
-    /// when asked for directly, and the local project tree never asks.
-    func testTheRemoteGlyphStillWorksButTheLocalTreeNeverShowsIt() throws {
-        XCTAssertFalse(WorkspaceRowView(id: "p1", label: "A", expanded: true, remoteControl: true).remoteGlyph.isHidden)
-        XCTAssertTrue(WorkspaceRowView(id: "p1", label: "A", expanded: true).remoteGlyph.isHidden)
-
-        let suite = "workspaces-tree-globe-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let tree = WorkspacesTreeView(defaults: defaults)
-        tree.frame = NSRect(x: 0, y: 0, width: ShellMetrics.sidebarWidth, height: 500)
-        tree.reload(
-            entries: [
-                WorkspaceTreeEntry(id: "p1", label: "Alpha", sessions: []),
-            ],
-            focusedPaneID: nil,
-            statuses: [:]
-        )
-        XCTAssertTrue(try XCTUnwrap(tree.descendant(WorkspaceRowView.self)).remoteGlyph.isHidden)
-    }
-
     /// The session row aggregates its blocked terminals minus the focused one
     /// — selected counts as seen, and with pane rows gone the session row is
     /// the only place the count can live.
