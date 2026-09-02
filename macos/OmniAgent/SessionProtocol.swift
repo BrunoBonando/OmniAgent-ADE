@@ -73,6 +73,14 @@ enum MessageKind: UInt8 {
     /// refused. Mirrors
     /// `omniagent_pty_daemon::protocol::MessageKind::PublishHostState`.
     case publishHostState = 0x1c
+    /// Lists one directory on the connection's own machine — names and
+    /// `is_dir` only, no contents (Task 9, 2026-09-01 remote environment
+    /// sharing spec §4). Deliberately in `authorize_remote`'s allow arm,
+    /// unlike its two siblings above: this is what lets "Add local
+    /// folder…" browse the HOST's disk while driving (Task 28) rather than
+    /// this Mac's own, which is the one thing `NSOpenPanel` cannot do.
+    /// Mirrors `omniagent_pty_daemon::protocol::MessageKind::ListDirectory`.
+    case listDirectory = 0x1d
     case helloAck = 0x81
     case sessionList = 0x82
     case sessionCreated = 0x83

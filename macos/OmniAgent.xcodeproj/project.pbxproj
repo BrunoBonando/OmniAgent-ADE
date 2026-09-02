@@ -125,6 +125,7 @@
 		F0B34726F69E4D4E90427E2C /* PredictiveEchoModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 667DDB0CD8F44D5F8AAE32AD /* PredictiveEchoModel.swift */; };
 		1708611130EF44F080D129AB /* PredictiveEchoOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D7DE1558DC4E378D4D62D4 /* PredictiveEchoOverlayView.swift */; };
 		FFD15FA0A78843F1AFC1F746 /* RemoteSessionPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CCCAEE9829D48B38E81A5F2 /* RemoteSessionPicker.swift */; };
+		758CB9D81AD98EFF39962C88 /* RemoteFolderBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A9BA8053B94B985EFC1A99 /* RemoteFolderBrowser.swift */; };
 		A1B2C3D40001470AE987450A /* RemoteTakeoverPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40002470AE987450A /* RemoteTakeoverPanel.swift */; };
 		8056BED5DF0246AD96A75A01 /* RemoteActivityLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A811975FC3A4D93B629EA76 /* RemoteActivityLog.swift */; };
 		B95285C954CF423AA2FEF7AF /* HostStatePublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CA2E9511E214A11B8EC37D4 /* HostStatePublisher.swift */; };
@@ -146,6 +147,7 @@
 		38CCB7C65BEB4239AECB9FE4 /* HostStatePublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */; };
 		BA524298D19449349AF94799 /* PredictiveEchoModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */; };
 		9F80A299E51B449B8FE08F85 /* RemoteSessionPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */; };
+		ED065822AC7D4933D3BA1842 /* RemoteFolderBrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FACF31E844CC8E93921698E /* RemoteFolderBrowserTests.swift */; };
 		493F0889AAA54E95AC9DD5C7 /* RemotePresenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */; };
 		10000000000000000000028 /* UsageAnalyticsRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000029 /* UsageAnalyticsRecorder.swift */; };
 		10000000000000000000029 /* UsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000002A /* UsageView.swift */; };
@@ -352,6 +354,7 @@
 		667DDB0CD8F44D5F8AAE32AD /* PredictiveEchoModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoModel.swift; sourceTree = "<group>"; };
 		86D7DE1558DC4E378D4D62D4 /* PredictiveEchoOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoOverlayView.swift; sourceTree = "<group>"; };
 		7CCCAEE9829D48B38E81A5F2 /* RemoteSessionPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionPicker.swift; sourceTree = "<group>"; };
+		60A9BA8053B94B985EFC1A99 /* RemoteFolderBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderBrowser.swift; sourceTree = "<group>"; };
 		A1B2C3D40002470AE987450A /* RemoteTakeoverPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTakeoverPanel.swift; sourceTree = "<group>"; };
 		6A811975FC3A4D93B629EA76 /* RemoteActivityLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteActivityLog.swift; sourceTree = "<group>"; };
 		9CA2E9511E214A11B8EC37D4 /* HostStatePublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostStatePublisher.swift; sourceTree = "<group>"; };
@@ -373,6 +376,7 @@
 		C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostStatePublisherTests.swift; sourceTree = "<group>"; };
 		A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictiveEchoModelTests.swift; sourceTree = "<group>"; };
 		531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionPickerTests.swift; sourceTree = "<group>"; };
+		4FACF31E844CC8E93921698E /* RemoteFolderBrowserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderBrowserTests.swift; sourceTree = "<group>"; };
 		88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePresenceTests.swift; sourceTree = "<group>"; };
 		20000000000000000000029 /* UsageAnalyticsRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageAnalyticsRecorder.swift; sourceTree = "<group>"; };
 		2000000000000000000002A /* UsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageView.swift; sourceTree = "<group>"; };
@@ -545,6 +549,7 @@
 				667DDB0CD8F44D5F8AAE32AD /* PredictiveEchoModel.swift */,
 				86D7DE1558DC4E378D4D62D4 /* PredictiveEchoOverlayView.swift */,
 				7CCCAEE9829D48B38E81A5F2 /* RemoteSessionPicker.swift */,
+				60A9BA8053B94B985EFC1A99 /* RemoteFolderBrowser.swift */,
 				A1B2C3D40002470AE987450A /* RemoteTakeoverPanel.swift */,
 				6A811975FC3A4D93B629EA76 /* RemoteActivityLog.swift */,
 				9CA2E9511E214A11B8EC37D4 /* HostStatePublisher.swift */,
@@ -623,6 +628,7 @@
 				C78BFE581DE640B8BED64960 /* HostStatePublisherTests.swift */,
 				A1424334A93A4BE39629BE7B /* PredictiveEchoModelTests.swift */,
 				531A83FB4984487B8572A5D0 /* RemoteSessionPickerTests.swift */,
+				4FACF31E844CC8E93921698E /* RemoteFolderBrowserTests.swift */,
 				88F3DD5A0A944D3C812651A3 /* RemotePresenceTests.swift */,
 				3A7E4B21D95C4F6E8A102029 /* NavigationSidebarTests.swift */,
 				4C7A2E5FB9D14038A220260C /* WorkspacesHeaderMenusTests.swift */,
@@ -873,6 +879,7 @@
 				F0B34726F69E4D4E90427E2C /* PredictiveEchoModel.swift in Sources */,
 				1708611130EF44F080D129AB /* PredictiveEchoOverlayView.swift in Sources */,
 				FFD15FA0A78843F1AFC1F746 /* RemoteSessionPicker.swift in Sources */,
+				758CB9D81AD98EFF39962C88 /* RemoteFolderBrowser.swift in Sources */,
 				A1B2C3D40001470AE987450A /* RemoteTakeoverPanel.swift in Sources */,
 				8056BED5DF0246AD96A75A01 /* RemoteActivityLog.swift in Sources */,
 				B95285C954CF423AA2FEF7AF /* HostStatePublisher.swift in Sources */,
@@ -944,6 +951,7 @@
 				38CCB7C65BEB4239AECB9FE4 /* HostStatePublisherTests.swift in Sources */,
 				BA524298D19449349AF94799 /* PredictiveEchoModelTests.swift in Sources */,
 				9F80A299E51B449B8FE08F85 /* RemoteSessionPickerTests.swift in Sources */,
+				ED065822AC7D4933D3BA1842 /* RemoteFolderBrowserTests.swift in Sources */,
 				493F0889AAA54E95AC9DD5C7 /* RemotePresenceTests.swift in Sources */,
 				3A7E4B21D95C4F6E8A102028 /* NavigationSidebarTests.swift in Sources */,
 				4C7A2E5FB9D14038A220260D /* WorkspacesHeaderMenusTests.swift in Sources */,

@@ -319,6 +319,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// than made per click so a second click on the menu item cannot stack
     /// two sheets of glass over the window.
     let remoteSessionPicker = RemoteSessionPickerController()
+    /// "Add local folder…"'s remote path (Task 28): one at a time, same
+    /// reasoning as `remoteSessionPicker` above.
+    let remoteFolderBrowser = RemoteFolderBrowserController()
     private var readySessions: Set<String> = []
     /// The `layout` read has been sent — a later reconnect must re-attach the
     /// panes that already exist rather than reading the row again and
@@ -2801,12 +2804,44 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
     /// run without blocking on a modal.
     var directoryChooser: ((String, @escaping (String?) -> Void) -> Void)?
 
+    /// Whether a folder pick should use `NSOpenPanel` — this Mac's own
+    /// disk — or the remote folder browser backed by `ListDirectory`
+    /// (2026-09-01 remote environment sharing spec §4/§6, Task 28).
+    /// `NSOpenPanel` has no notion of "the other Mac's disk": while driving,
+    /// showing it at all would let someone pick a folder off the wrong
+    /// machine's filesystem and hand it to the host as if it were real.
+    /// Pure and static so every caller — and this type's own test — asks the
+    /// same question rather than each guessing at `isDrivingRemote` inline.
+    static func usesNativeOpenPanel(isDrivingRemote: Bool) -> Bool { !isDrivingRemote }
+
     private func chooseSessionDirectory(
         startingAt path: String,
         completion: @escaping (String?) -> Void
     ) {
         if let directoryChooser {
             directoryChooser(path, completion)
+            return
+        }
+        guard Self.usesNativeOpenPanel(isDrivingRemote: isDrivingRemote) else {
+            // `path` is usually already a HOST path — while driving, the
+            // whole window (including `workspaces`) reloaded from the
+            // host's own answers (spec §6) — except its one fallback,
+            // `startingDirectory(for:)`'s last resort
+            // (`FileManager...homeDirectoryForCurrentUser`), which is
+            // *this* Mac's home and would otherwise leak into the sheet as
+            // a starting point that may not even exist on the host. A
+            // workspace the host already reported is always real there;
+            // absent one, "/" always is.
+            let hostPath = path == FileManager.default.homeDirectoryForCurrentUser.path
+                ? (workspaces.first?.path ?? "/")
+                : path
+            remoteFolderBrowser.present(
+                over: window,
+                browser: RemoteFolderBrowser(connection: connection),
+                machineName: remoteSharing.activeRemoteSession?.machineName,
+                startingAt: hostPath,
+                onAdd: completion
+            )
             return
         }
         let panel = NSOpenPanel()

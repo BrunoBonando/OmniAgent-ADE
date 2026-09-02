@@ -31,6 +31,31 @@ struct BrainProjectSummary: Codable, Equatable {
     let path: String?
 }
 
+/// One `ListDirectory` entry — a name and whether it is a directory, never
+/// more (`omniagent_pty_daemon::protocol::DirectoryEntryPayload`'s doc: "a
+/// boundary, not an oversight" — no size, no mode, no timestamp, and above
+/// all no contents). A file is listed for context; only a directory can be
+/// chosen.
+struct DirectoryEntry: Codable, Equatable {
+    let name: String
+    let isDir: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case isDir = "is_dir"
+    }
+}
+
+/// `ListDirectory`'s reply: one directory's entries — directories-first,
+/// then case-insensitively by name, the daemon's own ordering — and whether
+/// its `LIST_DIRECTORY_MAX_ENTRIES` cap (512) cut the listing off. A caller
+/// must render `truncated`: showing part of a directory as if it were the
+/// whole thing is how a folder picker lies.
+struct DirectoryListing: Codable, Equatable {
+    let entries: [DirectoryEntry]
+    let truncated: Bool
+}
+
 /// The shared node projection `mcp_server::tools`'s `search_brain`/`related`/
 /// `get_context` all reuse: `{id, kind, project, label, path?, summary?}`
 /// (Task 6a — `get_context`'s `recent_decisions`/`memory_notes` entries).
@@ -779,6 +804,32 @@ final class SessionConnection {
                     return Result {
                         try self.decoder.decode(RootsAddProjectResponse.self, from: frame.payload).project
                     }
+                }
+            )
+        }
+    }
+
+    /// Lists one directory on **this connection's own machine** — the
+    /// HOST's disk while this is a remote connection driving another Mac,
+    /// never this Mac's own (2026-09-01 remote environment sharing spec §4,
+    /// Task 9/28). Mirrors `list_directory`: names and `is_dir` only, no
+    /// contents, no size, no mode — there is no file-read RPC in this
+    /// system. `RemoteFolderBrowser` is the caller.
+    func listDirectory(
+        path: String,
+        showHidden: Bool = false,
+        completion: @escaping (Result<DirectoryListing, Error>) -> Void
+    ) {
+        sendCodable(
+            kind: .listDirectory,
+            value: ListDirectoryPayload(path: path, showHidden: showHidden)
+        ) { result in
+            completion(
+                result.flatMap { frame in
+                    guard frame.kind == .response else {
+                        return .failure(SessionConnectionError.invalidResponse(frame.kind))
+                    }
+                    return Result { try self.decoder.decode(DirectoryListing.self, from: frame.payload) }
                 }
             )
         }
@@ -1657,6 +1708,16 @@ private struct RootsRenameProjectPayload: Codable {
     enum CodingKeys: String, CodingKey {
         case id
         case newLabel = "new_label"
+    }
+}
+
+private struct ListDirectoryPayload: Codable {
+    let path: String
+    let showHidden: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case showHidden = "show_hidden"
     }
 }
 
