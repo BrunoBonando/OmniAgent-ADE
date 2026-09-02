@@ -55,7 +55,7 @@ async fn a_viewer_who_connects_before_any_publish_receives_nothing() {
     viewer.hello().await;
 
     assert!(
-        viewer.received_no_activity_push().await,
+        viewer.received_no_host_state_push().await,
         "a lease holder that has never been published to must receive no HostState push"
     );
 }

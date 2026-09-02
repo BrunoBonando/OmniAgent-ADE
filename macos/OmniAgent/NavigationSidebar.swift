@@ -575,33 +575,71 @@ final class HostMetricsSource {
 
     private(set) var latest = Snapshot(cpu: nil, memory: nil, gpu: nil)
 
-    private var observers: [ObjectIdentifier: (Snapshot) -> Void] = [:]
+    /// One observer's registration: its callback, and the cadence *it*
+    /// needs — fix round 1, IMPORTANT 1. The sidebar's dial has always
+    /// sampled every two seconds; `HostStatePublisher` needs the spec's own
+    /// 1 Hz. Sharing one timer must not mean picking the tighter of the two
+    /// and imposing it on the surface that never asked for it, so each
+    /// observer states its own requirement and the timer runs at whichever
+    /// is currently tightest — reverting the moment the observer that asked
+    /// for that tightness leaves.
+    private struct Observation {
+        let interval: TimeInterval
+        let block: (Snapshot) -> Void
+    }
+
+    private var observers: [ObjectIdentifier: Observation] = [:]
     private var timer: Timer?
+
+    /// The cadence the running timer is actually using, or `nil` while
+    /// nothing is watching. Not `private`: `HostMetricsSourceCadenceTests`
+    /// asserts on this directly rather than waiting out real timer ticks —
+    /// `@testable import` reaches `internal`, not `private`.
+    private(set) var currentInterval: TimeInterval?
 
     private init() {}
 
-    /// Registers `owner` for every future sample, starting the timer if this
-    /// is the first observer. Idempotent per owner, like
+    /// Registers `owner` for every future sample at `interval`, tightening
+    /// (or relaxing) the shared timer's cadence to the minimum currently
+    /// requested by anyone. Idempotent per owner, like
     /// `ClaudeUsageLimitsPoller.addObserver`: re-registering replaces that
-    /// owner's block and nobody else's.
-    func addObserver(_ owner: AnyObject, _ block: @escaping (Snapshot) -> Void) {
-        observers[ObjectIdentifier(owner)] = block
-        guard timer == nil else { return }
-        // A throwaway read establishes `MachineStats`'s delta baseline now,
-        // so the first real sample one tick later is a fraction over the
-        // second that just elapsed rather than `nil` for want of one.
-        _ = MachineStats.cpuFraction()
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.sample() }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+    /// owner's interval and block, nobody else's.
+    func addObserver(_ owner: AnyObject, interval: TimeInterval, _ block: @escaping (Snapshot) -> Void) {
+        observers[ObjectIdentifier(owner)] = Observation(interval: interval, block: block)
+        reschedule()
     }
 
-    /// Unregisters `owner`, stopping the timer once nobody is left watching.
+    /// Unregisters `owner`. The cadence relaxes to whatever the remaining
+    /// observers need, or the timer stops entirely once nobody is left.
     func removeObserver(_ owner: AnyObject) {
         observers.removeValue(forKey: ObjectIdentifier(owner))
-        guard observers.isEmpty else { return }
+        reschedule()
+    }
+
+    /// Re-derives the tightest requested interval and re-arms the timer only
+    /// when that number actually changed — an observer joining or leaving at
+    /// an interval nobody's cadence depends on must not restart the timer
+    /// for no reason.
+    private func reschedule() {
+        guard let tightest = observers.values.map(\.interval).min() else {
+            timer?.invalidate()
+            timer = nil
+            currentInterval = nil
+            return
+        }
+        guard tightest != currentInterval else { return }
+        // A throwaway read establishes `MachineStats`'s delta baseline
+        // before the *first* timer this source ever starts — going from
+        // idle to watched, not merely re-tightening an already-running one,
+        // whose baseline is already recent enough to sample against.
+        if timer == nil {
+            _ = MachineStats.cpuFraction()
+        }
         timer?.invalidate()
-        timer = nil
+        let timer = Timer(timeInterval: tightest, repeats: true) { [weak self] _ in self?.sample() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        currentInterval = tightest
     }
 
     private func sample() {
@@ -610,7 +648,19 @@ final class HostMetricsSource {
             memory: MachineStats.memoryFraction(),
             gpu: MachineStats.gpuFraction()
         )
-        for observer in observers.values { observer(latest) }
+        for observation in observers.values { observation.block(latest) }
+    }
+
+    /// Clears every registration and stops the timer — only for the suite,
+    /// `ClaudeUsageLimitsPoller.resetForTesting`'s own pattern: `.shared` is
+    /// one singleton for the whole test process, so a cadence test has to be
+    /// able to start from nothing rather than from whatever an earlier
+    /// test's sidebar view left registered.
+    func resetForTesting() {
+        observers.removeAll()
+        timer?.invalidate()
+        timer = nil
+        currentInterval = nil
     }
 }
 
@@ -912,8 +962,9 @@ final class SidebarStatGaugeView: NSView {
 
 /// The machine gauges pinned just above the account row: CPU, memory and GPU
 /// side by side in the hover card's three-numbers arrangement — equal-width
-/// columns split by hairlines — resampled once a second, through
-/// [`HostMetricsSource`], while the sidebar is on screen.
+/// columns split by hairlines — resampled every two seconds, through
+/// [`HostMetricsSource`] at this card's own requested cadence, while the
+/// sidebar is on screen.
 final class SidebarSystemStatsView: NSView {
     static let height: CGFloat = 76
 
@@ -973,6 +1024,14 @@ final class SidebarSystemStatsView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    /// This card's own cadence (fix round 1, IMPORTANT 1) — unchanged from
+    /// before `HostMetricsSource` existed. Sharing a timer with
+    /// `HostStatePublisher`'s tighter 1 Hz must never mean this card samples
+    /// twice as often merely because something else is watching too; see
+    /// `HostMetricsSource.reschedule`'s doc for how that is kept true in both
+    /// directions.
+    static let sampleInterval: TimeInterval = 2
+
     /// Watches [`HostMetricsSource`] only while there is a window to show
     /// readings in — unregistering, not merely ignoring what arrives, so a
     /// sidebar with no window is one fewer reason for the shared timer to
@@ -981,7 +1040,7 @@ final class SidebarSystemStatsView: NSView {
         super.viewDidMoveToWindow()
         HostMetricsSource.shared.removeObserver(self)
         guard window != nil else { return }
-        HostMetricsSource.shared.addObserver(self) { [weak self] snapshot in
+        HostMetricsSource.shared.addObserver(self, interval: Self.sampleInterval) { [weak self] snapshot in
             self?.apply(cpu: snapshot.cpu, memory: snapshot.memory, gpu: snapshot.gpu)
         }
     }

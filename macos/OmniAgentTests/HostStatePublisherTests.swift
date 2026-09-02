@@ -9,6 +9,15 @@ import XCTest
 /// that keeps these tests off the kernel, `/usage`, and a real `PATH` search
 /// — `FixtureHostStateSources`/`SpyHostStateSources` below stand in for it.
 final class HostStatePublisherTests: XCTestCase {
+    /// `start()` registers with the real `HostMetricsSource.shared` — see
+    /// its own doc — so every test here that calls `start()` cleans up after
+    /// itself, the same discipline `NavigationSidebarTests`'s cadence tests
+    /// use for the same singleton.
+    override func tearDown() {
+        HostMetricsSource.shared.resetForTesting()
+        super.tearDown()
+    }
+
     func testPayloadCarriesEverythingAViewerCannotComputeItself() throws {
         let json = try JSONSerialization.jsonObject(
             with: HostStatePublisher(sources: .fixture())
@@ -87,6 +96,74 @@ final class HostStatePublisherTests: XCTestCase {
 
         XCTAssertEqual(keySet(json["host"] as? [String: Any]), ["name", "os", "appVersion"])
     }
+
+    // MARK: - Caching (fix round 1, IMPORTANT 2)
+    //
+    // `tick()` is not `private` specifically so these can drive it directly
+    // rather than waiting out `HostMetricsSource`'s real 1-second timer, or
+    // — for the slow-refresh test — a real minute of them.
+
+    /// `start()` refreshes `engines`/`hostInfo` exactly once, explicitly —
+    /// a viewer that has just taken the lease is told the truth right away —
+    /// and then not again on every metrics tick. The metrics tick must carry
+    /// metrics: `metricsReads` grows one-for-one with `tick()`, `enginesReads`/
+    /// `hostInfoReads` do not move at all across ten of them.
+    func testEnginesAndHostAreCachedNotReReadEveryTick() {
+        let sources = SpyHostStateSources()
+        let publisher = HostStatePublisher(sources: sources)
+        var published: [Data] = []
+        publisher.publish = { published.append($0) }
+
+        publisher.start()
+        XCTAssertEqual(sources.enginesReads, 1)
+        XCTAssertEqual(sources.hostInfoReads, 1)
+        XCTAssertEqual(sources.metricsReads, 0, "start() itself must not read metrics")
+
+        for _ in 0..<10 { publisher.tick() }
+
+        XCTAssertEqual(published.count, 10)
+        XCTAssertEqual(sources.metricsReads, 10)
+        XCTAssertEqual(sources.enginesReads, 1, "engines must not be re-read on every metrics tick")
+        XCTAssertEqual(sources.hostInfoReads, 1, "host info must not be re-read on every metrics tick")
+
+        publisher.stop()
+    }
+
+    /// The other half of "on change": with no real change signal for
+    /// installed engines, a long tick-counted interval stands in for one.
+    /// One full `HostStatePublisher.slowRefreshEveryTicks` worth of ticks
+    /// must refresh the cache exactly once more — not before, and not
+    /// silently never.
+    func testEnginesAndHostRefreshAfterOneSlowInterval() {
+        let sources = SpyHostStateSources()
+        let publisher = HostStatePublisher(sources: sources)
+        publisher.start()
+        XCTAssertEqual(sources.enginesReads, 1)
+
+        for _ in 0..<(HostStatePublisher.slowRefreshEveryTicks - 1) { publisher.tick() }
+        XCTAssertEqual(sources.enginesReads, 1, "not yet — one tick short of a full interval")
+
+        publisher.tick()
+        XCTAssertEqual(sources.enginesReads, 2, "a full slow-refresh interval elapsed while running")
+        XCTAssertEqual(sources.hostInfoReads, 2)
+
+        publisher.stop()
+    }
+
+    /// `payload()` called on its own, before `start()` ever has been, still
+    /// reads `engines`/`hostInfo` live — the cache exists to spare a
+    /// *running* publisher repeated work, not to make a standalone call
+    /// answer with nothing.
+    func testPayloadWithoutStartReadsEnginesAndHostLiveEveryTime() {
+        let sources = SpyHostStateSources()
+        let publisher = HostStatePublisher(sources: sources)
+
+        _ = publisher.payload()
+        _ = publisher.payload()
+
+        XCTAssertEqual(sources.enginesReads, 2)
+        XCTAssertEqual(sources.hostInfoReads, 2)
+    }
 }
 
 /// `[String: Any].keys` (or `nil`, for a field this test is also checking is
@@ -130,11 +207,15 @@ struct FixtureHostStateSources: HostStateSources {
     }
 }
 
-/// Counts reads rather than answering them meaningfully — the one thing
-/// `testNothingIsComputedWhileNobodyIsConnected` and
-/// `testStartingThenStoppingBeforeAnyTickPublishesNothing` need to observe.
+/// Counts reads rather than answering them meaningfully — what
+/// `testNothingIsComputedWhileNobodyIsConnected`,
+/// `testStartingThenStoppingBeforeAnyTickPublishesNothing`, and the caching
+/// tests (fix round 1, IMPORTANT 2) need to observe: not just *that*
+/// `HostStatePublisher` reads each field, but *how often*.
 final class SpyHostStateSources: HostStateSources {
     private(set) var metricsReads = 0
+    private(set) var enginesReads = 0
+    private(set) var hostInfoReads = 0
 
     func metrics() -> HostStatePublisher.Metrics {
         metricsReads += 1
@@ -144,7 +225,8 @@ final class SpyHostStateSources: HostStateSources {
     func limits() -> ClaudeUsageLimits { .empty }
 
     func engines() -> HostStatePublisher.Engines {
-        HostStatePublisher.Engines(
+        enginesReads += 1
+        return HostStatePublisher.Engines(
             claude: .init(available: false),
             codex: .init(available: false),
             antigravity: .init(available: false)
@@ -152,6 +234,7 @@ final class SpyHostStateSources: HostStateSources {
     }
 
     func hostInfo() -> HostStatePublisher.HostInfo {
-        HostStatePublisher.HostInfo(name: "Spy Mac", os: "macOS", appVersion: "0")
+        hostInfoReads += 1
+        return HostStatePublisher.HostInfo(name: "Spy Mac", os: "macOS", appVersion: "0")
     }
 }

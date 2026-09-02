@@ -237,6 +237,80 @@ final class NavigationSidebarTests: XCTestCase {
         XCTAssertLessThanOrEqual(memory ?? 0, 1)
     }
 
+    // MARK: - HostMetricsSource cadence (fix round 1, IMPORTANT 1)
+    //
+    // `.shared` is one singleton for the whole test process — `resetForTesting()`
+    // after each of these, so a leaked observer from one test cannot skew the
+    // "tightest requested interval" another test asserts on. Assertions read
+    // `currentInterval` directly rather than waiting out real timer ticks:
+    // deterministic, and exactly what production code itself consults.
+
+    override func tearDown() {
+        HostMetricsSource.shared.resetForTesting()
+        super.tearDown()
+    }
+
+    /// Nobody watching, so no timer at all — the base case every other
+    /// cadence test builds on.
+    func testNoObserversMeansNoCadence() {
+        XCTAssertNil(HostMetricsSource.shared.currentInterval)
+    }
+
+    /// The sidebar's dial alone gets its own two-second cadence — unchanged
+    /// from before `HostStatePublisher` existed.
+    func testOneObserverGetsExactlyItsOwnInterval() {
+        let owner = NSObject()
+        HostMetricsSource.shared.addObserver(owner, interval: 2) { _ in }
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 2)
+    }
+
+    /// A second, tighter observer joining — the publisher taking the lease
+    /// while the sidebar is already visible — tightens the shared cadence to
+    /// the minimum of the two, not to either one's own idea of it.
+    func testASecondTighterObserverTightensTheSharedCadence() {
+        let sidebar = NSObject()
+        let publisher = NSObject()
+        HostMetricsSource.shared.addObserver(sidebar, interval: 2) { _ in }
+        HostMetricsSource.shared.addObserver(publisher, interval: 1) { _ in }
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 1)
+    }
+
+    /// The finding itself, made explicit: the tighter observer leaving must
+    /// relax the cadence back to what the remaining one needs — not leave it
+    /// pinned at 1 s for a sidebar that only ever asked for 2.
+    func testTheTighterObserverLeavingRelaxesTheSharedCadenceBack() {
+        let sidebar = NSObject()
+        let publisher = NSObject()
+        HostMetricsSource.shared.addObserver(sidebar, interval: 2) { _ in }
+        HostMetricsSource.shared.addObserver(publisher, interval: 1) { _ in }
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 1)
+
+        HostMetricsSource.shared.removeObserver(publisher)
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 2)
+    }
+
+    /// The last observer leaving stops the timer entirely, not merely
+    /// relaxes it — the machine-with-nobody-watching case.
+    func testTheLastObserverLeavingStopsTheCadenceEntirely() {
+        let owner = NSObject()
+        HostMetricsSource.shared.addObserver(owner, interval: 2) { _ in }
+        XCTAssertNotNil(HostMetricsSource.shared.currentInterval)
+
+        HostMetricsSource.shared.removeObserver(owner)
+        XCTAssertNil(HostMetricsSource.shared.currentInterval)
+    }
+
+    /// A third observer joining at an interval nobody's cadence depends on
+    /// (looser than the current tightest) must not touch the running
+    /// cadence at all.
+    func testALooserObserverJoiningDoesNotRelaxAnAlreadyTighterCadence() {
+        let publisher = NSObject()
+        let onlooker = NSObject()
+        HostMetricsSource.shared.addObserver(publisher, interval: 1) { _ in }
+        HostMetricsSource.shared.addObserver(onlooker, interval: 5) { _ in }
+        XCTAssertEqual(HostMetricsSource.shared.currentInterval, 1)
+    }
+
     // MARK: - Content routing (controller)
 
     /// Home shows its real screen, To Do List still lands on the "Under

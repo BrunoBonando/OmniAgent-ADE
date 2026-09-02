@@ -72,17 +72,29 @@ struct LiveHostStateSources: HostStateSources {
 /// `nil` to a real connection, `stop()` the moment it goes back — the same
 /// transition that puts up and takes down the takeover panel. A machine with
 /// no viewer calls neither, so nothing here ever runs for it.
+/// `WorkspaceWindowController.deinit` also calls `stop()` — the abnormal
+/// path a window torn down mid-share would otherwise leave running.
 ///
-/// **One tick, not two.** `metrics()` is 1 Hz because that is
-/// `HostMetricsSource`'s own cadence (shared with the sidebar's dial, never
-/// duplicated — see its doc), and `start()` piggybacks on that same timer
-/// rather than owning a second one: every time `HostMetricsSource` samples,
-/// this publishes the *whole* payload, `limits`/`engines`/`host` read fresh
-/// from whatever their own sources already have cached. That is what "metrics
-/// at 1 Hz, everything else on change" means in practice — the *limits*
-/// poller's `/usage` cadence and the *engine* probe's `PATH` search each stay
-/// exactly as expensive (or as rare) as they already are on their own; this
-/// class adds no polling of its own for either.
+/// **One tick, not two — but the tick carries only `metrics` (fix round 1,
+/// IMPORTANT 2).** `start()` registers with `HostMetricsSource` at 1 Hz
+/// (`Self.metricsInterval`, shared with the sidebar's dial, never
+/// duplicated — see its doc) rather than owning a second timer. Every time
+/// that fires, `metrics()` and `limits()` are read fresh — both are cheap,
+/// cached reads of state something else already polls on its own schedule
+/// (`HostMetricsSource.shared.latest`, `ClaudeUsageLimitsPoller.shared
+/// .latest`) — but `engines()`/`hostInfo()` are **not**: `EngineLauncher
+/// .isInstalled` loops the whole `PATH` calling `isExecutableFile` for each
+/// of three engines, and only the `PATH` *string* is cached, not that stat.
+/// Running that once a second for the life of a share was fix round 1's
+/// finding, and this is the fix — `cachedEngines`/`cachedHostInfo` are read
+/// by `payload()` on every tick, but only *written* by `refreshSlowFields()`,
+/// which runs at two moments: an explicit refresh the instant `start()` is
+/// called (so a viewer that has just connected sees real values, not
+/// whatever `.fixture()`-shaped default an unread cache would fall back to),
+/// and again every `Self.slowRefreshEveryTicks` ticks after that — a much
+/// longer interval, chosen because installing or removing a CLI is a rare,
+/// manual act, not something a viewer needs to see land within one
+/// heartbeat.
 final class HostStatePublisher {
     struct Metrics: Encodable {
         var cpu: Double?
@@ -113,8 +125,28 @@ final class HostStatePublisher {
         var host: HostInfo
     }
 
+    /// `HostMetricsSource`'s own 1 Hz cadence — the publisher's interval,
+    /// registered explicitly (fix round 1, IMPORTANT 1) rather than assumed,
+    /// so it cannot silently drift from what spec §4 actually asks for.
+    private static let metricsInterval: TimeInterval = 1
+
+    /// How many metrics ticks pass between `engines()`/`hostInfo()`
+    /// refreshes while running — one minute at `metricsInterval`. See the
+    /// class doc's "fix round 1, IMPORTANT 2" paragraph for why this is a
+    /// tick count rather than a second timer, and why a minute is the chosen
+    /// trade-off.
+    static let slowRefreshEveryTicks = 60
+
     private let sources: HostStateSources
     private var isRunning = false
+    private var ticksSinceSlowRefresh = 0
+
+    /// `engines()`/`hostInfo()` as of the last `refreshSlowFields()` —
+    /// `nil` until that has run at least once, which `payload()` falls back
+    /// on so it stays correct (if not cache-fast) when called without
+    /// `start()` ever having run.
+    private var cachedEngines: Engines?
+    private var cachedHostInfo: HostInfo?
 
     /// How this reaches the daemon. Assigned once by
     /// `WorkspaceWindowController` to `connection.publishHostState(_:)`;
@@ -127,39 +159,68 @@ final class HostStatePublisher {
         self.sources = sources
     }
 
-    /// The exact JSON in spec §4 — a snapshot built from `sources` right now,
-    /// independent of whether `start()` has ever been called. `JSONEncoder`
-    /// cannot fail on `Payload`'s all-`Double`/`String`/`Bool` shape, so a
-    /// caller gets `Data` rather than a `throws` it can never usefully
-    /// recover from; `??` only guards the type system's own promise, never a
-    /// real failure this has been observed to hit.
+    /// The exact JSON in spec §4 — a snapshot built right now, independent
+    /// of whether `start()` has ever been called: `metrics()`/`limits()` are
+    /// always read live (both cheap), `engines()`/`hostInfo()` come from the
+    /// cache when `refreshSlowFields()` has populated one and are read live
+    /// otherwise — so a standalone `payload()` call before `start()` is
+    /// correct, just not cache-fast, and every call while running reads the
+    /// same cache `tick()` does. `JSONEncoder` cannot fail on `Payload`'s
+    /// all-`Double`/`String`/`Bool` shape, so a caller gets `Data` rather
+    /// than a `throws` it can never usefully recover from; `??` only guards
+    /// the type system's own promise, never a real failure this has been
+    /// observed to hit.
     func payload() -> Data {
         let payload = Payload(
             metrics: sources.metrics(),
             limits: sources.limits(),
-            engines: sources.engines(),
-            host: sources.hostInfo()
+            engines: cachedEngines ?? sources.engines(),
+            host: cachedHostInfo ?? sources.hostInfo()
         )
         return (try? Self.encoder.encode(payload)) ?? Data("{}".utf8)
     }
 
     /// Starts publishing — a no-op if already running, so a caller does not
-    /// have to track whether it already called this.
+    /// have to track whether it already called this. Refreshes
+    /// `engines`/`hostInfo` once, immediately, before registering: a viewer
+    /// that has just taken the lease is told what is actually installed on
+    /// this machine right now, not a stale cache from the share before.
     func start() {
         guard !isRunning else { return }
         isRunning = true
-        HostMetricsSource.shared.addObserver(self) { [weak self] _ in
-            guard let self else { return }
-            self.publish?(self.payload())
+        refreshSlowFields()
+        HostMetricsSource.shared.addObserver(self, interval: Self.metricsInterval) { [weak self] _ in
+            self?.tick()
         }
     }
 
     /// Stops publishing — a no-op if not running. Safe to call before
-    /// `start()` ever has been.
+    /// `start()` ever has been, and safe to call from `deinit`.
     func stop() {
         guard isRunning else { return }
         isRunning = false
         HostMetricsSource.shared.removeObserver(self)
+    }
+
+    /// One `HostMetricsSource` sample: publishes the current `payload()`,
+    /// and every `Self.slowRefreshEveryTicks`th call also refreshes the slow
+    /// fields first. Not `private` — `HostStatePublisherTests` calls this
+    /// directly to pin the caching behaviour without waiting out real
+    /// 1-second (or one-minute) timer ticks, the same reason
+    /// `SidebarSystemStatsView.apply` is public rather than reachable only
+    /// through its own timer.
+    func tick() {
+        ticksSinceSlowRefresh += 1
+        if ticksSinceSlowRefresh >= Self.slowRefreshEveryTicks {
+            refreshSlowFields()
+        }
+        publish?(payload())
+    }
+
+    private func refreshSlowFields() {
+        cachedEngines = sources.engines()
+        cachedHostInfo = sources.hostInfo()
+        ticksSinceSlowRefresh = 0
     }
 
     private static let encoder = JSONEncoder()

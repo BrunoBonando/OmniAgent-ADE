@@ -687,6 +687,25 @@ impl Client {
     /// the paused clock: there is nothing to advance past when the daemon is
     /// not going to answer at all, ever.
     pub async fn received_no_activity_push(&mut self) -> bool {
+        self.received_nothing_at_all().await
+    }
+
+    /// [`Self::received_no_activity_push`], named for `host_state.rs`'s own
+    /// guarantee instead (spec §4, Task 21 fix round 1): a connection that
+    /// has never been published to must receive no `HostState` push. Both
+    /// wrap the same kind-agnostic wait — neither actually filters by
+    /// `message_kind` — but a shared name at two call sites about two
+    /// different pushes reads as a claim about the wrong one at whichever
+    /// call site borrowed it.
+    pub async fn received_no_host_state_push(&mut self) -> bool {
+        self.received_nothing_at_all().await
+    }
+
+    /// The wait both of the above are named for — kind-agnostic on purpose:
+    /// it is "nothing at all", not "nothing of kind X", and the two names
+    /// above exist so a reader at either call site is told the guarantee
+    /// that matters there without having to know that.
+    async fn received_nothing_at_all(&mut self) -> bool {
         tokio::time::timeout(Duration::from_millis(200), read_frame(&mut self.stream))
             .await
             .is_err()

@@ -1155,6 +1155,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             .flatMap { workspace.surface(for: $0)?.primaryResponderView }
     }
 
+    /// The safety net `syncTakeoverPanel()` alone cannot be (fix round 1):
+    /// that function stops `hostStatePublisher` on the *normal* path, a
+    /// `remoteSharing.liveConnection` roster push saying nobody is driving
+    /// this Mac any more. A window torn down while a share is still live —
+    /// the app quitting, an account switch — never runs that path at all, so
+    /// without this the publisher's `HostMetricsSource` registration would
+    /// outlive the controller that owns it, sampling and publishing to a
+    /// `connection` this object no longer has any other reason to hold.
+    deinit {
+        hostStatePublisher.stop()
+    }
+
     // MARK: - Window frame
 
     static let frameAutosaveName = "OmniAgentWorkspaceWindow"
