@@ -149,50 +149,105 @@ pub struct RemoteActivityPayload {
 /// (`\p{N}`) — the literal categories, not the derived Alphabetic/Numeric
 /// properties. A combining diacritic (e.g. U+0308 COMBINING DIAERESIS,
 /// category Mn) has `Alphabetic = No` in the Unicode database, so
-/// `char::is_alphabetic()` alone would still mangle an NFD-normalised name
-/// even though a mark carries none of [`sanitize_display_text`]'s actual
-/// threats: a bidi control (Cf), a fullwidth paren (Ps/Pe), a dot lookalike
-/// (Po), and a line/paragraph separator (Zl/Zp) are none of them a Letter, a
-/// Mark, or a Number either — which is what makes admitting all three
-/// categories both correct (real international names round-trip intact) and
-/// still safe (fix round 3, ITEM 1).
-static UNICODE_LETTER_MARK_OR_NUMBER: LazyLock<Regex> =
+/// `char::is_alphabetic()` alone would still mangle an NFD-normalised name.
+///
+/// Only ever consulted for a **non-ASCII** character: the only ASCII
+/// codepoints in those three categories are `a-zA-Z0-9`, which
+/// [`is_allowed_display_char`] answers inline. That fast path is the
+/// difference between one regex-engine invocation per character of every
+/// path, label and query this module sanitizes and one per non-ASCII
+/// character, which real text has almost none of (fix round 4).
+static LETTER_MARK_OR_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[\p{L}\p{M}\p{N}]$").expect("static pattern is valid"));
 
-/// One character of [`sanitize_display_text`]'s allowlist: a Unicode letter,
-/// mark, or number, or one of six ASCII punctuation marks — the five an
-/// ordinary display name needs ("Bruno's MacBook Pro", "Mac-mini_2",
-/// "v1.2"), plus `/`. `/` earns its own place rather than folding into "an
-/// ordinary name doesn't need it": this same allowlist also sanitizes
-/// filesystem paths (`RootsAddProject`, `ListDirectory`, …), where `/` is
-/// not a viewer-chosen character to defend against — it is the path
-/// separator, load-bearing on every one of them, and stripping it renders
-/// `/Users/bruno/Projects/widget` as `?Users?bruno?Projects?widget`
-/// instead: unreadable, without closing any forgery `/` could not already
-/// commit (it is not one of this row format's own structural separators —
-/// `(`, `)`, `·`, the quotes around a name — so it can never be confused for
-/// one).
-pub(crate) fn is_allowed_display_char(c: char) -> bool {
-    matches!(c, ' ' | '-' | '_' | '.' | '\'' | '/')
-        || UNICODE_LETTER_MARK_OR_NUMBER.is_match(c.encode_utf8(&mut [0; 4]))
+/// `\p{M}` on its own — [`sanitize_display_text`]'s mark-run cap has to tell
+/// a combining mark from a base character, and the standard library exposes
+/// no Mark test at all (`char::is_alphabetic()` is the derived *Alphabetic*
+/// property, which most combining diacritics are not in — the very reason
+/// [`LETTER_MARK_OR_NUMBER`] above spells the categories out).
+static COMBINING_MARK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\p{M}$").expect("static pattern is valid"));
+
+/// A combining mark: a character with no advance width of its own, which
+/// stacks onto whatever precedes it. ASCII has none, so the regex is never
+/// reached for ASCII text.
+fn is_combining_mark(c: char) -> bool {
+    !c.is_ascii() && COMBINING_MARK.is_match(c.encode_utf8(&mut [0; 4]))
 }
+
+/// One character of [`sanitize_display_text`]'s allowlist: a Unicode letter,
+/// mark, or number, or one of seven punctuation marks — the five an ordinary
+/// display name needs ("Bruno's MacBook Pro", "Mac-mini_2", "v1.2"), plus
+/// `/` and `…`.
+///
+/// `/` earns its own place rather than folding into "an ordinary name
+/// doesn't need it": this same allowlist also sanitizes filesystem paths
+/// (`RootsAddProject`, `ListDirectory`, …), where `/` is not a viewer-chosen
+/// character to defend against — it is the path separator, load-bearing on
+/// every one of them, and stripping it renders `/Users/bruno/Projects/widget`
+/// as `?Users?bruno?Projects?widget` instead.
+///
+/// `…` ([`TRUNCATION_MARKER`]) earns its place for a different reason: it is
+/// the marker [`sanitize_display_text`] itself appends when it truncates, so
+/// admitting it is exactly what makes sanitizing an already-sanitized string
+/// a no-op. That idempotence is load-bearing — `sanitize_machine_name`
+/// (`server.rs`) sanitizes under its own tighter bound and [`display_field`]
+/// sanitizes again on the way into the row — and a viewer typing one of its
+/// own forges nothing, since no row template uses `…` as a delimiter.
+///
+/// Neither is one of the row format's own structural characters (`"`, the
+/// two isolates, `(`, `)`, `·`), so neither can be confused for one.
+fn is_allowed_display_char(c: char) -> bool {
+    if c.is_ascii() {
+        // ASCII holds no marks, so `a-zA-Z0-9` is exactly ASCII ∩ (L|M|N).
+        return c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'' | '/');
+    }
+    c == TRUNCATION_MARKER || LETTER_MARK_OR_NUMBER.is_match(c.encode_utf8(&mut [0; 4]))
+}
+
+/// The most characters one sanitized string may contribute to a row.
+///
+/// A bound is not tidiness. Marks (`\p{M}`) are in the allowlist because a
+/// real name needs them, and a mark has no advance width — five hundred of
+/// them stacked on one base character smear a single row vertically across
+/// the whole table. [`MAX_CONSECUTIVE_MARKS`] caps the height of that smear
+/// and this caps its breadth; together they also cap the work, since
+/// sanitizing then reads at most this many characters of a string no matter
+/// how long the frame that carried it was.
+const MAX_DISPLAY_CHARS: usize = 120;
+
+/// U+2026 HORIZONTAL ELLIPSIS, appended in place of the last character kept
+/// when [`sanitize_display_text`] truncates — truncation that says so, since
+/// a silently shortened path or query is exactly the kind of quiet
+/// alteration this log exists not to make.
+const TRUNCATION_MARKER: char = '…';
+
+/// How many combining marks may stack on one base character. Two covers
+/// every real orthography this will ever render (a base letter, a diacritic
+/// and, at the outside, a tone mark); the three-hundredth diaeresis on the
+/// same "o" is not a name.
+const MAX_CONSECUTIVE_MARKS: usize = 2;
 
 /// Replaces every character outside [`is_allowed_display_char`]'s allowlist
 /// with `?`, one-for-one — never dropped, so a hostile string reads as
 /// visibly odd rather than silently losing the evidence that something was
-/// stripped out of it.
+/// stripped out of it — then caps stacked combining marks and the total
+/// length.
 ///
-/// **This is the character-level defense every viewer-influenceable string
-/// runs through before it is interpolated into a one-line activity row
-/// summary** (fix round 3, ITEM 2, spec §8) — a pane title, a session or
-/// workspace name, a `SetSetting` key, a roots path/label, a brain query —
-/// anything a remote viewer chose the text of that ends up rendered into a
-/// summary line, whose own format (quoted names, `(…)`, ` · `) is exactly
-/// what a hostile separator, bidi control, or lookalike forges against. The
-/// same defense `sanitize_machine_name` (`server.rs`) already runs the
-/// self-reported machine name through; this is that function generalised to
-/// every other summary-bound string this module builds, rather than a
-/// second, independently-drifting copy of the same allowlist.
+/// **This is defence in depth; it is no longer the row's integrity.** Fix
+/// round 4 moved that guarantee to the emission side ([`display_field`]),
+/// because three rounds of filtering the *input* could not reach it: real
+/// letters render as the characters this format uses to separate fields
+/// (U+A78F LATIN LETTER SINOLOGICAL DOT and U+1427 CANADIAN SYLLABICS FINAL
+/// MIDDLE DOT are both `\p{L}` and both look like `·`; U+02BA MODIFIER
+/// LETTER DOUBLE PRIME is `\p{Lm}` and looks like `"`), and a strong
+/// right-to-left letter reorders the neutral characters around it under the
+/// plain Bidi Algorithm with no control character involved at all. No
+/// allowlist that admits real human machine names can exclude those. This
+/// function still earns its place — it is what keeps the ASCII quote and the
+/// two isolates *themselves* out of a field, which is what makes
+/// [`display_field`]'s delimiters unforgeable — but a row's structure no
+/// longer rests on it.
 ///
 /// **This is a different concern from [`redact`]**, which masks
 /// secret-*shaped* substrings (API keys, tokens) and leaves everything else,
@@ -207,10 +262,99 @@ pub(crate) fn is_allowed_display_char(c: char) -> bool {
 /// formatted text — there is nothing for it to forge, and redacting it
 /// (already done, everywhere `detail` is built) is the only transform it
 /// gets.
+///
+/// Sanitizing an already-sanitized string returns it unchanged: every
+/// character it can emit — an allowed one, `?`, [`TRUNCATION_MARKER`] — is
+/// one it admits, the mark cap is already met, and the length is already
+/// under the bound.
 pub(crate) fn sanitize_display_text(raw: &str) -> String {
-    raw.chars()
-        .map(|c| if is_allowed_display_char(c) { c } else { '?' })
-        .collect()
+    sanitize_display_text_bounded(raw, MAX_DISPLAY_CHARS)
+}
+
+/// [`sanitize_display_text`] under a caller-chosen bound —
+/// `sanitize_machine_name` (`server.rs`) holds a self-reported machine name
+/// to a tighter one than a filesystem path needs.
+pub(crate) fn sanitize_display_text_bounded(raw: &str, max_chars: usize) -> String {
+    debug_assert!(max_chars >= 1, "a bound of zero leaves nowhere to truncate");
+    let mut out = String::new();
+    let mut chars = raw.chars();
+    // Starting the run *at* the cap is what stops a sanitized string from
+    // beginning with a combining mark. A leading mark has no base character
+    // of its own, so a renderer hangs it on whatever happens to precede it —
+    // which, once [`display_field`] wraps this, is the row format's own
+    // opening quote. A mark that can reach back across a delimiter and paint
+    // on it is a mark that can alter a delimiter.
+    let mut marks_since_base = MAX_CONSECUTIVE_MARKS;
+    for c in chars.by_ref().take(max_chars) {
+        let mark = is_combining_mark(c);
+        marks_since_base = if mark { marks_since_base + 1 } else { 0 };
+        let keep =
+            is_allowed_display_char(c) && (!mark || marks_since_base <= MAX_CONSECUTIVE_MARKS);
+        out.push(if keep { c } else { '?' });
+    }
+    if chars.next().is_some() {
+        // Exactly one character out per character in so far, so this trades
+        // the last one kept for the marker and lands on `max_chars` even.
+        out.pop();
+        out.push(TRUNCATION_MARKER);
+    }
+    out
+}
+
+/// U+2068 FIRST STRONG ISOLATE and U+2069 POP DIRECTIONAL ISOLATE — the pair
+/// [`display_field`] wraps every interpolated value in.
+///
+/// Between them the Unicode Bidirectional Algorithm treats a field as a
+/// single neutral object in the surrounding text (UAX #9 §2.7): the
+/// direction inside is resolved from the field's own first strong character
+/// and cannot escape it, so a Hebrew or Arabic machine name can no longer
+/// displace the row's own quotes, parentheses and separators around itself.
+/// That attack needs no control characters at all — a strong RTL *letter* is
+/// `\p{Lo}`, so it is in the allowlist and always will be, because real
+/// machine names are written in those scripts.
+///
+/// A field cannot close its own isolate early, and that is exactly what
+/// [`sanitize_display_text`] is still here for: U+2069 is `Cf`, neither a
+/// letter, a mark, a number, nor one of the seven punctuation marks, so a
+/// viewer-supplied one is already a `?` by the time it reaches here.
+const FIRST_STRONG_ISOLATE: char = '\u{2068}';
+const POP_DIRECTIONAL_ISOLATE: char = '\u{2069}';
+
+/// The visible delimiter around a field. Not in
+/// [`is_allowed_display_char`]'s allowlist, so a field can never contain the
+/// ASCII quote that ends it.
+const FIELD_QUOTE: char = '"';
+
+/// **Every value interpolated into a row summary goes through here** — the
+/// one rule fix round 4 put in place of three rounds of input filtering.
+///
+/// A field renders as `"` + U+2068 + sanitized text + U+2069 + `"`. The
+/// quotes sit *outside* the isolate, in the row's own directional context,
+/// so they belong to the template rather than to the value and no field can
+/// move them; the isolate sits inside them, so no field's directionality
+/// reaches the rest of the row; and the sanitizer keeps both the quote and
+/// the two isolates out of the value, so the delimiters cannot be forged.
+/// The row is therefore exactly parseable by splitting on `"`, whatever any
+/// field contains.
+///
+/// Quoting *every* field, not only the machine name, is the point: a
+/// separator lookalike inside a field is then visibly inside a field. It
+/// cannot be made invisible — U+A78F and U+1427 are letters that render as
+/// `·`, U+02BA is a letter that renders as `"` — but it can be contained,
+/// and containment is what a reader needs in order to trust a row's shape.
+/// (The complete answer, if this ever matters more than it does, is
+/// out-of-band structure: [`ActivityEntry`] carrying its fields separately
+/// and the app drawing the delimiters. That is a wire-format change across
+/// two languages, not a formatting rule.)
+pub(crate) fn display_field(raw: &str) -> String {
+    let sanitized = sanitize_display_text(raw);
+    let mut out = String::with_capacity(sanitized.len() + 8);
+    out.push(FIELD_QUOTE);
+    out.push(FIRST_STRONG_ISOLATE);
+    out.push_str(&sanitized);
+    out.push(POP_DIRECTIONAL_ISOLATE);
+    out.push(FIELD_QUOTE);
+    out
 }
 
 /// Resolves protocol ids into the words a person reads — pane titles,
@@ -381,39 +525,52 @@ impl ActivityContext {
         ))
     }
 
-    /// The pane's own name, e.g. "Terminal 1" — or the raw id when the pane
-    /// is not (yet, or no longer) in the layout row. `id` is itself the
-    /// viewer's own choice of text (`Attach`/`Resize`/`Interrupt`/`Kill`/
-    /// `Input` all carry it directly on the frame, not something the daemon
-    /// assigned), so this fallback is sanitized exactly like a looked-up
-    /// pane's fields already are at construction time (fix round 3, ITEM 2)
-    /// — otherwise an id aimed at a pane that does not exist would reach a
-    /// summary completely unfiltered.
+    /// The pane's own name as one field — `"Terminal 1"` — or the raw id
+    /// when the pane is not (yet, or no longer) in the layout row. `id` is
+    /// itself the viewer's own choice of text (`Attach`/`Resize`/
+    /// `Interrupt`/`Kill`/`Input` all carry it directly on the frame, not
+    /// something the daemon assigned), so the fallback is a field exactly
+    /// like a looked-up pane's title is — otherwise an id aimed at a pane
+    /// that does not exist would reach a summary undelimited.
+    ///
+    /// Every one of these three accessors returns text that is **already
+    /// composed of [`display_field`]s**, so a caller interpolates the result
+    /// as-is and never wraps it again: the ` in ` and ` · ` between them are
+    /// this row format's own literal words, not values.
     fn pane_title(&self, id: &str) -> String {
-        self.panes
-            .get(id)
-            .map(|pane| pane.title.clone())
-            .unwrap_or_else(|| sanitize_display_text(id))
+        display_field(self.panes.get(id).map_or(id, |pane| pane.title.as_str()))
     }
 
-    /// "Terminal 1 (claude)" — an `Input` row's pane name. Falls back to the
-    /// bare pane name (in turn falling back to the sanitized raw id) when the
-    /// engine is not on record.
+    /// `"Terminal 1" ("claude")` — an `Input` row's pane name. Two fields,
+    /// not one: the parentheses are the template's, so the engine's own
+    /// extent stays as visible as the title's. Falls back to the bare pane
+    /// name (in turn falling back to the raw id) when the engine is not on
+    /// record.
     fn pane_with_engine(&self, id: &str) -> String {
         match self.panes.get(id) {
-            Some(pane) if !pane.engine.is_empty() => format!("{} ({})", pane.title, pane.engine),
+            Some(pane) if !pane.engine.is_empty() => format!(
+                "{} ({})",
+                display_field(&pane.title),
+                display_field(&pane.engine)
+            ),
             _ => self.pane_title(id),
         }
     }
 
-    /// "Terminal 1 in Session 1 · OmniAgent-ADE" — an `Attach` row's full
-    /// location. Falls back to the sanitized raw id when the pane is
-    /// unknown, rather than a half-filled sentence about a session and
-    /// workspace nobody can name either.
+    /// `"Terminal 1" in "Session 1" · "OmniAgent-ADE"` — an `Attach` row's
+    /// full location, three fields with the row format's own words between
+    /// them. Falls back to the raw id when the pane is unknown, rather than
+    /// a half-filled sentence about a session and workspace nobody can name
+    /// either.
     fn pane_location(&self, id: &str) -> String {
         match self.panes.get(id) {
-            Some(pane) => format!("{} in {} · {}", pane.title, pane.session, pane.workspace),
-            None => sanitize_display_text(id),
+            Some(pane) => format!(
+                "{} in {} · {}",
+                display_field(&pane.title),
+                display_field(&pane.session),
+                display_field(&pane.workspace)
+            ),
+            None => display_field(id),
         }
     }
 }
@@ -505,12 +662,10 @@ impl ActivityLog {
                 };
                 vec![ActivityEntry::new(
                     "attach",
-                    // `pane_location` already sanitizes every viewer-sourced
-                    // piece it assembles (fix round 3, ITEM 2) — its own
-                    // " in "/" · " separators are this row format's own
-                    // literal text, not sanitized here, exactly like
-                    // `sanitize_machine_name`'s caller leaves its own quotes
-                    // and parens alone.
+                    // `pane_location` returns three `display_field`s with
+                    // this row format's own " in " and " · " between them
+                    // (fix round 4), so it is interpolated as-is and never
+                    // wrapped again.
                     format!("Opened {}", ctx.pane_location(&attach.id)),
                     None,
                 )]
@@ -519,29 +674,32 @@ impl ActivityLog {
                 let Ok(create) = serde_json::from_slice::<CreateSession>(&frame.payload) else {
                     return Vec::new();
                 };
-                let engine = engine_from_command(&create.command);
-                // `create.cwd` is the viewer's own frame payload, not
-                // something the daemon assigned — sanitized (fix round 3,
-                // ITEM 2) before it can reach the summary below. `engine`
-                // needs none: `engine_from_command` only ever returns one of
-                // a closed set of literal strings, never raw viewer text.
+                // `engine` is one of a closed set of literals the daemon
+                // chooses, never raw viewer text — but it is still a value
+                // and not a word of the template, so it is a field like
+                // every other (fix round 4: the rule is structural, not a
+                // judgement about which values happen to be trustworthy).
+                let engine = display_field(&engine_from_command(&create.command));
                 let workspace = create
                     .cwd
                     .as_deref()
                     .map(last_path_segment)
-                    .map(|name| sanitize_display_text(&name))
                     .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| "this Mac".to_string());
+                    .map(|name| display_field(&name));
                 let detail = format!(
                     "cwd: {}\ncommand: {}",
                     create.cwd.as_deref().map(redact).unwrap_or_default(),
                     redact(&create.command.join(" ")),
                 );
-                vec![ActivityEntry::new(
-                    "create_session",
-                    format!("Started a {engine} terminal in {workspace}"),
-                    Some(detail),
-                )]
+                // Two shapes rather than a field holding the literal words
+                // "this Mac": a row either names a workspace or it does not,
+                // and a reader should not have to wonder whether the machine
+                // was called that.
+                let summary = match workspace {
+                    Some(workspace) => format!("Started a {engine} terminal in {workspace}"),
+                    None => format!("Started a {engine} terminal on this Mac"),
+                };
+                vec![ActivityEntry::new("create_session", summary, Some(detail))]
             }
             MessageKind::Input => {
                 let Ok((session, bytes)) = decode_raw_payload(&frame.payload) else {
@@ -605,15 +763,11 @@ impl ActivityLog {
                     // auditable fact — "changed the persona" with no detail
                     // does not say what it was changed to.
                     (
-                        // `setting.key` is the viewer's own frame payload —
-                        // sanitized (fix round 3, ITEM 2) before it reaches
-                        // the summary. `detail` stays exactly `redact`ed and
-                        // nothing more: it is the auditable fact, not a
-                        // display string.
-                        format!(
-                            "Changed a setting ({})",
-                            sanitize_display_text(&setting.key)
-                        ),
+                        // `setting.key` is the viewer's own frame payload.
+                        // `detail` stays exactly `redact`ed and nothing
+                        // more: it is the auditable fact, not a display
+                        // string.
+                        format!("Changed a setting ({})", display_field(&setting.key)),
                         Some(redact(&setting.value)),
                     )
                 };
@@ -631,7 +785,7 @@ impl ActivityLog {
                     // `payload.path` is the viewer's own frame payload.
                     format!(
                         "Started scanning {} for workspaces",
-                        sanitize_display_text(&redact(&payload.path))
+                        display_field(&redact(&payload.path))
                     ),
                     None,
                 )]
@@ -649,7 +803,7 @@ impl ActivityLog {
                 match payload.name.as_deref().map(redact) {
                     Some(name) => vec![ActivityEntry::new(
                         "roots",
-                        format!("Added workspace {}", sanitize_display_text(&name)),
+                        format!("Added workspace {}", display_field(&name)),
                         Some(path),
                     )],
                     None => vec![ActivityEntry::new(
@@ -657,7 +811,7 @@ impl ActivityLog {
                         // Here `path` *is* the summary, so it is sanitized
                         // only at this use site — the variable itself stays
                         // the plain redacted value for the branch above.
-                        format!("Added workspace {}", sanitize_display_text(&path)),
+                        format!("Added workspace {}", display_field(&path)),
                         None,
                     )],
                 }
@@ -672,7 +826,7 @@ impl ActivityLog {
                     "roots",
                     format!(
                         "Renamed a workspace to {}",
-                        sanitize_display_text(&redact(&payload.new_label))
+                        display_field(&redact(&payload.new_label))
                     ),
                     None,
                 )]
@@ -687,7 +841,7 @@ impl ActivityLog {
                     "roots",
                     format!(
                         "{verb} workspace {}",
-                        sanitize_display_text(&redact(&payload.project))
+                        display_field(&redact(&payload.project))
                     ),
                     None,
                 )]
@@ -702,7 +856,7 @@ impl ActivityLog {
                     "roots",
                     format!(
                         "Re-ingested workspace {}",
-                        sanitize_display_text(&redact(&payload.project))
+                        display_field(&redact(&payload.project))
                     ),
                     None,
                 )]
@@ -719,7 +873,7 @@ impl ActivityLog {
                 };
                 vec![ActivityEntry::new(
                     "list_directory",
-                    format!("Browsed {}", sanitize_display_text(&redact(&payload.path))),
+                    format!("Browsed {}", display_field(&redact(&payload.path))),
                     None,
                 )]
             }
@@ -748,7 +902,7 @@ impl ActivityLog {
                     "brain_get_context",
                     format!(
                         "Read the brief for {}",
-                        sanitize_display_text(&redact(&payload.project))
+                        display_field(&redact(&payload.project))
                     ),
                     None,
                 )]
@@ -769,20 +923,17 @@ impl ActivityLog {
                         "brain_search",
                         // `preview` reaches the summary; `query` (the full
                         // text, redacted but not sanitized) stays `detail`,
-                        // untouched — fix round 3, ITEM 2.
-                        format!(
-                            "Searched the brain for \"{}…\"",
-                            sanitize_display_text(&preview)
-                        ),
+                        // untouched. The `…` sits *outside* the field's own
+                        // quotes (fix round 4) — it is this template saying
+                        // "there was more", not part of what was searched
+                        // for, and the two must not be confusable.
+                        format!("Searched the brain for {}…", display_field(&preview)),
                         Some(query),
                     )]
                 } else {
                     vec![ActivityEntry::new(
                         "brain_search",
-                        format!(
-                            "Searched the brain for \"{}\"",
-                            sanitize_display_text(&query)
-                        ),
+                        format!("Searched the brain for {}", display_field(&query)),
                         None,
                     )]
                 }

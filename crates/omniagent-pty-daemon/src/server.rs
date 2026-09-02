@@ -1,4 +1,4 @@
-use crate::activity::{append, ActivityContext, ActivityEntry, ActivityLog};
+use crate::activity::{append, display_field, ActivityContext, ActivityEntry, ActivityLog};
 use crate::connections::{
     ActivityFeed, AssertedIdentity, ConnectionRegistry, LeaseHolder, PresenceFeed, ViewerIdentity,
 };
@@ -1097,14 +1097,18 @@ where
             vec![ActivityEntry::new(
                 "connected",
                 format!(
-                    // Quoted (fix round 2): the name's extent stays
-                    // unambiguous even if `sanitize_machine_name`'s
-                    // allowlist is widened later, since `"` is not in it —
-                    // the name can never contain one to be confused with
-                    // the quotes wrapping it.
-                    "Connected from \"{}\" ({})",
-                    sanitize_machine_name(&machine_name),
-                    asserted.ip.as_deref().unwrap_or("unknown IP")
+                    // Both values are fields (fix round 4): quoted and
+                    // isolate-wrapped by `display_field`, so neither can
+                    // reach outside its own delimiters — not the
+                    // self-reported name, and not the relay-asserted IP
+                    // either. The IP is trustworthy and is *still* a field,
+                    // because the rule that makes a row unforgeable is
+                    // "every value is delimited", not "every value I
+                    // currently distrust is delimited". The parentheses are
+                    // this template's own words, kept for how the row reads.
+                    "Connected from {} ({})",
+                    display_field(&sanitize_machine_name(&machine_name)),
+                    display_field(asserted.ip.as_deref().unwrap_or("unknown IP"))
                 ),
                 Some(identity_detail(asserted)),
             )],
@@ -1827,8 +1831,12 @@ impl Drop for ActivityGuard {
         trailing.push(ActivityEntry::new(
             "disconnected",
             format!(
+                // A field like every other, though nothing about a duration
+                // is viewer-controlled: `·` is the separator this format's
+                // whole forgery problem is about, so the value that follows
+                // one is delimited whatever it is (fix round 4).
                 "Disconnected · {}",
-                format_duration(self.connected_at.elapsed())
+                display_field(&format_duration(self.connected_at.elapsed()))
             ),
             None,
         ));
@@ -1870,19 +1878,31 @@ impl Drop for ActivityGuard {
 /// than dropped — a hostile name reads as visibly odd ("Air????????")
 /// rather than silently losing the evidence that something was stripped out
 /// of it, the same reasoning the identity block's own verified glyph exists
-/// for. The caller additionally quotes the result when it renders it
-/// (`"{name}"`), so the name's extent stays unambiguous even if this
-/// allowlist is widened again later — `"` itself is not in the allowlist,
-/// so the name can never contain one to be confused with the quotes
-/// wrapping it.
+/// for.
+///
+/// **What this function is not, since fix round 4.** It is no longer what
+/// keeps the opening row honest: the caller wraps its result in
+/// [`display_field`], and *that* is what makes the name's extent
+/// unambiguous. It could not have been this function's job — U+02BA
+/// MODIFIER LETTER DOUBLE PRIME is `\p{Lm}` and renders as `"`, so the
+/// round 2 claim in this very doc that "a quoted name can never contain a
+/// quote" was false, and U+A78F and U+1427 are letters that render as `·`.
+/// What survives here is a bound (this one tighter than the shared default:
+/// a machine name has no business being as long as a filesystem path) and
+/// the fallback for a name that is empty or nothing but spaces.
 fn sanitize_machine_name(raw: &str) -> String {
+    /// Tighter than `activity`'s shared bound — a name, not a path.
     const MAX_LEN: usize = 64;
-    let cleaned = crate::activity::sanitize_display_text(raw);
+    let cleaned = crate::activity::sanitize_display_text_bounded(raw, MAX_LEN);
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
+        // Only reachable for a genuinely empty or all-whitespace name: a
+        // name of nothing but disallowed codepoints sanitizes to a run of
+        // `?`, which is deliberately *not* smoothed into a plausible-looking
+        // fallback (fix round 2).
         return "Unknown Mac".to_string();
     }
-    trimmed.chars().take(MAX_LEN).collect()
+    trimmed.to_string()
 }
 
 /// Persists every entry to `remote-activity.jsonl` and pushes the batch to
@@ -2308,20 +2328,34 @@ async fn send_frame(writer: &SharedWriter, frame: Frame) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The property every `sanitize_machine_name` test in this round leans
-    /// on, so a test failure names the actual offending codepoint instead of
-    /// just failing a `contains` check on the one character the test author
-    /// happened to think of (fix round 2's own instruction: "assert on
-    /// codepoint categories where you can"). Widened in fix round 3, ITEM 1
-    /// from ASCII alphanumeric to `crate::activity::is_allowed_display_char`
-    /// — the exact same predicate `sanitize_machine_name` itself now runs on,
-    /// so this stays a property check on *categories* (Letter, Mark, Number,
-    /// or the five punctuation marks) rather than a re-hardcoded copy of the
-    /// allowlist that could silently drift from the real one.
+    /// The property every `sanitize_machine_name` test below leans on, so a
+    /// failure names the actual offending codepoint instead of failing a
+    /// `contains` check on the one character the test author happened to
+    /// think of.
+    ///
+    /// **The expectation is spelled out here on purpose** (fix round 4).
+    /// Round 3 pointed this helper at the production predicate
+    /// (`activity::is_allowed_display_char`) to stop the two drifting apart,
+    /// which had it exactly backwards: a test that asks the code under test
+    /// what to expect passes by construction, and every hostile-codepoint
+    /// case below would have stayed green through any widening of the
+    /// allowlist — including one that admitted the very characters they
+    /// exist to exclude. Drift between this list and the production one is
+    /// the thing these tests are *for*; it must fail here, loudly, and be
+    /// re-decided by a person.
+    ///
+    /// The list: a Unicode letter, mark or number (spelled out as the
+    /// literal general categories, not the derived Alphabetic property), one
+    /// of the seven punctuation marks the allowlist admits, or the `?` a
+    /// disallowed codepoint was replaced with.
     fn assert_only_allowed_chars(cleaned: &str) {
+        let letter_mark_or_number =
+            regex::Regex::new(r"^[\p{L}\p{M}\p{N}]$").expect("static pattern is valid");
         for c in cleaned.chars() {
             assert!(
-                c == '?' || crate::activity::is_allowed_display_char(c),
+                c == '?'
+                    || matches!(c, ' ' | '-' | '_' | '.' | '\'' | '/' | '…')
+                    || letter_mark_or_number.is_match(c.encode_utf8(&mut [0; 4])),
                 "disallowed codepoint U+{:04X} ({c:?}) survived sanitization in {cleaned:?}",
                 c as u32
             );
@@ -2450,10 +2484,57 @@ mod tests {
         assert_eq!(sanitize_machine_name(nfd_name), nfd_name);
     }
 
+    /// A name is held to a tighter bound than the shared one a filesystem
+    /// path gets, and (fix round 4) the truncation is visible: a row that
+    /// silently shortened a name would be making exactly the kind of quiet
+    /// alteration this log exists not to make.
     #[test]
-    fn sanitize_machine_name_bounds_the_length() {
+    fn sanitize_machine_name_bounds_the_length_and_says_it_truncated() {
         let cleaned = sanitize_machine_name(&"x".repeat(500));
-        assert!(cleaned.chars().count() <= 64, "{}", cleaned.chars().count());
+        assert_eq!(cleaned.chars().count(), 64, "{cleaned}");
+        assert!(cleaned.ends_with('…'), "{cleaned}");
+        assert_only_allowed_chars(&cleaned);
+    }
+
+    /// Fix round 4: `\p{M}` is in the allowlist because real names need it,
+    /// and a mark has no advance width of its own — unbounded, a name of
+    /// stacked marks smears one row down over the rows around it. Capped
+    /// one-for-one, so nothing is lost about the fact that they were there.
+    #[test]
+    fn sanitize_machine_name_caps_stacked_combining_marks() {
+        let cleaned = sanitize_machine_name(&format!("o{}", "\u{308}".repeat(20)));
+        assert_eq!(cleaned, format!("o\u{308}\u{308}{}", "?".repeat(18)));
+        assert_only_allowed_chars(&cleaned);
+    }
+
+    /// A mark leading a name has no base character of its own inside the
+    /// field, so a renderer paints it on the delimiter the caller's
+    /// `display_field` puts in front of it.
+    #[test]
+    fn sanitize_machine_name_never_begins_with_a_combining_mark() {
+        assert_eq!(sanitize_machine_name("\u{308}Air"), "?Air");
+    }
+
+    /// Fix round 4: sanitizing an already-sanitized name changes nothing.
+    /// The machine-name path relies on it — this function sanitizes under
+    /// its own 64-character bound and `display_field` sanitizes again on the
+    /// way into the row — and a second pass that mangled the first's own
+    /// truncation marker would corrupt exactly the longest names.
+    #[test]
+    fn sanitize_machine_name_is_idempotent_including_its_truncation_marker() {
+        for raw in [
+            "Bruno's MacBook Pro",
+            "Björns MacBook",
+            "\u{ff08}\u{2022}\u{202e}",
+            &"x".repeat(500),
+        ] {
+            let once = sanitize_machine_name(raw);
+            assert_eq!(
+                crate::activity::sanitize_display_text(&once),
+                once,
+                "a second pass changed {once:?}"
+            );
+        }
     }
 
     /// An ordinary name is left alone — this is a filter against the log's

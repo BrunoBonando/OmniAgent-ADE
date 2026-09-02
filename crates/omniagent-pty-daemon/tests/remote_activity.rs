@@ -195,19 +195,111 @@ fn one(entries: Vec<ActivityEntry>) -> ActivityEntry {
     entries.into_iter().next().unwrap()
 }
 
-/// Fix round 3, ITEM 2: the same allowlist property `server.rs`'s own
-/// `sanitize_machine_name` tests pin against a self-reported machine name,
-/// checked here against every OTHER viewer-influenceable string this file
-/// proves reaches a summary — a Unicode letter, mark, or number, or one of
-/// six ASCII punctuation marks (the five an ordinary name needs, plus `/`,
-/// the path separator several of these fields carry), or the `?` placeholder
-/// a disallowed codepoint was replaced with.
+/// The two bidi isolates a field is wrapped in, spelled out here rather than
+/// imported from the daemon. A test that asks the code under test what a
+/// field looks like agrees with any change to it — including one that drops
+/// the isolates altogether.
+const FSI: char = '\u{2068}';
+const PDI: char = '\u{2069}';
+
+/// One field, exactly as a row must render it: `"` U+2068 text U+2069 `"`.
+fn q(content: &str) -> String {
+    format!("\"{FSI}{content}{PDI}\"")
+}
+
+/// Splits a row summary into its template — every field replaced by `{}` —
+/// and the fields' contents, **proving the row is well formed as it goes**
+/// (fix round 4). This is the assertion the whole round is about: a row's
+/// structure must be recoverable no matter what a viewer put in a field.
+///
+/// Well formed means: every `"` opens a field and is immediately followed by
+/// U+2068; the field's text runs to the first U+2069, which is immediately
+/// followed by the closing `"`; neither isolate nor a quote appears anywhere
+/// else — not in a field's text, and not loose in the template; and every
+/// character *outside* a field is one of the daemon's own words.
+///
+/// That last check is what stops a value from hiding as template text. A
+/// summary built by interpolating a raw string — the mistake this round's
+/// exhaustive `MessageKind` test exists to catch — would put viewer text
+/// where the template goes, and the row would still parse cleanly into its
+/// (fewer) fields without it.
+fn parse_row(summary: &str) -> (String, Vec<String>) {
+    let chars: Vec<char> = summary.chars().collect();
+    let mut template = String::new();
+    let mut fields = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '"' {
+            assert!(
+                chars[i] != FSI && chars[i] != PDI,
+                "a bare isolate U+{:04X} at {i} is outside any field in {summary:?}",
+                chars[i] as u32
+            );
+            // The row templates in `activity.rs`/`server.rs` are English
+            // words and ASCII punctuation, plus exactly two non-ASCII
+            // characters of their own: `·` between a pane, its session and
+            // its workspace, and `…` after a truncated brain query.
+            assert!(
+                chars[i].is_ascii() || chars[i] == '·' || chars[i] == '…',
+                "U+{:04X} ({:?}) is outside every field and is not one of the row \
+                 format's own characters — an interpolated value that skipped \
+                 `display_field`? — in {summary:?}",
+                chars[i] as u32,
+                chars[i]
+            );
+            template.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        assert_eq!(
+            chars.get(i).copied(),
+            Some(FSI),
+            "a field's opening quote is not followed by U+2068 in {summary:?}"
+        );
+        i += 1;
+        let mut text = String::new();
+        while let Some(&c) = chars.get(i) {
+            if c == PDI {
+                break;
+            }
+            assert!(
+                c != '"' && c != FSI,
+                "U+{:04X} escaped its field's delimiters in {summary:?}",
+                c as u32
+            );
+            text.push(c);
+            i += 1;
+        }
+        assert_eq!(
+            chars.get(i).copied(),
+            Some(PDI),
+            "a field is never closed in {summary:?}"
+        );
+        i += 1;
+        assert_eq!(
+            chars.get(i).copied(),
+            Some('"'),
+            "a field's U+2069 is not followed by its closing quote in {summary:?}"
+        );
+        i += 1;
+        template.push_str("{}");
+        fields.push(text);
+    }
+    (template, fields)
+}
+
+/// The allowlist, **spelled out here** rather than asked of the production
+/// predicate (fix round 4, the same correction `server.rs`'s own copy got): a
+/// Unicode letter, mark or number, one of seven punctuation marks (the five
+/// an ordinary name needs, plus `/` for paths and `…` for the sanitizer's own
+/// truncation marker), or the `?` a disallowed codepoint was replaced with.
 fn assert_only_allowed_chars(text: &str) {
     let letter_mark_or_number = regex::Regex::new(r"^[\p{L}\p{M}\p{N}]$").unwrap();
     for c in text.chars() {
         assert!(
             c == '?'
-                || matches!(c, ' ' | '-' | '_' | '.' | '\'' | '/')
+                || matches!(c, ' ' | '-' | '_' | '.' | '\'' | '/' | '…')
                 || letter_mark_or_number.is_match(c.encode_utf8(&mut [0; 4])),
             "disallowed codepoint U+{:04X} ({c:?}) survived sanitization in {text:?}",
             c as u32
@@ -215,30 +307,26 @@ fn assert_only_allowed_chars(text: &str) {
     }
 }
 
+/// Parses a row and checks every field's content against the allowlist,
+/// returning the template so a caller can pin the row's shape. The two
+/// halves of what a row has to guarantee, in one call: the structure is
+/// recoverable, and nothing inside a field is a character the sanitizer was
+/// supposed to have replaced.
+fn assert_well_formed(summary: &str) -> (String, Vec<String>) {
+    let (template, fields) = parse_row(summary);
+    for field in &fields {
+        assert_only_allowed_chars(field);
+    }
+    (template, fields)
+}
+
 /// A machine name shaped like the row format itself — fullwidth parens, a
 /// dot lookalike, a line separator, a bidi override — touching every
 /// category fix round 2 named. Reused here for every OTHER
-/// viewer-influenceable field fix round 3 (ITEM 2) sanitizes, since the
-/// threat is identical regardless of which field carries it.
+/// viewer-influenceable field, since the threat is identical regardless of
+/// which field carries it.
 const HOSTILE: &str =
     "Air\u{ff08}1.2.3.4\u{ff09}\u{ff09}\u{2022}Disconnected\u{2028}\u{202e}3m 00s";
-
-/// The five non-ASCII codepoints in [`HOSTILE`], individually — not usable as
-/// a whole-summary [`assert_only_allowed_chars`] check wherever the row's own
-/// *template* legitimately prints `(`, `)`, or `·` itself (e.g. "Sent a
-/// prompt to {title} ({engine})", "Opened {title} in {session} · {workspace}"
-/// — none of those three characters is one of [`HOSTILE`]'s five, so their
-/// presence there is the template's own literal text, not a survivor from
-/// sanitizing the hostile field).
-fn assert_hostile_codepoints_absent(text: &str) {
-    for c in ['\u{ff08}', '\u{ff09}', '\u{2022}', '\u{2028}', '\u{202e}'] {
-        assert!(
-            !text.contains(c),
-            "hostile codepoint U+{:04X} survived sanitization in {text:?}",
-            c as u32
-        );
-    }
-}
 
 /// A `layout` row (`ActivityContext::from_layout`'s own input shape) whose
 /// pane title, session label, workspace name, and engine are all [`HOSTILE`]
@@ -279,7 +367,10 @@ fn a_typed_prompt_is_one_row_not_one_row_per_keystroke() {
     let entry = &entries[0];
 
     assert_eq!(entry.kind, "input");
-    assert_eq!(entry.summary, "Sent a prompt to Terminal 1 (claude)");
+    assert_eq!(
+        entry.summary,
+        format!("Sent a prompt to {} ({})", q("Terminal 1"), q("claude"))
+    );
     assert_eq!(entry.detail.as_deref(), Some("hello there"));
 }
 
@@ -357,7 +448,12 @@ fn rows_that_say_everything_have_no_detail_to_expand() {
     let entry = one(log.record(&attach_frame("pane-1"), &ActivityContext::fixture()));
     assert_eq!(
         entry.summary,
-        "Opened Terminal 1 in Session 1 · OmniAgent-ADE"
+        format!(
+            "Opened {} in {} · {}",
+            q("Terminal 1"),
+            q("Session 1"),
+            q("OmniAgent-ADE")
+        )
     );
     assert_eq!(entry.detail, None);
 }
@@ -391,7 +487,7 @@ fn interrupt_with_nothing_pending_still_gets_its_own_row() {
     let mut log = ActivityLog::default();
     let entry = one(log.record(&interrupt_frame("pane-1"), &ActivityContext::fixture()));
     assert_eq!(entry.kind, "interrupt");
-    assert_eq!(entry.summary, "Interrupted Terminal 1");
+    assert_eq!(entry.summary, format!("Interrupted {}", q("Terminal 1")));
     assert_eq!(entry.detail, None);
 }
 
@@ -400,7 +496,7 @@ fn kill_closes_a_named_pane() {
     let mut log = ActivityLog::default();
     let entry = one(log.record(&kill_frame("pane-1"), &ActivityContext::fixture()));
     assert_eq!(entry.kind, "kill");
-    assert_eq!(entry.summary, "Closed Terminal 1");
+    assert_eq!(entry.summary, format!("Closed {}", q("Terminal 1")));
 }
 
 #[test]
@@ -408,9 +504,9 @@ fn an_unknown_pane_id_falls_back_to_itself_rather_than_being_dropped() {
     let mut log = ActivityLog::default();
     let ctx = ActivityContext::fixture();
     let attach = one(log.record(&attach_frame("mystery-pane"), &ctx));
-    assert_eq!(attach.summary, "Opened mystery-pane");
+    assert_eq!(attach.summary, format!("Opened {}", q("mystery-pane")));
     let kill = one(log.record(&kill_frame("mystery-pane"), &ctx));
-    assert_eq!(kill.summary, "Closed mystery-pane");
+    assert_eq!(kill.summary, format!("Closed {}", q("mystery-pane")));
 }
 
 #[test]
@@ -425,7 +521,14 @@ fn create_session_names_the_engine_and_the_workspace() {
         &ActivityContext::fixture(),
     ));
     assert_eq!(entry.kind, "create_session");
-    assert_eq!(entry.summary, "Started a claude terminal in OmniAgent-ADE");
+    assert_eq!(
+        entry.summary,
+        format!(
+            "Started a {} terminal in {}",
+            q("claude"),
+            q("OmniAgent-ADE")
+        )
+    );
     let detail = entry.detail.unwrap();
     assert!(detail.contains("OmniAgent-ADE"));
     assert!(detail.contains("claude"));
@@ -459,7 +562,10 @@ fn set_setting_on_any_other_reachable_key_gets_a_row_with_the_value_in_detail() 
         &ActivityContext::fixture(),
     ));
     assert_eq!(entry.kind, "set_setting");
-    assert_eq!(entry.summary, "Changed a setting (persona)");
+    assert_eq!(
+        entry.summary,
+        format!("Changed a setting ({})", q("persona"))
+    );
     assert_eq!(entry.detail.as_deref(), Some("grumpy"));
 }
 
@@ -472,7 +578,7 @@ fn set_setting_on_remote_control_workspaces_is_logged_with_its_redacted_value() 
     ));
     assert_eq!(
         entry.summary,
-        "Changed a setting (remote_control_workspaces)"
+        format!("Changed a setting ({})", q("remote_control_workspaces"))
     );
     assert_eq!(entry.detail.as_deref(), Some("[\"/a\",\"/b\"]"));
 }
@@ -487,7 +593,7 @@ fn roots_add_project_names_the_workspace() {
     assert_eq!(entry.kind, "roots");
     assert_eq!(
         entry.summary,
-        "Added workspace /Users/bruno/Projects/widget"
+        format!("Added workspace {}", q("/Users/bruno/Projects/widget"))
     );
     assert_eq!(entry.detail, None);
 }
@@ -499,7 +605,7 @@ fn roots_add_project_with_a_custom_name_keeps_the_path_as_detail() {
         &roots_add_project_frame("/Users/bruno/Projects/widget", Some("Widget")),
         &ActivityContext::fixture(),
     ));
-    assert_eq!(entry.summary, "Added workspace Widget");
+    assert_eq!(entry.summary, format!("Added workspace {}", q("Widget")));
     assert_eq!(
         entry.detail.as_deref(),
         Some("/Users/bruno/Projects/widget")
@@ -513,7 +619,10 @@ fn roots_rename_project_says_the_new_name() {
         &roots_rename_project_frame("proj-1", "Renamed Widget"),
         &ActivityContext::fixture(),
     ));
-    assert_eq!(entry.summary, "Renamed a workspace to Renamed Widget");
+    assert_eq!(
+        entry.summary,
+        format!("Renamed a workspace to {}", q("Renamed Widget"))
+    );
 }
 
 #[test]
@@ -521,9 +630,9 @@ fn roots_set_paused_says_paused_or_resumed() {
     let mut log = ActivityLog::default();
     let ctx = ActivityContext::fixture();
     let paused = one(log.record(&roots_set_paused_frame("/proj", true), &ctx));
-    assert_eq!(paused.summary, "Paused workspace /proj");
+    assert_eq!(paused.summary, format!("Paused workspace {}", q("/proj")));
     let resumed = one(log.record(&roots_set_paused_frame("/proj", false), &ctx));
-    assert_eq!(resumed.summary, "Resumed workspace /proj");
+    assert_eq!(resumed.summary, format!("Resumed workspace {}", q("/proj")));
 }
 
 #[test]
@@ -533,7 +642,10 @@ fn roots_reingest_project_says_which_one() {
         &roots_reingest_project_frame("/proj"),
         &ActivityContext::fixture(),
     ));
-    assert_eq!(entry.summary, "Re-ingested workspace /proj");
+    assert_eq!(
+        entry.summary,
+        format!("Re-ingested workspace {}", q("/proj"))
+    );
 }
 
 #[test]
@@ -564,7 +676,10 @@ fn list_directory_names_the_path() {
         &ActivityContext::fixture(),
     ));
     assert_eq!(entry.kind, "list_directory");
-    assert_eq!(entry.summary, "Browsed /Users/bruno/Documents");
+    assert_eq!(
+        entry.summary,
+        format!("Browsed {}", q("/Users/bruno/Documents"))
+    );
 }
 
 /// `BrainGetContext` hands the remote client brain content — the project's
@@ -579,7 +694,10 @@ fn brain_get_context_is_logged_like_the_other_disclosing_reads() {
         &ActivityContext::fixture(),
     ));
     assert_eq!(entry.kind, "brain_get_context");
-    assert_eq!(entry.summary, "Read the brief for OmniAgent-ADE");
+    assert_eq!(
+        entry.summary,
+        format!("Read the brief for {}", q("OmniAgent-ADE"))
+    );
 }
 
 #[test]
@@ -590,7 +708,10 @@ fn brain_search_shows_a_short_query_in_full_with_no_detail() {
         &ActivityContext::fixture(),
     ));
     assert_eq!(entry.kind, "brain_search");
-    assert_eq!(entry.summary, "Searched the brain for \"daemon protocol\"");
+    assert_eq!(
+        entry.summary,
+        format!("Searched the brain for {}", q("daemon protocol"))
+    );
     assert_eq!(entry.detail, None);
 }
 
@@ -646,7 +767,10 @@ fn resize_settles_into_one_row_after_quiet() {
     let entries = log.tick(Instant::now() + Duration::from_secs(6));
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, "resize");
-    assert_eq!(entries[0].summary, "Resized Terminal 1 to 120x40");
+    assert_eq!(
+        entries[0].summary,
+        format!("Resized {} to 120x40", q("Terminal 1"))
+    );
 }
 
 /// A drag sends many `Resize` frames; the settled row must reflect the final
@@ -660,7 +784,10 @@ fn rapid_resizes_coalesce_to_the_final_size() {
     }
     let entries = log.tick(Instant::now() + Duration::from_secs(6));
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].summary, "Resized Terminal 1 to 120x40");
+    assert_eq!(
+        entries[0].summary,
+        format!("Resized {} to 120x40", q("Terminal 1"))
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -688,7 +815,10 @@ fn flush_all_also_recovers_an_unsettled_resize() {
     let entries = log.flush_all();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, "resize");
-    assert_eq!(entries[0].summary, "Resized Terminal 1 to 90x20");
+    assert_eq!(
+        entries[0].summary,
+        format!("Resized {} to 90x20", q("Terminal 1"))
+    );
 }
 
 /// The whole point: a CR-triggered row and a connection-close-triggered row
@@ -708,7 +838,10 @@ fn flush_all_names_the_pane_exactly_like_a_cr_flush_does() {
     assert_eq!(closed_entries.len(), 1);
 
     assert_eq!(cr_entry.summary, closed_entries[0].summary);
-    assert_eq!(cr_entry.summary, "Sent a prompt to Terminal 1 (claude)");
+    assert_eq!(
+        cr_entry.summary,
+        format!("Sent a prompt to {} ({})", q("Terminal 1"), q("claude"))
+    );
 }
 
 /// The same discipline pinned directly against the 5 s quiet path: it must
@@ -767,10 +900,11 @@ fn the_timestamp_is_rfc3339_on_the_wire_and_round_trips() {
 fn hostile_pane_title_session_and_workspace_from_layout_cannot_forge_the_attach_row() {
     let mut log = ActivityLog::default();
     let entry = one(log.record(&attach_frame("pane-1"), &hostile_layout_ctx()));
-    // Not `assert_only_allowed_chars` on the whole summary: "Opened {title}
-    // in {session} · {workspace}" legitimately prints its own literal " · "
-    // (`U+00B7`, distinct from any of `HOSTILE`'s five codepoints).
-    assert_hostile_codepoints_absent(&entry.summary);
+    // The row still parses as exactly three fields with this template's own
+    // words between them, whatever the hostile text did inside them.
+    let (template, fields) = assert_well_formed(&entry.summary);
+    assert_eq!(template, "Opened {} in {} · {}");
+    assert_eq!(fields.len(), 3, "{}", entry.summary);
 }
 
 /// `Resize`/`Interrupt`/`Kill` all resolve their pane name through
@@ -783,15 +917,18 @@ fn hostile_pane_title_from_layout_cannot_forge_the_resize_interrupt_or_kill_row(
     let mut resize_log = ActivityLog::default();
     resize_log.record(&resize_frame("pane-1", 10, 10), &ctx);
     let resized = &resize_log.tick(Instant::now() + Duration::from_secs(6))[0];
-    assert_only_allowed_chars(&resized.summary);
+    assert_eq!(
+        assert_well_formed(&resized.summary).0,
+        "Resized {} to 10x10"
+    );
 
     let mut interrupt_log = ActivityLog::default();
     let interrupted = one(interrupt_log.record(&interrupt_frame("pane-1"), &ctx));
-    assert_only_allowed_chars(&interrupted.summary);
+    assert_eq!(assert_well_formed(&interrupted.summary).0, "Interrupted {}");
 
     let mut kill_log = ActivityLog::default();
     let killed = one(kill_log.record(&kill_frame("pane-1"), &ctx));
-    assert_only_allowed_chars(&killed.summary);
+    assert_eq!(assert_well_formed(&killed.summary).0, "Closed {}");
 }
 
 #[test]
@@ -800,9 +937,11 @@ fn hostile_engine_from_layout_cannot_forge_the_input_row_summary() {
     let ctx = hostile_layout_ctx();
     log.record(&input_frame("pane-1", b"hi"), &ctx);
     let entry = one(log.record(&input_frame("pane-1", b"\r"), &ctx));
-    // Not `assert_only_allowed_chars`: "Sent a prompt to {title} ({engine})"
-    // legitimately prints its own literal `(`/`)`.
-    assert_hostile_codepoints_absent(&entry.summary);
+    // The engine is its own field, not part of the title's: the parentheses
+    // are the template's own, so a hostile engine name cannot swallow them.
+    let (template, fields) = assert_well_formed(&entry.summary);
+    assert_eq!(template, "Sent a prompt to {} ({})");
+    assert_eq!(fields.len(), 2, "{}", entry.summary);
 }
 
 /// Not a `layout` field at all — `Attach`/`Resize`/`Interrupt`/`Kill`/`Input`
@@ -817,8 +956,7 @@ fn a_hostile_unknown_pane_id_is_sanitized_rather_than_forging_the_row() {
     let mut log = ActivityLog::default();
     let ctx = ActivityContext::fixture();
     let attach = one(log.record(&attach_frame(HOSTILE), &ctx));
-    assert!(attach.summary.starts_with("Opened "), "{}", attach.summary);
-    assert_only_allowed_chars(&attach.summary);
+    assert_eq!(assert_well_formed(&attach.summary).0, "Opened {}");
 }
 
 #[test]
@@ -832,7 +970,10 @@ fn hostile_cwd_cannot_forge_the_create_session_row_summary() {
         ),
         &ActivityContext::fixture(),
     ));
-    assert_only_allowed_chars(&entry.summary);
+    assert_eq!(
+        assert_well_formed(&entry.summary).0,
+        "Started a {} terminal in {}"
+    );
 }
 
 #[test]
@@ -842,9 +983,10 @@ fn hostile_setting_key_cannot_forge_the_set_setting_row_summary() {
         &set_setting_frame(HOSTILE, "value"),
         &ActivityContext::fixture(),
     ));
-    // Not `assert_only_allowed_chars`: "Changed a setting ({key})"
-    // legitimately prints its own literal `(`/`)`.
-    assert_hostile_codepoints_absent(&entry.summary);
+    assert_eq!(
+        assert_well_formed(&entry.summary).0,
+        "Changed a setting ({})"
+    );
     // `detail` is redacted but never sanitized (it is the auditable fact,
     // not display text) — unaffected by this fix.
     assert_eq!(entry.detail.as_deref(), Some("value"));
@@ -888,7 +1030,12 @@ fn hostile_roots_list_directory_and_brain_get_context_fields_cannot_forge_their_
     for (label, frame) in cases {
         let mut log = ActivityLog::default();
         let entry = one(log.record(&frame, &ctx));
-        assert_only_allowed_chars(&entry.summary);
+        let (template, fields) = assert_well_formed(&entry.summary);
+        assert_eq!(fields.len(), 1, "{label}: {}", entry.summary);
+        assert!(
+            template.ends_with("{}") || template.contains("{} "),
+            "{label}: the hostile value must stay one delimited field: {template:?}"
+        );
         assert!(
             !entry.summary.contains('\u{202e}'),
             "{label}: bidi override survived into {}",
@@ -901,16 +1048,23 @@ fn hostile_roots_list_directory_and_brain_get_context_fields_cannot_forge_their_
 fn hostile_brain_search_query_cannot_forge_the_row_summary_short_or_long() {
     let ctx = ActivityContext::fixture();
 
-    // Not `assert_only_allowed_chars`: "Searched the brain for \"{query}\""
-    // legitimately prints its own literal quotes around the query.
     let mut short_log = ActivityLog::default();
     let short = one(short_log.record(&brain_search_frame(HOSTILE), &ctx));
-    assert_hostile_codepoints_absent(&short.summary);
+    assert_eq!(
+        assert_well_formed(&short.summary).0,
+        "Searched the brain for {}"
+    );
 
     let long_hostile = format!("{HOSTILE}{}", "x".repeat(100));
     let mut long_log = ActivityLog::default();
     let long = one(long_log.record(&brain_search_frame(&long_hostile), &ctx));
-    assert_hostile_codepoints_absent(&long.summary);
+    // The truncation ellipsis is the template's, outside the field's quotes,
+    // so a query cannot pretend the daemon shortened it — or hide that it
+    // did.
+    assert_eq!(
+        assert_well_formed(&long.summary).0,
+        "Searched the brain for {}…"
+    );
     // `detail` keeps the full, redacted-but-unsanitized query — the
     // auditable fact this fix must never touch.
     assert_eq!(long.detail.as_deref(), Some(long_hostile.as_str()));
@@ -940,6 +1094,288 @@ fn a_genuine_unicode_letter_in_a_pane_title_survives_into_the_summary() {
         "{}",
         entry.summary
     );
+}
+
+// ---------------------------------------------------------------------
+// Fix round 4: the row's structure is guaranteed at EMISSION, not by
+// filtering the input.
+//
+// The three rounds before this one tried to make a viewer-supplied string
+// incapable of looking like the row format. That cannot work, and these
+// tests are the proof: U+A78F LATIN LETTER SINOLOGICAL DOT and U+1427
+// CANADIAN SYLLABICS FINAL MIDDLE DOT are `\p{L}` and render as the `·` the
+// format separates fields with; U+02BA MODIFIER LETTER DOUBLE PRIME is
+// `\p{Lm}` and renders as `"`; a Hebrew letter is `\p{Lo}` and reorders the
+// neutral characters around it under the plain Bidi Algorithm with no
+// control character involved. Every one of them is a real letter that a real
+// machine name may contain, so every one of them survives sanitization —
+// deliberately. What must hold instead is that each stays *inside its own
+// field*, which is what `assert_well_formed` checks.
+// ---------------------------------------------------------------------
+
+/// One pane, titled whatever the caller likes, in a session and workspace
+/// with ordinary names — so a test can put hostile text in exactly one field
+/// and read the row's shape around it.
+fn layout_ctx_titled(title: &str) -> ActivityContext {
+    let layout = serde_json::json!({
+        "tabs": [{
+            "project": "/Users/bruno/OmniAgent-ADE",
+            "engine": "claude",
+            "cwd": "/tmp",
+            "id": "pane-1",
+            "group": "g1",
+            "label": title,
+            "groupLabel": "Session 1",
+        }]
+    });
+    ActivityContext::from_layout(Some(&layout.to_string()))
+}
+
+/// Both of these are LETTERS that look exactly like the ` · ` this row
+/// format puts between a pane, its session and its workspace. No allowlist
+/// that admits real machine names can exclude them, so the row must not care
+/// that they are there: it still parses as its own three fields, and the
+/// lookalike is visibly inside the first one.
+#[test]
+fn letters_that_render_as_the_row_separator_stay_inside_their_field() {
+    for (dot, name) in [
+        ('\u{a78f}', "LATIN LETTER SINOLOGICAL DOT"),
+        ('\u{1427}', "CANADIAN SYLLABICS FINAL MIDDLE DOT"),
+    ] {
+        let title = format!("Air {dot} Session 9 {dot} Other Workspace");
+        let mut log = ActivityLog::default();
+        let entry = one(log.record(&attach_frame("pane-1"), &layout_ctx_titled(&title)));
+
+        let (template, fields) = assert_well_formed(&entry.summary);
+        assert_eq!(
+            template, "Opened {} in {} · {}",
+            "{name}: {}",
+            entry.summary
+        );
+        assert_eq!(
+            fields,
+            vec![
+                title.clone(),
+                "Session 1".to_string(),
+                "OmniAgent-ADE".to_string()
+            ],
+            "{name}: the row must still name exactly its own three fields"
+        );
+        assert!(
+            fields[0].contains(dot),
+            "{name} is a letter and must survive into the title, contained rather than stripped"
+        );
+    }
+}
+
+/// U+02BA is a LETTER that renders as `"` — which is why round 2's claim,
+/// written into `sanitize_machine_name`'s own doc, that "a quoted field can
+/// never contain a quote" was false. It still cannot contain the ASCII quote
+/// that delimits it, and that is the only claim the format now rests on: the
+/// row parses into exactly its fields regardless.
+#[test]
+fn a_letter_that_renders_as_a_quote_stays_inside_its_field() {
+    let title = "Air\u{2ba} (1.2.3.4)\u{2ba}";
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(&attach_frame("pane-1"), &layout_ctx_titled(title)));
+
+    let (template, fields) = assert_well_formed(&entry.summary);
+    assert_eq!(template, "Opened {} in {} · {}");
+    // The parens are `?` (they are not in the allowlist, and never were);
+    // the two quote *lookalikes* are letters and survive, contained.
+    assert_eq!(fields[0], "Air\u{2ba} ?1.2.3.4?\u{2ba}");
+    assert_eq!(
+        entry.summary.matches('"').count(),
+        6,
+        "three fields, two quotes each — a quote lookalike must not add one: {}",
+        entry.summary
+    );
+}
+
+/// A strong right-to-left LETTER reorders the neutral characters around it
+/// by the plain Bidi Algorithm — the parentheses and quotes this row format
+/// puts around the *relay-asserted* IP address included. That is the attack
+/// this round's isolates exist for, and it needs no control character, so
+/// there was never a way to filter it out of the input.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_right_to_left_machine_name_cannot_displace_the_relay_asserted_ip() {
+    let mut harness = support::daemon_with_local_client().await;
+    // Hebrew, plus the characters an RTL run would drag around with it.
+    let mut viewer = harness.connect_remote("\u{5d0}\u{5d1}\u{5d2} (1.2.3.4) Air");
+    viewer.hello().await;
+
+    let opened = harness.local().wait_for_activity("connected").await;
+    let (template, fields) = assert_well_formed(&opened.summary);
+    assert_eq!(template, "Connected from {} ({})");
+    assert_eq!(
+        fields[1], "203.0.113.7",
+        "the relay-asserted IP is its own field and stays whole: {}",
+        opened.summary
+    );
+    assert!(
+        fields[0].contains('\u{5d0}'),
+        "a Hebrew letter is a letter and must survive, isolated rather than stripped: {}",
+        fields[0]
+    );
+    // The isolate that contains it is the daemon's own, and there is exactly
+    // one pair per field — a viewer cannot add or close one, because U+2069
+    // is `Cf` and never survives sanitization.
+    assert_eq!(opened.summary.matches('\u{2068}').count(), 2);
+    assert_eq!(opened.summary.matches('\u{2069}').count(), 2);
+}
+
+/// The isolates only hold because a field cannot contain one. U+2068/U+2069
+/// are `Cf`: not a letter, mark, number or one of the seven punctuation
+/// marks, so they are replaced before they can reach a row — which is the
+/// whole reason the input sanitizer is still worth keeping.
+#[test]
+fn a_viewer_supplied_isolate_cannot_open_or_close_a_field_of_its_own() {
+    let title = "Air\u{2069} forged \u{2068}rest";
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(&attach_frame("pane-1"), &layout_ctx_titled(title)));
+
+    let (template, fields) = assert_well_formed(&entry.summary);
+    assert_eq!(template, "Opened {} in {} · {}");
+    assert_eq!(fields[0], "Air? forged ?rest");
+}
+
+/// `\p{M}` is in the allowlist because real names need it, and a mark has no
+/// advance width — five hundred of them on one base character smear a single
+/// row down the whole table. Capped, one-for-one, so the evidence that
+/// something was there is not lost either.
+#[test]
+fn stacked_combining_marks_are_capped_so_one_row_cannot_smear_over_the_others() {
+    let title = format!("o{}", "\u{308}".repeat(40));
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(&attach_frame("pane-1"), &layout_ctx_titled(&title)));
+
+    let (_, fields) = assert_well_formed(&entry.summary);
+    assert_eq!(
+        fields[0],
+        format!("o\u{308}\u{308}{}", "?".repeat(38)),
+        "two marks kept, the rest replaced rather than dropped"
+    );
+}
+
+/// A mark at the very start of a field has no base character of its own, so
+/// a renderer paints it on whatever precedes it — the field's own opening
+/// quote. A mark that can decorate a delimiter is a mark that can alter one.
+#[test]
+fn a_field_never_begins_with_a_combining_mark() {
+    let title = "\u{308}\u{308}Air";
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(&attach_frame("pane-1"), &layout_ctx_titled(title)));
+
+    let (_, fields) = assert_well_formed(&entry.summary);
+    assert_eq!(fields[0], "??Air");
+}
+
+/// Unbounded, a single `ListDirectory` path could be as long as a frame
+/// allows and would push everything after it off the row. Bounded — and the
+/// bound says so, rather than shortening the evidence in silence.
+#[test]
+fn a_field_is_bounded_and_says_when_it_was_truncated() {
+    let path = format!("/Users/bruno/{}", "x".repeat(400));
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(&list_directory_frame(&path), &ActivityContext::fixture()));
+
+    let (template, fields) = assert_well_formed(&entry.summary);
+    assert_eq!(template, "Browsed {}");
+    assert_eq!(fields[0].chars().count(), 120);
+    assert!(
+        fields[0].ends_with('…'),
+        "a truncated field must show that it was: {}",
+        fields[0]
+    );
+}
+
+/// Fix round 4, FIX 3: **the compiler is the guard.**
+///
+/// This `match` is exhaustive over [`MessageKind`], which is not
+/// `#[non_exhaustive]` — so a new message kind added to `protocol.rs` stops
+/// this file compiling until someone has decided what it logs, and whatever
+/// it logs is then held to the same well-formedness check as every other
+/// row. Nothing else forces that decision: `ActivityLog::record`'s own
+/// `match` ends in a `_ => Vec::new()` arm, so a new kind produces no row in
+/// silence, and a new kind that *is* given a row could interpolate a raw
+/// string into it with nothing to notice.
+///
+/// Every field a viewer controls carries [`HOSTILE`] — every category the
+/// three rounds before this one enumerated, at once.
+fn hostile_frame(kind: MessageKind) -> Frame {
+    match kind {
+        MessageKind::Attach => attach_frame(HOSTILE),
+        MessageKind::Input => input_frame(HOSTILE, b"typed a line\r"),
+        MessageKind::Resize => resize_frame(HOSTILE, 120, 40),
+        MessageKind::Interrupt => interrupt_frame(HOSTILE),
+        MessageKind::Kill => kill_frame(HOSTILE),
+        MessageKind::Detach => detach_frame(HOSTILE),
+        MessageKind::CreateSession => {
+            create_session_frame(HOSTILE, &[HOSTILE], Some(&format!("/Users/{HOSTILE}")))
+        }
+        MessageKind::GetSetting => get_setting_frame(HOSTILE),
+        MessageKind::SetSetting => set_setting_frame(HOSTILE, HOSTILE),
+        MessageKind::BrainGetContext => brain_get_context_frame(HOSTILE),
+        MessageKind::BrainSearch => brain_search_frame(HOSTILE),
+        MessageKind::RootsStartIngest => roots_start_ingest_frame(HOSTILE),
+        MessageKind::RootsAddProject => roots_add_project_frame(HOSTILE, Some(HOSTILE)),
+        MessageKind::RootsRenameProject => roots_rename_project_frame(HOSTILE, HOSTILE),
+        MessageKind::RootsSetPaused => roots_set_paused_frame(HOSTILE, true),
+        MessageKind::RootsReingestProject => roots_reingest_project_frame(HOSTILE),
+        MessageKind::RootsRebuild => roots_rebuild_frame(),
+        MessageKind::ListDirectory => list_directory_frame(HOSTILE),
+        // No viewer-controlled string in the request payload — and every
+        // daemon→client kind, which `record` is never handed at all. An
+        // empty object is a payload each of these arms either ignores or
+        // fails to decode, which is exactly the "no row" this asserts.
+        MessageKind::Hello
+        | MessageKind::ListSessions
+        | MessageKind::BrainListProjects
+        | MessageKind::RootsIngestionStatus
+        | MessageKind::RootsList
+        | MessageKind::RootsBiggestProject
+        | MessageKind::RootsPausedProjects
+        | MessageKind::RootsStaleness
+        | MessageKind::ListViewers
+        | MessageKind::DisconnectViewer
+        | MessageKind::HelloAck
+        | MessageKind::SessionList
+        | MessageKind::SessionCreated
+        | MessageKind::Snapshot
+        | MessageKind::Output
+        | MessageKind::SessionStatus
+        | MessageKind::Attention
+        | MessageKind::SessionExited
+        | MessageKind::Response
+        | MessageKind::ResyncRequired
+        | MessageKind::Error
+        | MessageKind::SessionResized
+        | MessageKind::RemoteViewers
+        | MessageKind::RemoteActivity => frame(kind, serde_json::json!({})),
+    }
+}
+
+/// Every kind, found by walking the byte space rather than by listing them —
+/// so the set this iterates cannot drift from `MessageKind::try_from` the
+/// way a hand-written array would, while [`hostile_frame`]'s `match` is what
+/// makes adding a kind a compile error.
+#[test]
+fn every_message_kind_produces_only_well_formed_rows_from_hostile_input() {
+    for byte in 0u8..=u8::MAX {
+        let Ok(kind) = MessageKind::try_from(byte) else {
+            continue;
+        };
+        let mut log = ActivityLog::default();
+        let ctx = hostile_layout_ctx();
+        let mut rows = log.record(&hostile_frame(kind), &ctx);
+        // `Input` and `Resize` coalesce, so their rows only exist after a
+        // flush — a kind whose row this test never saw would be a kind this
+        // test never checked.
+        rows.extend(log.flush_all());
+        for row in rows {
+            assert_well_formed(&row.summary);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1036,7 +1472,7 @@ async fn activity_is_pushed_to_local_clients_and_never_to_the_remote_one() {
 
     viewer.attach("pane-1").await;
     let attach = harness.local().wait_for_activity("attach").await;
-    assert_eq!(attach.summary, "Opened pane-1");
+    assert_eq!(attach.summary, format!("Opened {}", q("pane-1")));
     assert!(viewer.received_no_activity_push().await);
 }
 
@@ -1145,27 +1581,18 @@ async fn a_hostile_machine_name_cannot_forge_the_opening_row() {
     viewer.hello().await;
 
     let opened = harness.local().wait_for_activity("connected").await;
+    // Fix round 4: the row is *parsed*, not string-matched at its ends. The
+    // self-reported name and the relay-asserted IP are two separate fields,
+    // each inside its own delimiters, so the IP the relay vouched for
+    // (`asserted_as` in `support/mod.rs`) cannot be displaced by anything
+    // the name contains.
+    let (template, fields) = assert_well_formed(&opened.summary);
+    assert_eq!(template, "Connected from {} ({})");
+    assert_eq!(fields.len(), 2, "{}", opened.summary);
+    assert_eq!(fields[1], "203.0.113.7");
     assert!(
-        opened.summary.starts_with("Connected from \""),
-        "{}",
-        opened.summary
+        fields[0].starts_with("Björn's Air"),
+        "a Unicode LETTER must survive intact, not become \"Bj?rn's Air\": {}",
+        fields[0]
     );
-    // The real IP the relay asserted (`asserted_as` in `support/mod.rs`) is
-    // the only parenthetical the row may legitimately end with, and the
-    // quote closing the name is what makes that boundary unambiguous.
-    assert!(
-        opened.summary.ends_with("\" (203.0.113.7)"),
-        "{}",
-        opened.summary
-    );
-    let name_field = opened
-        .summary
-        .strip_prefix("Connected from \"")
-        .and_then(|rest| rest.strip_suffix("\" (203.0.113.7)"))
-        .expect("the row keeps exactly this shape");
-    assert!(
-        name_field.starts_with("Björn's Air"),
-        "a Unicode LETTER must survive intact, not become \"Bj?rn's Air\": {name_field}"
-    );
-    assert_only_allowed_chars(name_field);
 }
