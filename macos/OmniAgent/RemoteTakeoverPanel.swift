@@ -194,6 +194,12 @@ final class RemoteTakeoverPanel {
 
     let window: NSWindow
     let view: RemoteTakeoverPanelView
+    /// This connection's daemon-witnessed activity (spec §8, Task 19/20) —
+    /// owned here rather than by whoever presents the panel, so it resets
+    /// naturally with every new connection: a fresh `RemoteTakeoverPanel` is
+    /// built per connection (`WorkspaceWindowController.syncTakeoverPanel`),
+    /// and a fresh log with it.
+    let activityLog = RemoteActivityLog()
     private(set) var info: RemoteConnectionInfo
     /// `nil` in a test that only inspects the layout. A kick with no
     /// connection is a no-op, never a crash.
@@ -291,6 +297,14 @@ final class RemoteTakeoverPanel {
         guard info != self.info else { return }
         self.info = info
         view.apply(state: state, machineName: info.machineName, rows: rows, info: info)
+    }
+
+    /// One `RemoteActivity` push's worth of rows (Task 19/20, spec §8) —
+    /// appended to `activityLog` and handed straight to the table view, which
+    /// holds scroll position steady unless it was already at the bottom.
+    func appendActivity(_ entries: [RemoteActivityLog.Entry]) {
+        activityLog.append(entries)
+        view.applyActivity(RemoteActivityTable(entries: activityLog.entries))
     }
 
     // MARK: - The two verbs (spec §7)
@@ -418,15 +432,18 @@ final class RemoteTakeoverPanelView: NSView {
     private static let glyphSize: CGFloat = 12
     private static let buttonHeight: CGFloat = 26
     private static let cardRadius: CGFloat = 20
-    /// The room Phase 4's activity table drops into (spec §7, §8). Left
-    /// **empty**, not filled with a placeholder: an empty region is honest
-    /// about a table that does not exist yet, and a stub would have to be
-    /// deleted rather than filled.
+    /// The room the activity table fills (spec §7, §8, Task 20).
     static let activityRoom: CGFloat = 150
 
-    /// Where the activity table goes, in this view's coordinates. Published
-    /// so Task 20 has somewhere to put it without re-deriving the geometry.
+    /// Where the activity table goes, in this view's coordinates.
     private(set) var activityFrame: NSRect = .zero
+    /// The table itself (Task 20) — a plain subview positioned by `.frame`
+    /// like every other view here, never pinned by Auto Layout: this view is
+    /// nothing but glass, and Auto Layout pinned inside one has already
+    /// caused `_nsis_frameInEngine` aborts elsewhere in this app. Its own
+    /// internal content is free to use Auto Layout, since it is not itself a
+    /// descendant of the glass.
+    private let activityView = RemoteActivityTableView(frame: .zero)
 
     private let scrim: NSView?
     private let scrimTint = NSView()
@@ -511,6 +528,8 @@ final class RemoteTakeoverPanelView: NSView {
         blockButton.onClick = { [weak self] in self?.onBlock?() }
         addSubview(terminateButton)
         addSubview(blockButton)
+        activityView.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(activityView)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Remote takeover")
@@ -577,6 +596,13 @@ final class RemoteTakeoverPanelView: NSView {
         needsLayout = true
     }
 
+    /// Hands the current activity rows to the table (Task 20). Not gated on
+    /// `needsLayout`: the table rebuilds its own rows and manages its own
+    /// scroll position, independent of this view's outer geometry pass.
+    func applyActivity(_ table: RemoteActivityTable) {
+        activityView.apply(table)
+    }
+
     override func layout() {
         super.layout()
         let full = bounds
@@ -636,6 +662,7 @@ final class RemoteTakeoverPanelView: NSView {
             }
         }
         activityFrame = NSRect(x: left, y: y - Self.activityRoom, width: inner, height: Self.activityRoom)
+        activityView.frame = activityFrame
         y -= Self.activityRoom + captionHeight
         blockCaption.frame = NSRect(x: left, y: y, width: inner, height: captionHeight)
         y -= failureHeight
@@ -696,5 +723,283 @@ final class RemoteTakeoverPanelView: NSView {
             x: 0, y: 0, width: width, height: .greatestFiniteMagnitude
         ))
         return ceil(size?.height ?? 16)
+    }
+}
+
+// MARK: - The activity table (Task 20, spec §8)
+
+/// The activity table's row data — a lightweight, renderless model so
+/// `isExpandable` can be pinned by a test without instantiating any view at
+/// all. A row with no `detail` cannot expand: spec §8 says "clicking a
+/// session is one line and no detail", so a disclosure chevron on one would
+/// promise something the row cannot make good on, and it must not respond to
+/// clicks either.
+struct RemoteActivityTable: Equatable {
+    let entries: [RemoteActivityLog.Entry]
+
+    var count: Int { entries.count }
+
+    func isExpandable(at index: Int) -> Bool {
+        entries[index].detail != nil
+    }
+
+    func timeText(at index: Int) -> String {
+        Self.time.string(from: entries[index].ts)
+    }
+
+    /// An SF Symbol for `kind` (spec §8: "symbol for kind"). A kind this
+    /// build does not recognise — a daemon ahead of the app — still draws
+    /// something, rather than nothing at all.
+    static func symbolName(for kind: String) -> String {
+        switch kind {
+        case "connected": return "arrow.down.left.circle.fill"
+        case "disconnected": return "arrow.up.right.circle"
+        case "attach": return "rectangle.on.rectangle"
+        case "create_session": return "plus.rectangle.on.rectangle"
+        case "input": return "character.cursor.ibeam"
+        case "interrupt": return "hand.raised"
+        case "kill": return "xmark.circle"
+        case "set_setting": return "gearshape"
+        case "roots": return "folder"
+        case "list_directory": return "folder.badge.questionmark"
+        case "brain_search", "brain_list_projects": return "magnifyingglass"
+        case "brain_get_context": return "text.book.closed"
+        case "resize": return "arrow.up.left.and.arrow.down.right"
+        default: return "circle"
+        }
+    }
+
+    private static let time: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .medium
+        return formatter
+    }()
+}
+
+/// One row of the activity table: time, a symbol for `kind`, and the summary
+/// — expanding, on click, into a monospaced detail block, but only when it
+/// has one (spec §8). `PaneAppWorkGroupView`'s own shape (`PaneAppMessageRow.swift`):
+/// the detail is built up front and merely hidden, and a click toggles it —
+/// adapted here for a row that may have **no** detail at all, in which case
+/// there is nothing to reveal and no chevron promising there is, and no
+/// gesture recognizer to respond to a click in the first place.
+final class RemoteActivityRowView: NSView {
+    private(set) var isExpanded = false
+    private let isExpandable: Bool
+    private let chevron: NSTextField?
+    private let detailLabel: NSTextField?
+    private let header: NSStackView
+    private var cursorTracking: NSTrackingArea?
+
+    init(entry: RemoteActivityLog.Entry, timeText: String, symbolName: String) {
+        isExpandable = entry.detail != nil
+
+        let time = ShellFont.label(timeText, font: ShellFont.ui(11), color: ShellPalette.inkFaint)
+        time.setContentHuggingPriority(.required, for: .horizontal)
+        time.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let symbol = NSImageView(
+            image: NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) ?? NSImage()
+        )
+        symbol.contentTintColor = ShellPalette.inkTertiary
+        symbol.setContentHuggingPriority(.required, for: .horizontal)
+        symbol.translatesAutoresizingMaskIntoConstraints = false
+        symbol.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        symbol.heightAnchor.constraint(equalToConstant: 14).isActive = true
+
+        let summary = ShellFont.label(entry.summary, font: ShellFont.ui(12), color: ShellPalette.ink)
+        summary.lineBreakMode = .byTruncatingTail
+        summary.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        var headerViews: [NSView] = [time, symbol, summary]
+        if isExpandable {
+            let chevronField = ShellFont.label("⌄", font: ShellFont.ui(10), color: ShellPalette.inkFaint)
+            chevron = chevronField
+            headerViews.append(chevronField)
+        } else {
+            chevron = nil
+        }
+        header = NSStackView(views: headerViews)
+
+        if let detail = entry.detail {
+            let label = ShellFont.label(detail, font: ShellFont.mono(11), color: ShellPalette.inkTerminal)
+            label.lineBreakMode = .byWordWrapping
+            label.maximumNumberOfLines = 0
+            label.isSelectable = true
+            detailLabel = label
+        } else {
+            detailLabel = nil
+        }
+
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        header.orientation = .horizontal
+        header.alignment = .firstBaseline
+        header.spacing = 6
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        let body = NSStackView()
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 4
+        body.translatesAutoresizingMaskIntoConstraints = false
+        body.addArrangedSubview(header)
+        header.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        if let detailLabel {
+            detailLabel.isHidden = true
+            body.addArrangedSubview(detailLabel)
+            detailLabel.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        }
+
+        addSubview(body)
+        NSLayoutConstraint.activate([
+            body.topAnchor.constraint(equalTo: topAnchor),
+            body.leadingAnchor.constraint(equalTo: leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: trailingAnchor),
+            body.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        if isExpandable {
+            setAccessibilityElement(true)
+            setAccessibilityRole(.disclosureTriangle)
+            setAccessibilityLabel(entry.summary)
+            setAccessibilityExpanded(false)
+            let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick))
+            header.addGestureRecognizer(click)
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    /// The pointing hand over the header, and only when there is something to
+    /// click — `PaneAppWorkGroupView`'s own reasoning: a cursor rect is
+    /// cached by the window and does not follow a view a stack view moves, so
+    /// this tracks the live frame on every layout pass instead.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard isExpandable else { return }
+        if let cursorTracking { removeTrackingArea(cursorTracking) }
+        let area = NSTrackingArea(
+            rect: convert(header.bounds, from: header),
+            options: [.cursorUpdate, .activeInKeyWindow],
+            owner: self
+        )
+        addTrackingArea(area)
+        cursorTracking = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        guard isExpandable else { return }
+        NSCursor.pointingHand.set()
+    }
+
+    @objc private func handleClick() { toggle() }
+
+    /// Internal rather than private so a test can drive expansion without
+    /// synthesising a click — `PaneAppWorkGroupView.toggle()`'s own reasoning.
+    /// A no-op on a row with nothing to expand: the gesture recognizer that
+    /// would call this is never even attached to one, but this guard is what
+    /// makes "does not respond to clicks" true of the method itself, not only
+    /// of whatever happens to invoke it.
+    func toggle() {
+        guard isExpandable, let detailLabel, let chevron else { return }
+        isExpanded.toggle()
+        detailLabel.isHidden = !isExpanded
+        chevron.stringValue = isExpanded ? "⌃" : "⌄"
+        setAccessibilityExpanded(isExpanded)
+    }
+}
+
+/// The activity table itself (spec §8, Task 20): a scrolling, top-to-bottom
+/// list of `RemoteActivityRowView`s, newest row at the bottom, auto-scrolling
+/// only while it is already scrolled to the bottom — a host who has scrolled
+/// up to read something is never yanked back down by the next row.
+///
+/// `ShellScrollView`'s flipped clip view (`WorkspaceShell.swift`) and
+/// `isScrolledToBottom`/`scrollToBottom`'s shape are
+/// `PaneAppView.swift`'s own — the identical problem (a stack of appended
+/// rows, scrolled to the newest only when the reader was already there) with
+/// no reason to solve it twice.
+final class RemoteActivityTableView: NSView {
+    private let stack = NSStackView()
+    private let scroll: ShellScrollView
+    private let emptyLabel = ShellFont.label(
+        "No activity yet.", font: ShellFont.ui(12), color: ShellPalette.inkFaint
+    )
+    private(set) var table = RemoteActivityTable(entries: [])
+
+    override init(frame frameRect: NSRect) {
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scroll = ShellScrollView(documentView: stack)
+        super.init(frame: frameRect)
+
+        scroll.translatesAutoresizingMaskIntoConstraints = true
+        scroll.autoresizingMask = [.width, .height]
+        addSubview(scroll)
+
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(emptyLabel)
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.list)
+        setAccessibilityLabel("Remote activity")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func layout() {
+        super.layout()
+        scroll.frame = bounds
+        emptyLabel.frame = NSRect(x: 0, y: (bounds.height - 16) / 2, width: bounds.width, height: 16)
+    }
+
+    /// Rebuilds the row list from `table`, holding scroll position steady
+    /// unless the view was already scrolled to the bottom.
+    func apply(_ table: RemoteActivityTable) {
+        guard table != self.table else { return }
+        let wasAtBottom = isScrolledToBottom
+        self.table = table
+        for row in stack.arrangedSubviews {
+            stack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        for index in table.entries.indices {
+            let entry = table.entries[index]
+            let row = RemoteActivityRowView(
+                entry: entry,
+                timeText: table.timeText(at: index),
+                symbolName: RemoteActivityTable.symbolName(for: entry.kind)
+            )
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        emptyLabel.isHidden = !table.entries.isEmpty
+        layoutSubtreeIfNeeded()
+        if wasAtBottom {
+            scrollToBottom()
+        }
+    }
+
+    /// `PaneAppView.isScrolledToBottom`'s formula, without a bottom inset:
+    /// this table has none.
+    private var isScrolledToBottom: Bool {
+        let clip = scroll.contentView
+        let range = max(0, stack.frame.height - clip.bounds.height)
+        return clip.bounds.origin.y >= range - 2
+    }
+
+    /// `PaneAppView.scrollToBottom`'s formula.
+    private func scrollToBottom() {
+        let clip = scroll.contentView
+        let range = max(0, stack.frame.height - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: 0, y: range))
+        scroll.reflectScrolledClipView(clip)
     }
 }

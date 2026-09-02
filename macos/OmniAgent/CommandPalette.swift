@@ -59,6 +59,11 @@ enum PaletteAction: Equatable {
     /// Settings › Remote's blocked list (spec §7, §10) — a place inside a
     /// section, which the standing rule says is findable by name.
     case showBlockedMachines
+    /// Settings › Remote's activity history (spec §8, §10, Task 20) — the
+    /// daemon-witnessed log of what a remote viewer did, read back and
+    /// grouped by connection. Findable by name for the same reason
+    /// `showBlockedMachines` is: it is a place inside a section.
+    case showRemoteActivity
     /// The takeover panel's two verbs (spec §7), reachable by typing rather
     /// than only by finding the buttons. Present only while somebody is
     /// actually connected — there is nothing to terminate otherwise.
@@ -789,6 +794,21 @@ struct CommandPaletteModel: Equatable {
                 section: .places,
                 subtitle: "Settings › Remote",
                 symbol: "hand.raised"
+            )
+        )
+        // Activity (spec §8, §10, Task 20) — a place inside the section,
+        // `showBlockedMachines`'s own reasoning: always a row, so "nothing
+        // has happened here" is still something the section can say.
+        commands.append(
+            PaletteCommand(
+                id: "settings:remote:activity",
+                title: "Remote activity",
+                detail: nil,
+                action: .showRemoteActivity,
+                keywords: "remote activity history log connections viewers audit",
+                section: .places,
+                subtitle: "Settings › Remote",
+                symbol: "list.bullet.rectangle"
             )
         )
         // Terminate and Block, while there is a connection to end (spec §7,

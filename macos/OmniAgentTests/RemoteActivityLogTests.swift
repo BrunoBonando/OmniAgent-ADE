@@ -71,4 +71,18 @@ final class RemoteActivityLogTests: XCTestCase {
         log.reset()
         XCTAssertTrue(log.entries.isEmpty)
     }
+
+    // MARK: - Task 20: only rows with a detail are expandable
+
+    func testOnlyRowsWithDetailAreExpandable() {
+        let table = RemoteActivityTable(entries: [
+            .init(id: .init(), ts: .now, kind: "attach", summary: "Opened Terminal 1", detail: nil),
+            .init(
+                id: .init(), ts: .now, kind: "input", summary: "Sent a prompt to Terminal 1",
+                detail: "hello there"
+            ),
+        ])
+        XCTAssertFalse(table.isExpandable(at: 0))
+        XCTAssertTrue(table.isExpandable(at: 1))
+    }
 }

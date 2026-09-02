@@ -34,7 +34,7 @@ final class CommandPaletteTests: XCTestCase {
                 "settings:general", "settings:accounts", "settings:remote", "settings:sessions", "settings:themes",
                 "settings:accessibility", "settings:customize", "settings:modelProviders", "settings:experimental",
                 "settings:accounts:signin", "settings:accounts:github:connect",
-                "settings:remote:toggle-sharing", "settings:remote:blocked",
+                "settings:remote:toggle-sharing", "settings:remote:blocked", "settings:remote:activity",
                 // Idle offers the check; a found or downloaded update swaps
                 // this row for the one that can actually be taken.
                 "update:check",
@@ -475,6 +475,22 @@ final class CommandPaletteTests: XCTestCase {
         XCTAssertEqual(
             Set(model.matches.map(\.id)).intersection(["remote:terminate", "remote:block"]).count, 2
         )
+    }
+
+    /// Settings › Remote's activity history (spec §8, §10, Task 20) — a
+    /// place inside the section, always a row like the blocked list beside
+    /// it: "nothing has happened here" is still an answer somebody types
+    /// this to get.
+    func testActivityPaletteRowExists() {
+        let commands = CommandPaletteModel.build(panes: [], paneOrder: [], focusedPaneID: nil)
+        XCTAssertTrue(commands.map(\.title).contains("Remote activity"))
+        let activity = try! XCTUnwrap(commands.first { $0.id == "settings:remote:activity" })
+        XCTAssertEqual(activity.action, .showRemoteActivity)
+        XCTAssertEqual(activity.subtitle, "Settings › Remote")
+        XCTAssertEqual(activity.section, .places)
+        for typed in ["activity", "history", "remote"] {
+            XCTAssertTrue(activity.keywords?.contains(typed) == true, "someone would type \"\(typed)\"")
+        }
     }
 
     /// The two Help pages are spotlight rows too (standing rule: everything

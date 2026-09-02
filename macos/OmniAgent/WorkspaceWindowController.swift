@@ -1671,6 +1671,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         connection.onRemoteViewers = { [weak self] viewers in
             self?.applyRemoteViewers(viewers)
         }
+        // The activity log (Task 19/20, spec §8): local-only, and only ever
+        // meaningful while the takeover panel is up — a push that arrives
+        // with no panel yet built (a race with the roster that creates one)
+        // is simply not shown live; the durable file is unaffected either
+        // way, and Settings › Remote › Activity reads that back.
+        connection.onRemoteActivity = { [weak self] entries in
+            self?.takeoverPanel?.appendActivity(entries)
+        }
         connection.connect()
     }
 
@@ -3565,6 +3573,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
         case .toggleRemoteSharing:
             toggleRemoteSharing()
         case .showBlockedMachines:
+            showSettings(section: .remote)
+        case .showRemoteActivity:
             showSettings(section: .remote)
         case .terminateRemoteConnection:
             takeoverPanel?.terminate()
@@ -6262,10 +6272,27 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
 
     /// Settings, opened on a particular section.
     func showSettings(section: SettingsSection) {
+        if section == .remote {
+            refreshActivityHistory()
+        }
         settingsView.select(section)
         settingsPanel.clearSearch()
         applyDestination(.settings)
     }
+
+    /// Settings › Remote › Activity (Task 20, spec §8): reads
+    /// `remote-activity.jsonl` back and groups it by connection, fresh every
+    /// time the section is opened — the same "read on view, not on a timer"
+    /// shape `applyThisMachine`'s row already has.
+    private func refreshActivityHistory() {
+        let url = AccountDirectory.dataDir(root: accountRoot)
+            .appendingPathComponent("remote-activity.jsonl")
+        let entries = RemoteActivityLog.history(from: url, limit: Self.activityHistoryLimit)
+        settingsView.applyActivityHistory(RemoteActivityHistoryGroup.grouped(from: entries))
+    }
+
+    /// Task 20, spec §8: "Cap at the most recent 2 000 rows."
+    private static let activityHistoryLimit = 2000
 
     /// The gear: offers the panel beside itself, or — offered already —
     /// puts it back where it came from (docked on Settings, gone elsewhere).

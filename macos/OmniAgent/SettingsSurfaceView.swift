@@ -354,11 +354,9 @@ final class SettingsSurfaceView: NSView {
     var onConnectGitHub: (() -> Void)?
     var onDisconnectGitHub: (() -> Void)?
     var onDeleteAccount: (() -> Void)?
-    /// Remote (2026-09-01 remote environment sharing spec §2, §10): the one
-    /// sharing switch, and this Mac's own relay registration underneath it,
-    /// read-only. The blocked list and Activity are later tasks' — this
-    /// section holds only these two things, deliberately, rather than
-    /// shipping empty placeholders for them.
+    /// Remote (2026-09-01 remote environment sharing spec §2, §10): the
+    /// sharing switch, this Mac's own relay registration, the blocked list
+    /// and — since Task 20 — the daemon-witnessed activity history.
     let shareToggle = NSButton(checkboxWithTitle: "Share this environment", target: nil, action: nil)
     /// Seeded with the sharing copy and swapped for the sign-in copy by
     /// `applyRemoteSharing(isSharing:canShare:)`, which init calls — the two
@@ -401,6 +399,22 @@ final class SettingsSurfaceView: NSView {
     private(set) var blockedViewerIDs: [String] = []
     /// Pressed on a row's Unblock; the controller does the write.
     var onUnblock: ((String) -> Void)?
+    /// Activity (spec §8, Task 20): `remote-activity.jsonl` read back,
+    /// grouped by connection, newest group first, each collapsible — the
+    /// same read-only shape the blocked list above already has.
+    let activityHeaderField = ShellFont.label(
+        "Activity", font: ShellFont.ui(13, .semibold), color: ShellPalette.ink
+    )
+    /// Shown in place of the list when the file holds nothing yet — a fresh
+    /// install, or a Mac that has never been shared.
+    let activityEmptyField = ShellFont.label(
+        "No remote sessions yet.", font: ShellFont.ui(13), color: ShellPalette.inkMuted
+    )
+    /// The connection groups, rebuilt whenever `applyActivityHistory` runs.
+    let activityList = NSStackView()
+    /// The groups as last applied — one reading, so the list and its empty
+    /// state cannot disagree, `blockedViewerIDs`'s own reasoning.
+    private(set) var activityGroups: [RemoteActivityHistoryGroup] = []
     /// `isSharing` as the model last reported it — the one reading of it, so
     /// `shareToggle.state` and the spotlight's row (Task 3, §10) can never
     /// disagree about which way the switch is thrown.
@@ -467,9 +481,14 @@ final class SettingsSurfaceView: NSView {
         blockedList.alignment = .leading
         blockedList.spacing = 6
         blockedList.translatesAutoresizingMaskIntoConstraints = false
+        activityList.orientation = .vertical
+        activityList.alignment = .leading
+        activityList.spacing = 10
+        activityList.translatesAutoresizingMaskIntoConstraints = false
         applyRemoteSharing(isSharing: false, canShare: false)
         applyThisMachine(name: nil, deviceID: nil)
         applyBlockedMachines([])
+        applyActivityHistory([])
 
         updateButton.bezelStyle = .rounded
         updateButton.controlSize = .regular
@@ -485,7 +504,8 @@ final class SettingsSurfaceView: NSView {
             titleField, subtitleField, accountField, accountButton, githubField, githubButton,
             deleteAccountButton, shareToggle, shareExplanationField, thisMachineHeaderField,
             thisMachineNameField, thisMachineIDField, blockedHeaderField, blockedEmptyField,
-            blockedList, updateVersionField, updateStatusField, updateButton,
+            blockedList, activityHeaderField, activityEmptyField, activityList,
+            updateVersionField, updateStatusField, updateButton,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -507,6 +527,11 @@ final class SettingsSurfaceView: NSView {
         // of "This machine".
         column.setCustomSpacing(22, after: thisMachineIDField)
         column.setCustomSpacing(8, after: blockedHeaderField)
+        // Activity is its own fact about the Mac, not a fourth line of the
+        // blocked list.
+        column.setCustomSpacing(22, after: blockedList)
+        column.setCustomSpacing(8, after: activityHeaderField)
+        column.setCustomSpacing(22, after: activityList)
         column.setCustomSpacing(14, after: updateStatusField)
         column.translatesAutoresizingMaskIntoConstraints = false
 
@@ -559,9 +584,8 @@ final class SettingsSurfaceView: NSView {
         // General has a screen too now: the update block. Which means General
         // no longer says "Under development" either.
         let isGeneral = section == .general
-        // Remote has a screen too (Task 3, §2/§10): the sharing switch and
-        // this Mac's own identity. The blocked list and Activity are later
-        // tasks' — nothing here stands in for them.
+        // Remote has a screen too (Task 3, §2/§10): the sharing switch, this
+        // Mac's own identity, the blocked list, and Activity.
         let isRemote = section == .remote
         subtitleField.isHidden = isAccounts || isGeneral || isRemote
         updateVersionField.isHidden = !isGeneral
@@ -576,6 +600,9 @@ final class SettingsSurfaceView: NSView {
         // Exactly one of the two is on screen at a time, and only on Remote.
         blockedEmptyField.isHidden = !isRemote || !blockedViewerIDs.isEmpty
         blockedList.isHidden = !isRemote || blockedViewerIDs.isEmpty
+        activityHeaderField.isHidden = !isRemote
+        activityEmptyField.isHidden = !isRemote || !activityGroups.isEmpty
+        activityList.isHidden = !isRemote || activityGroups.isEmpty
     }
 
     /// Bound to `RemoteSharingModel.isSharing` by the controller — never
@@ -640,6 +667,25 @@ final class SettingsSurfaceView: NSView {
     @objc private func unblockPressed(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
         onUnblock?(id)
+    }
+
+    /// The activity history, as `RemoteActivityLog.history(from:limit:)` last
+    /// read it and `RemoteActivityHistoryGroup.grouped(from:)` grouped —
+    /// rebuilt rather than diffed, `applyBlockedMachines`'s own reasoning: a
+    /// handful of collapsible groups, not a scrolling feed worth diffing.
+    func applyActivityHistory(_ groups: [RemoteActivityHistoryGroup]) {
+        activityGroups = groups
+        for view in activityList.arrangedSubviews {
+            activityList.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for group in groups {
+            let row = RemoteActivityHistoryGroupView(group: group)
+            activityList.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: activityList.widthAnchor).isActive = true
+        }
+        // Re-applies the section's visibility with the new emptiness.
+        select(section)
     }
 
     /// This Mac's own relay registration, read-only — `nil` for either
@@ -752,4 +798,165 @@ final class SettingsSurfaceView: NSView {
     }
 
     @objc private func deleteAccountPressed() { onDeleteAccount?() }
+}
+
+// MARK: - Activity history (Task 20, spec §8)
+
+/// One connection's worth of rows out of `remote-activity.jsonl` — a
+/// "connected" row starts a group.
+struct RemoteActivityHistoryGroup: Equatable {
+    /// In the same order `RemoteActivityLog.history(from:limit:)` returns
+    /// its whole list — newest first, so the "connected" row that opened
+    /// this group is the *last* element, not the first.
+    let rows: [RemoteActivityLog.Entry]
+
+    /// Splits `entries` (newest first) into groups, each ending at the
+    /// "connected" row that opened it — reading backwards through history,
+    /// a "connected" row is the oldest fact about the connection it belongs
+    /// to, so it is what *closes* a group being built newest-to-oldest, not
+    /// what opens one. Rows preceding the first "connected" row this build
+    /// ever finds (a file predating the row, or one torn at the tail) still
+    /// form a trailing group rather than being dropped.
+    static func grouped(from entries: [RemoteActivityLog.Entry]) -> [RemoteActivityHistoryGroup] {
+        var groups: [[RemoteActivityLog.Entry]] = []
+        var current: [RemoteActivityLog.Entry] = []
+        for entry in entries {
+            current.append(entry)
+            if entry.kind == "connected" {
+                groups.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty {
+            groups.append(current)
+        }
+        return groups.map(RemoteActivityHistoryGroup.init)
+    }
+
+    /// The row a person recognises this group by — the "connected" row's own
+    /// summary ("Connected from ‹machine› (‹ip›)"), or the most recent row in
+    /// a group with no such row at all.
+    var headline: String {
+        rows.first { $0.kind == "connected" }?.summary ?? rows.first?.summary ?? "Remote session"
+    }
+
+    /// When this connection ended, or — one still mid-session, or a group
+    /// with no "disconnected" row — when it started.
+    var when: Date {
+        (rows.first { $0.kind == "disconnected" } ?? rows.first { $0.kind == "connected" } ?? rows.first)?
+            .ts ?? Date()
+    }
+}
+
+/// One collapsible group in the Activity history: the connection's own
+/// headline, collapsed by default, expanding to its rows — `PaneAppWorkGroupView`'s
+/// shape (`PaneAppMessageRow.swift`) once more, and `RemoteActivityRowView`
+/// (`RemoteTakeoverPanel.swift`) reused for the rows themselves, so the live
+/// panel table and this history read identically.
+final class RemoteActivityHistoryGroupView: NSView {
+    private(set) var isExpanded = false
+    private let chevron: NSTextField
+    private let detail = NSStackView()
+    private let header: NSStackView
+    private var cursorTracking: NSTrackingArea?
+
+    init(group: RemoteActivityHistoryGroup) {
+        chevron = ShellFont.label("⌄", font: ShellFont.ui(11), color: ShellPalette.inkFaint)
+        let title = ShellFont.label(group.headline, font: ShellFont.ui(13, .semibold), color: ShellPalette.ink)
+        let subtitle = ShellFont.label(
+            Self.when.string(from: group.when), font: ShellFont.ui(11), color: ShellPalette.inkFaint
+        )
+        let titles = NSStackView(views: [title, subtitle])
+        titles.orientation = .vertical
+        titles.alignment = .leading
+        titles.spacing = 1
+        header = NSStackView(views: [chevron, titles])
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.disclosureTriangle)
+        setAccessibilityLabel(group.headline)
+        setAccessibilityExpanded(isExpanded)
+
+        header.orientation = .horizontal
+        header.alignment = .firstBaseline
+        header.spacing = 6
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        detail.orientation = .vertical
+        detail.alignment = .leading
+        detail.spacing = 6
+        detail.isHidden = true
+        detail.translatesAutoresizingMaskIntoConstraints = false
+        // Newest first, the same order the group's own rows already carry —
+        // the header above already reads as "this is the newest fact", so
+        // the rows underneath continue in that direction rather than
+        // reversing partway through.
+        let table = RemoteActivityTable(entries: group.rows)
+        for index in table.entries.indices {
+            let entry = table.entries[index]
+            let row = RemoteActivityRowView(
+                entry: entry,
+                timeText: table.timeText(at: index),
+                symbolName: RemoteActivityTable.symbolName(for: entry.kind)
+            )
+            detail.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: detail.widthAnchor).isActive = true
+        }
+
+        let body = NSStackView(views: [header, detail])
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 8
+        body.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(body)
+        NSLayoutConstraint.activate([
+            body.topAnchor.constraint(equalTo: topAnchor),
+            body.leadingAnchor.constraint(equalTo: leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: trailingAnchor),
+            body.bottomAnchor.constraint(equalTo: bottomAnchor),
+            header.widthAnchor.constraint(equalTo: body.widthAnchor),
+            detail.widthAnchor.constraint(equalTo: body.widthAnchor),
+        ])
+
+        let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick))
+        header.addGestureRecognizer(click)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let cursorTracking { removeTrackingArea(cursorTracking) }
+        let area = NSTrackingArea(
+            rect: convert(header.bounds, from: header),
+            options: [.cursorUpdate, .activeInKeyWindow],
+            owner: self
+        )
+        addTrackingArea(area)
+        cursorTracking = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) { NSCursor.pointingHand.set() }
+
+    @objc private func handleClick() { toggle() }
+
+    /// Internal rather than private so a test can drive expansion without
+    /// synthesising a click.
+    func toggle() {
+        isExpanded.toggle()
+        detail.isHidden = !isExpanded
+        chevron.stringValue = isExpanded ? "⌃" : "⌄"
+        setAccessibilityExpanded(isExpanded)
+    }
+
+    private static let when: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }

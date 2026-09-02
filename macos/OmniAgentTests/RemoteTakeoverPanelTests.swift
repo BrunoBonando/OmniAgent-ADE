@@ -276,18 +276,37 @@ final class RemoteTakeoverPanelTests: XCTestCase {
         }
     }
 
-    /// The activity table's room (spec §8, Phase 4) is reserved and empty —
-    /// no placeholder standing in for a table that does not exist.
-    func testTheActivityRoomIsReservedAndEmpty() {
+    /// The activity table's room (spec §8) is reserved for exactly one thing:
+    /// the table itself (Task 20) — never a stray label or button of the
+    /// grid/footer spilling into it.
+    func testTheActivityRoomHoldsExactlyTheActivityTable() {
         let panel = RemoteTakeoverPanel(info: info(), connection: SpyConnection())
         panel.view.frame = NSRect(x: 0, y: 0, width: 1440, height: 900)
         panel.view.layoutSubtreeIfNeeded()
         XCTAssertEqual(panel.view.activityFrame.height, RemoteTakeoverPanelView.activityRoom)
-        let occupied = panel.view.subviews.filter {
-            $0.frame.intersects(panel.view.activityFrame.insetBy(dx: 2, dy: 2))
+        let table = try? XCTUnwrap(
+            panel.view.subviews.first { $0 is RemoteActivityTableView }
+        )
+        XCTAssertEqual(table?.frame, panel.view.activityFrame)
+        let strayed = panel.view.subviews.filter {
+            !($0 is RemoteActivityTableView)
+                && $0.frame.intersects(panel.view.activityFrame.insetBy(dx: 2, dy: 2))
                 && ($0 is NSTextField || $0 is PaneApprovalButton)
         }
-        XCTAssertTrue(occupied.isEmpty, "left empty rather than stubbed: \(occupied)")
+        XCTAssertTrue(strayed.isEmpty, "a grid/footer view spilled into the activity room: \(strayed)")
+    }
+
+    /// Rows arriving through the panel land on its table, newest last, and a
+    /// row with no detail is not expandable — spec §8's whole promise, pinned
+    /// through the real path (`RemoteTakeoverPanel.appendActivity`) rather
+    /// than only through `RemoteActivityTable` directly.
+    func testActivityPushedToThePanelReachesItsTable() {
+        let panel = RemoteTakeoverPanel(info: info(), connection: SpyConnection())
+        panel.appendActivity([
+            .init(ts: Date(), kind: "attach", summary: "Opened Terminal 1", detail: nil),
+            .init(ts: Date(), kind: "input", summary: "Sent a prompt", detail: "hello"),
+        ])
+        XCTAssertEqual(panel.activityLog.entries.map(\.kind), ["attach", "input"])
     }
 
     // MARK: - The panel is never absent while somebody is driving (fix round 1)
