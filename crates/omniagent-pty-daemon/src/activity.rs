@@ -42,9 +42,11 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use brain_core::redact::redact;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
@@ -141,6 +143,74 @@ pub struct RemoteActivityPayload {
     pub entries: Vec<ActivityEntry>,
     #[serde(default)]
     pub dropped: usize,
+}
+
+/// Unicode General Category Letter (`\p{L}`), Mark (`\p{M}`), or Number
+/// (`\p{N}`) — the literal categories, not the derived Alphabetic/Numeric
+/// properties. A combining diacritic (e.g. U+0308 COMBINING DIAERESIS,
+/// category Mn) has `Alphabetic = No` in the Unicode database, so
+/// `char::is_alphabetic()` alone would still mangle an NFD-normalised name
+/// even though a mark carries none of [`sanitize_display_text`]'s actual
+/// threats: a bidi control (Cf), a fullwidth paren (Ps/Pe), a dot lookalike
+/// (Po), and a line/paragraph separator (Zl/Zp) are none of them a Letter, a
+/// Mark, or a Number either — which is what makes admitting all three
+/// categories both correct (real international names round-trip intact) and
+/// still safe (fix round 3, ITEM 1).
+static UNICODE_LETTER_MARK_OR_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[\p{L}\p{M}\p{N}]$").expect("static pattern is valid"));
+
+/// One character of [`sanitize_display_text`]'s allowlist: a Unicode letter,
+/// mark, or number, or one of six ASCII punctuation marks — the five an
+/// ordinary display name needs ("Bruno's MacBook Pro", "Mac-mini_2",
+/// "v1.2"), plus `/`. `/` earns its own place rather than folding into "an
+/// ordinary name doesn't need it": this same allowlist also sanitizes
+/// filesystem paths (`RootsAddProject`, `ListDirectory`, …), where `/` is
+/// not a viewer-chosen character to defend against — it is the path
+/// separator, load-bearing on every one of them, and stripping it renders
+/// `/Users/bruno/Projects/widget` as `?Users?bruno?Projects?widget`
+/// instead: unreadable, without closing any forgery `/` could not already
+/// commit (it is not one of this row format's own structural separators —
+/// `(`, `)`, `·`, the quotes around a name — so it can never be confused for
+/// one).
+pub(crate) fn is_allowed_display_char(c: char) -> bool {
+    matches!(c, ' ' | '-' | '_' | '.' | '\'' | '/')
+        || UNICODE_LETTER_MARK_OR_NUMBER.is_match(c.encode_utf8(&mut [0; 4]))
+}
+
+/// Replaces every character outside [`is_allowed_display_char`]'s allowlist
+/// with `?`, one-for-one — never dropped, so a hostile string reads as
+/// visibly odd rather than silently losing the evidence that something was
+/// stripped out of it.
+///
+/// **This is the character-level defense every viewer-influenceable string
+/// runs through before it is interpolated into a one-line activity row
+/// summary** (fix round 3, ITEM 2, spec §8) — a pane title, a session or
+/// workspace name, a `SetSetting` key, a roots path/label, a brain query —
+/// anything a remote viewer chose the text of that ends up rendered into a
+/// summary line, whose own format (quoted names, `(…)`, ` · `) is exactly
+/// what a hostile separator, bidi control, or lookalike forges against. The
+/// same defense `sanitize_machine_name` (`server.rs`) already runs the
+/// self-reported machine name through; this is that function generalised to
+/// every other summary-bound string this module builds, rather than a
+/// second, independently-drifting copy of the same allowlist.
+///
+/// **This is a different concern from [`redact`]**, which masks
+/// secret-*shaped* substrings (API keys, tokens) and leaves everything else,
+/// including the log's own structural characters, untouched. The two
+/// compose — `redact` first (it needs to see the original text to match a
+/// secret's shape), then `sanitize_display_text` — wherever a redacted value
+/// is itself summary-bound.
+///
+/// **Never applied to a `detail` payload.** A `detail` block is the
+/// auditable fact itself (spec §8: "clicking a session expands to the raw
+/// text"), shown in a monospaced block, not interpolated into a row's own
+/// formatted text — there is nothing for it to forge, and redacting it
+/// (already done, everywhere `detail` is built) is the only transform it
+/// gets.
+pub(crate) fn sanitize_display_text(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if is_allowed_display_char(c) { c } else { '?' })
+        .collect()
 }
 
 /// Resolves protocol ids into the words a person reads — pane titles,
@@ -240,14 +310,21 @@ impl ActivityContext {
                     .map(str::trim)
                     .filter(|label| !label.is_empty())
                 {
-                    slot.insert(label.to_string());
+                    // Fix round 3, ITEM 2: `group_label` is the lease-holding
+                    // viewer's own text, written straight into the `layout`
+                    // settings row via `SetSetting` — sanitized here, once, at
+                    // the point it enters this struct, rather than at every
+                    // place `session_name` is later read.
+                    slot.insert(sanitize_display_text(label));
                 }
             }
         }
 
         let mut panes = HashMap::new();
         for workspace in &workspace_order {
-            let workspace_name = last_path_segment(workspace);
+            // Same reasoning: `workspace` is `tab.project`, viewer-controlled
+            // via `layout`.
+            let workspace_name = sanitize_display_text(&last_path_segment(workspace));
             for (session_index, group) in group_order[workspace].iter().enumerate() {
                 let key = (workspace.clone(), group.clone());
                 let session_name = group_label
@@ -258,20 +335,24 @@ impl ActivityContext {
                     let Some(id) = tab.id.clone() else {
                         continue;
                     };
-                    let title = tab
-                        .label
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|label| !label.is_empty())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("Terminal {}", pane_index + 1));
+                    // Same reasoning again: `tab.label` and `tab.engine` are
+                    // both viewer-controlled via `layout`, and both end up in
+                    // a summary (`pane_title`/`pane_with_engine`, below).
+                    let title = sanitize_display_text(
+                        &tab.label
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|label| !label.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("Terminal {}", pane_index + 1)),
+                    );
                     panes.insert(
                         id,
                         PaneInfo {
                             title,
                             session: session_name.clone(),
                             workspace: workspace_name.clone(),
-                            engine: tab.engine.clone(),
+                            engine: sanitize_display_text(&tab.engine),
                         },
                     );
                 }
@@ -301,17 +382,23 @@ impl ActivityContext {
     }
 
     /// The pane's own name, e.g. "Terminal 1" — or the raw id when the pane
-    /// is not (yet, or no longer) in the layout row.
+    /// is not (yet, or no longer) in the layout row. `id` is itself the
+    /// viewer's own choice of text (`Attach`/`Resize`/`Interrupt`/`Kill`/
+    /// `Input` all carry it directly on the frame, not something the daemon
+    /// assigned), so this fallback is sanitized exactly like a looked-up
+    /// pane's fields already are at construction time (fix round 3, ITEM 2)
+    /// — otherwise an id aimed at a pane that does not exist would reach a
+    /// summary completely unfiltered.
     fn pane_title(&self, id: &str) -> String {
         self.panes
             .get(id)
             .map(|pane| pane.title.clone())
-            .unwrap_or_else(|| id.to_string())
+            .unwrap_or_else(|| sanitize_display_text(id))
     }
 
     /// "Terminal 1 (claude)" — an `Input` row's pane name. Falls back to the
-    /// bare pane name (in turn falling back to the raw id) when the engine
-    /// is not on record.
+    /// bare pane name (in turn falling back to the sanitized raw id) when the
+    /// engine is not on record.
     fn pane_with_engine(&self, id: &str) -> String {
         match self.panes.get(id) {
             Some(pane) if !pane.engine.is_empty() => format!("{} ({})", pane.title, pane.engine),
@@ -320,13 +407,13 @@ impl ActivityContext {
     }
 
     /// "Terminal 1 in Session 1 · OmniAgent-ADE" — an `Attach` row's full
-    /// location. Falls back to the raw id when the pane is unknown, rather
-    /// than a half-filled sentence about a session and workspace nobody can
-    /// name either.
+    /// location. Falls back to the sanitized raw id when the pane is
+    /// unknown, rather than a half-filled sentence about a session and
+    /// workspace nobody can name either.
     fn pane_location(&self, id: &str) -> String {
         match self.panes.get(id) {
             Some(pane) => format!("{} in {} · {}", pane.title, pane.session, pane.workspace),
-            None => id.to_string(),
+            None => sanitize_display_text(id),
         }
     }
 }
@@ -418,6 +505,12 @@ impl ActivityLog {
                 };
                 vec![ActivityEntry::new(
                     "attach",
+                    // `pane_location` already sanitizes every viewer-sourced
+                    // piece it assembles (fix round 3, ITEM 2) — its own
+                    // " in "/" · " separators are this row format's own
+                    // literal text, not sanitized here, exactly like
+                    // `sanitize_machine_name`'s caller leaves its own quotes
+                    // and parens alone.
                     format!("Opened {}", ctx.pane_location(&attach.id)),
                     None,
                 )]
@@ -427,10 +520,16 @@ impl ActivityLog {
                     return Vec::new();
                 };
                 let engine = engine_from_command(&create.command);
+                // `create.cwd` is the viewer's own frame payload, not
+                // something the daemon assigned — sanitized (fix round 3,
+                // ITEM 2) before it can reach the summary below. `engine`
+                // needs none: `engine_from_command` only ever returns one of
+                // a closed set of literal strings, never raw viewer text.
                 let workspace = create
                     .cwd
                     .as_deref()
                     .map(last_path_segment)
+                    .map(|name| sanitize_display_text(&name))
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| "this Mac".to_string());
                 let detail = format!(
@@ -506,7 +605,15 @@ impl ActivityLog {
                     // auditable fact — "changed the persona" with no detail
                     // does not say what it was changed to.
                     (
-                        format!("Changed a setting ({})", setting.key),
+                        // `setting.key` is the viewer's own frame payload —
+                        // sanitized (fix round 3, ITEM 2) before it reaches
+                        // the summary. `detail` stays exactly `redact`ed and
+                        // nothing more: it is the auditable fact, not a
+                        // display string.
+                        format!(
+                            "Changed a setting ({})",
+                            sanitize_display_text(&setting.key)
+                        ),
                         Some(redact(&setting.value)),
                     )
                 };
@@ -519,7 +626,13 @@ impl ActivityLog {
                 };
                 vec![ActivityEntry::new(
                     "roots",
-                    format!("Started scanning {} for workspaces", redact(&payload.path)),
+                    // Redact first (it needs the original text to match a
+                    // secret's shape), then sanitize (fix round 3, ITEM 2) —
+                    // `payload.path` is the viewer's own frame payload.
+                    format!(
+                        "Started scanning {} for workspaces",
+                        sanitize_display_text(&redact(&payload.path))
+                    ),
                     None,
                 )]
             }
@@ -528,16 +641,23 @@ impl ActivityLog {
                 else {
                     return Vec::new();
                 };
+                // `path` stays exactly `redact`ed, unsanitized — it is used
+                // as `detail` in the `Some(name)` branch below, and `detail`
+                // never runs through `sanitize_display_text` (fix round 3,
+                // ITEM 2: that transform is only for summary-bound text).
                 let path = redact(&payload.path);
                 match payload.name.as_deref().map(redact) {
                     Some(name) => vec![ActivityEntry::new(
                         "roots",
-                        format!("Added workspace {name}"),
+                        format!("Added workspace {}", sanitize_display_text(&name)),
                         Some(path),
                     )],
                     None => vec![ActivityEntry::new(
                         "roots",
-                        format!("Added workspace {path}"),
+                        // Here `path` *is* the summary, so it is sanitized
+                        // only at this use site — the variable itself stays
+                        // the plain redacted value for the branch above.
+                        format!("Added workspace {}", sanitize_display_text(&path)),
                         None,
                     )],
                 }
@@ -550,7 +670,10 @@ impl ActivityLog {
                 };
                 vec![ActivityEntry::new(
                     "roots",
-                    format!("Renamed a workspace to {}", redact(&payload.new_label)),
+                    format!(
+                        "Renamed a workspace to {}",
+                        sanitize_display_text(&redact(&payload.new_label))
+                    ),
                     None,
                 )]
             }
@@ -562,7 +685,10 @@ impl ActivityLog {
                 let verb = if payload.paused { "Paused" } else { "Resumed" };
                 vec![ActivityEntry::new(
                     "roots",
-                    format!("{verb} workspace {}", redact(&payload.project)),
+                    format!(
+                        "{verb} workspace {}",
+                        sanitize_display_text(&redact(&payload.project))
+                    ),
                     None,
                 )]
             }
@@ -574,7 +700,10 @@ impl ActivityLog {
                 };
                 vec![ActivityEntry::new(
                     "roots",
-                    format!("Re-ingested workspace {}", redact(&payload.project)),
+                    format!(
+                        "Re-ingested workspace {}",
+                        sanitize_display_text(&redact(&payload.project))
+                    ),
                     None,
                 )]
             }
@@ -590,7 +719,7 @@ impl ActivityLog {
                 };
                 vec![ActivityEntry::new(
                     "list_directory",
-                    format!("Browsed {}", redact(&payload.path)),
+                    format!("Browsed {}", sanitize_display_text(&redact(&payload.path))),
                     None,
                 )]
             }
@@ -617,7 +746,10 @@ impl ActivityLog {
                 // disclosure `ListDirectory`/`BrainSearch` are logged for.
                 vec![ActivityEntry::new(
                     "brain_get_context",
-                    format!("Read the brief for {}", redact(&payload.project)),
+                    format!(
+                        "Read the brief for {}",
+                        sanitize_display_text(&redact(&payload.project))
+                    ),
                     None,
                 )]
             }
@@ -635,13 +767,22 @@ impl ActivityLog {
                     let preview: String = query.chars().take(PREVIEW_CHARS).collect();
                     vec![ActivityEntry::new(
                         "brain_search",
-                        format!("Searched the brain for \"{preview}…\""),
+                        // `preview` reaches the summary; `query` (the full
+                        // text, redacted but not sanitized) stays `detail`,
+                        // untouched — fix round 3, ITEM 2.
+                        format!(
+                            "Searched the brain for \"{}…\"",
+                            sanitize_display_text(&preview)
+                        ),
                         Some(query),
                     )]
                 } else {
                     vec![ActivityEntry::new(
                         "brain_search",
-                        format!("Searched the brain for \"{query}\""),
+                        format!(
+                            "Searched the brain for \"{}\"",
+                            sanitize_display_text(&query)
+                        ),
                         None,
                     )]
                 }

@@ -49,6 +49,14 @@ bytes = "1"
 # Same pin as brain-core's, so this adds a direct edge to a crate the
 # workspace already builds rather than a new dependency.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# activity.rs: `sanitize_display_text`'s Unicode General Category check
+# (`\p{L}\p{M}\p{N}`, fix round 3) — already fully resolved in the workspace
+# lockfile via brain-core's and brain-ingest's own `regex` dependency, so this
+# adds no new download, only a direct edge to a crate the workspace already
+# builds. Its Unicode tables are the correct source of truth for "letter,
+# mark, or number", which the standard library does not expose on its own
+# (`char::is_alphabetic()` alone excludes combining marks).
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -195,6 +195,71 @@ fn one(entries: Vec<ActivityEntry>) -> ActivityEntry {
     entries.into_iter().next().unwrap()
 }
 
+/// Fix round 3, ITEM 2: the same allowlist property `server.rs`'s own
+/// `sanitize_machine_name` tests pin against a self-reported machine name,
+/// checked here against every OTHER viewer-influenceable string this file
+/// proves reaches a summary — a Unicode letter, mark, or number, or one of
+/// six ASCII punctuation marks (the five an ordinary name needs, plus `/`,
+/// the path separator several of these fields carry), or the `?` placeholder
+/// a disallowed codepoint was replaced with.
+fn assert_only_allowed_chars(text: &str) {
+    let letter_mark_or_number = regex::Regex::new(r"^[\p{L}\p{M}\p{N}]$").unwrap();
+    for c in text.chars() {
+        assert!(
+            c == '?'
+                || matches!(c, ' ' | '-' | '_' | '.' | '\'' | '/')
+                || letter_mark_or_number.is_match(c.encode_utf8(&mut [0; 4])),
+            "disallowed codepoint U+{:04X} ({c:?}) survived sanitization in {text:?}",
+            c as u32
+        );
+    }
+}
+
+/// A machine name shaped like the row format itself — fullwidth parens, a
+/// dot lookalike, a line separator, a bidi override — touching every
+/// category fix round 2 named. Reused here for every OTHER
+/// viewer-influenceable field fix round 3 (ITEM 2) sanitizes, since the
+/// threat is identical regardless of which field carries it.
+const HOSTILE: &str =
+    "Air\u{ff08}1.2.3.4\u{ff09}\u{ff09}\u{2022}Disconnected\u{2028}\u{202e}3m 00s";
+
+/// The five non-ASCII codepoints in [`HOSTILE`], individually — not usable as
+/// a whole-summary [`assert_only_allowed_chars`] check wherever the row's own
+/// *template* legitimately prints `(`, `)`, or `·` itself (e.g. "Sent a
+/// prompt to {title} ({engine})", "Opened {title} in {session} · {workspace}"
+/// — none of those three characters is one of [`HOSTILE`]'s five, so their
+/// presence there is the template's own literal text, not a survivor from
+/// sanitizing the hostile field).
+fn assert_hostile_codepoints_absent(text: &str) {
+    for c in ['\u{ff08}', '\u{ff09}', '\u{2022}', '\u{2028}', '\u{202e}'] {
+        assert!(
+            !text.contains(c),
+            "hostile codepoint U+{:04X} survived sanitization in {text:?}",
+            c as u32
+        );
+    }
+}
+
+/// A `layout` row (`ActivityContext::from_layout`'s own input shape) whose
+/// pane title, session label, workspace name, and engine are all [`HOSTILE`]
+/// — every field the lease-holding viewer can set through `SetSetting`
+/// (`layout` is deliberately not a protected key) and that
+/// `ActivityContext` resolves into a summary.
+fn hostile_layout_ctx() -> ActivityContext {
+    let layout = serde_json::json!({
+        "tabs": [{
+            "project": format!("/Users/bruno/{HOSTILE}"),
+            "engine": HOSTILE,
+            "cwd": "/tmp",
+            "id": "pane-1",
+            "group": "g1",
+            "label": HOSTILE,
+            "groupLabel": HOSTILE,
+        }]
+    });
+    ActivityContext::from_layout(Some(&layout.to_string()))
+}
+
 // ---------------------------------------------------------------------
 // Task 17: frames become rows
 // ---------------------------------------------------------------------
@@ -687,6 +752,197 @@ fn the_timestamp_is_rfc3339_on_the_wire_and_round_trips() {
 }
 
 // ---------------------------------------------------------------------
+// Fix round 3, ITEM 2: every viewer-influenceable string that reaches a
+// summary is sanitized — not only the machine name fix round 2 already
+// closed. `layout` is the door the review named (pane titles, session
+// labels, workspace names, engines — all viewer-writable via `SetSetting`),
+// but the sweep in this section also covers every raw frame-payload field
+// (a `Resize`/`Interrupt`/`Kill`'s own session id when it names no known
+// pane, `CreateSession`'s `cwd`, `SetSetting`'s own `key`, and every
+// `Roots*`/`ListDirectory`/`BrainSearch`/`BrainGetContext` argument) that
+// lands in a summary the same way.
+// ---------------------------------------------------------------------
+
+#[test]
+fn hostile_pane_title_session_and_workspace_from_layout_cannot_forge_the_attach_row() {
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(&attach_frame("pane-1"), &hostile_layout_ctx()));
+    // Not `assert_only_allowed_chars` on the whole summary: "Opened {title}
+    // in {session} · {workspace}" legitimately prints its own literal " · "
+    // (`U+00B7`, distinct from any of `HOSTILE`'s five codepoints).
+    assert_hostile_codepoints_absent(&entry.summary);
+}
+
+/// `Resize`/`Interrupt`/`Kill` all resolve their pane name through
+/// `ActivityContext::pane_title`, the same lookup `Attach` uses — one test
+/// stands for all three rather than repeating the same shape three times.
+#[test]
+fn hostile_pane_title_from_layout_cannot_forge_the_resize_interrupt_or_kill_row() {
+    let ctx = hostile_layout_ctx();
+
+    let mut resize_log = ActivityLog::default();
+    resize_log.record(&resize_frame("pane-1", 10, 10), &ctx);
+    let resized = &resize_log.tick(Instant::now() + Duration::from_secs(6))[0];
+    assert_only_allowed_chars(&resized.summary);
+
+    let mut interrupt_log = ActivityLog::default();
+    let interrupted = one(interrupt_log.record(&interrupt_frame("pane-1"), &ctx));
+    assert_only_allowed_chars(&interrupted.summary);
+
+    let mut kill_log = ActivityLog::default();
+    let killed = one(kill_log.record(&kill_frame("pane-1"), &ctx));
+    assert_only_allowed_chars(&killed.summary);
+}
+
+#[test]
+fn hostile_engine_from_layout_cannot_forge_the_input_row_summary() {
+    let mut log = ActivityLog::default();
+    let ctx = hostile_layout_ctx();
+    log.record(&input_frame("pane-1", b"hi"), &ctx);
+    let entry = one(log.record(&input_frame("pane-1", b"\r"), &ctx));
+    // Not `assert_only_allowed_chars`: "Sent a prompt to {title} ({engine})"
+    // legitimately prints its own literal `(`/`)`.
+    assert_hostile_codepoints_absent(&entry.summary);
+}
+
+/// Not a `layout` field at all — `Attach`/`Resize`/`Interrupt`/`Kill`/`Input`
+/// each carry their own session/pane id directly on the frame, and an id
+/// naming no known pane falls back to itself rather than being dropped
+/// (`an_unknown_pane_id_falls_back_to_itself_rather_than_being_dropped`
+/// above). That id is exactly as viewer-chosen as a `layout` field, and
+/// unlike one, is never sourced from anything the daemon itself wrote — it
+/// must be sanitized at the same fallback, not only the looked-up case.
+#[test]
+fn a_hostile_unknown_pane_id_is_sanitized_rather_than_forging_the_row() {
+    let mut log = ActivityLog::default();
+    let ctx = ActivityContext::fixture();
+    let attach = one(log.record(&attach_frame(HOSTILE), &ctx));
+    assert!(attach.summary.starts_with("Opened "), "{}", attach.summary);
+    assert_only_allowed_chars(&attach.summary);
+}
+
+#[test]
+fn hostile_cwd_cannot_forge_the_create_session_row_summary() {
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(
+        &create_session_frame(
+            "pane-9",
+            &["/usr/local/bin/claude"],
+            Some(&format!("/Users/bruno/{HOSTILE}")),
+        ),
+        &ActivityContext::fixture(),
+    ));
+    assert_only_allowed_chars(&entry.summary);
+}
+
+#[test]
+fn hostile_setting_key_cannot_forge_the_set_setting_row_summary() {
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(
+        &set_setting_frame(HOSTILE, "value"),
+        &ActivityContext::fixture(),
+    ));
+    // Not `assert_only_allowed_chars`: "Changed a setting ({key})"
+    // legitimately prints its own literal `(`/`)`.
+    assert_hostile_codepoints_absent(&entry.summary);
+    // `detail` is redacted but never sanitized (it is the auditable fact,
+    // not display text) — unaffected by this fix.
+    assert_eq!(entry.detail.as_deref(), Some("value"));
+}
+
+/// Every one of these follows the identical shape — one viewer-supplied
+/// frame field, redacted, then interpolated into a one-line summary — so one
+/// table of cases stands for all of them rather than seven near-identical
+/// tests.
+#[test]
+fn hostile_roots_list_directory_and_brain_get_context_fields_cannot_forge_their_rows() {
+    let ctx = ActivityContext::fixture();
+    let cases: Vec<(&str, Frame)> = vec![
+        ("roots_start_ingest.path", roots_start_ingest_frame(HOSTILE)),
+        (
+            "roots_add_project.path",
+            roots_add_project_frame(HOSTILE, None),
+        ),
+        (
+            "roots_add_project.name",
+            roots_add_project_frame("/proj", Some(HOSTILE)),
+        ),
+        (
+            "roots_rename_project.new_label",
+            roots_rename_project_frame("proj-1", HOSTILE),
+        ),
+        (
+            "roots_set_paused.project",
+            roots_set_paused_frame(HOSTILE, true),
+        ),
+        (
+            "roots_reingest_project.project",
+            roots_reingest_project_frame(HOSTILE),
+        ),
+        ("list_directory.path", list_directory_frame(HOSTILE)),
+        (
+            "brain_get_context.project",
+            brain_get_context_frame(HOSTILE),
+        ),
+    ];
+    for (label, frame) in cases {
+        let mut log = ActivityLog::default();
+        let entry = one(log.record(&frame, &ctx));
+        assert_only_allowed_chars(&entry.summary);
+        assert!(
+            !entry.summary.contains('\u{202e}'),
+            "{label}: bidi override survived into {}",
+            entry.summary
+        );
+    }
+}
+
+#[test]
+fn hostile_brain_search_query_cannot_forge_the_row_summary_short_or_long() {
+    let ctx = ActivityContext::fixture();
+
+    // Not `assert_only_allowed_chars`: "Searched the brain for \"{query}\""
+    // legitimately prints its own literal quotes around the query.
+    let mut short_log = ActivityLog::default();
+    let short = one(short_log.record(&brain_search_frame(HOSTILE), &ctx));
+    assert_hostile_codepoints_absent(&short.summary);
+
+    let long_hostile = format!("{HOSTILE}{}", "x".repeat(100));
+    let mut long_log = ActivityLog::default();
+    let long = one(long_log.record(&brain_search_frame(&long_hostile), &ctx));
+    assert_hostile_codepoints_absent(&long.summary);
+    // `detail` keeps the full, redacted-but-unsanitized query — the
+    // auditable fact this fix must never touch.
+    assert_eq!(long.detail.as_deref(), Some(long_hostile.as_str()));
+}
+
+/// The other half of "the same sanitizer" (fix round 3, ITEM 1): widening
+/// the allowlist to Unicode letters must not have broken the legitimate case
+/// — a real international pane title still reads correctly, not as
+/// "Bj?rns Terminal".
+#[test]
+fn a_genuine_unicode_letter_in_a_pane_title_survives_into_the_summary() {
+    let layout = serde_json::json!({
+        "tabs": [{
+            "project": "/Users/bruno/OmniAgent-ADE",
+            "engine": "claude",
+            "cwd": "/tmp",
+            "id": "pane-1",
+            "group": "g1",
+            "label": "Björns Terminal",
+        }]
+    });
+    let ctx = ActivityContext::from_layout(Some(&layout.to_string()));
+    let mut log = ActivityLog::default();
+    let entry = one(log.record(&attach_frame("pane-1"), &ctx));
+    assert!(
+        entry.summary.contains("Björns Terminal"),
+        "{}",
+        entry.summary
+    );
+}
+
+// ---------------------------------------------------------------------
 // Task 18: the log survives the connection
 // ---------------------------------------------------------------------
 
@@ -872,13 +1128,19 @@ async fn a_frame_split_across_a_tick_still_decodes_intact() {
 /// SEPARATOR, and U+202E RIGHT-TO-LEFT OVERRIDE, which could otherwise
 /// visually reorder the real IP sitting right next to the name — and checks
 /// the allowlist property directly (every surviving codepoint in the name
-/// field is ASCII alphanumeric or one of five punctuation marks) rather
-/// than re-listing the specific characters this one test happened to try.
+/// field is Letter/Mark/Number or one of six punctuation marks) rather than
+/// re-listing the specific characters this one test happened to try. Fix
+/// round 3, ITEM 1 widens that allowlist from ASCII to Unicode, so this test
+/// also mixes in a genuine Unicode LETTER ("ö") and checks it survives
+/// end-to-end through the real daemon, not only at the unit level
+/// (`server.rs`'s own `sanitize_machine_name_admits_a_unicode_letter_…`
+/// test) — the same pair of facts that fix round 2's own name already
+/// touched every hostile category with.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hostile_machine_name_cannot_forge_the_opening_row() {
     let mut harness = support::daemon_with_local_client().await;
     let mut viewer = harness.connect_remote(
-        "Air\u{ff08}1.2.3.4\u{ff09}\u{ff09} \u{2022} Disconnected \u{2219} \u{2028}\u{202e}3m 00s",
+        "Björn's Air\u{ff08}1.2.3.4\u{ff09}\u{ff09} \u{2022} Disconnected \u{2219} \u{2028}\u{202e}3m 00s",
     );
     viewer.hello().await;
 
@@ -901,12 +1163,9 @@ async fn a_hostile_machine_name_cannot_forge_the_opening_row() {
         .strip_prefix("Connected from \"")
         .and_then(|rest| rest.strip_suffix("\" (203.0.113.7)"))
         .expect("the row keeps exactly this shape");
-    for c in name_field.chars() {
-        assert!(
-            c == '?' || c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\''),
-            "disallowed codepoint U+{:04X} ({c:?}) survived into the row: {}",
-            c as u32,
-            opened.summary
-        );
-    }
+    assert!(
+        name_field.starts_with("Björn's Air"),
+        "a Unicode LETTER must survive intact, not become \"Bj?rn's Air\": {name_field}"
+    );
+    assert_only_allowed_chars(name_field);
 }

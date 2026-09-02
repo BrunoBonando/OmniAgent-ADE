@@ -1838,9 +1838,10 @@ impl Drop for ActivityGuard {
 
 /// Bounds and cleans a self-reported machine name before it is rendered
 /// into an activity row's summary (fix round 1, SPEC ❌ 2; rewritten as an
-/// allowlist in fix round 2). `machine_name` comes straight off the
-/// viewer's own `Hello` and is never verified (`ViewerIdentity`'s own doc:
-/// "a label for a human to read and never an input to a decision").
+/// allowlist in fix round 2; widened from ASCII to Unicode in fix round 3,
+/// ITEM 1). `machine_name` comes straight off the viewer's own `Hello` and
+/// is never verified (`ViewerIdentity`'s own doc: "a label for a human to
+/// read and never an input to a decision").
 ///
 /// **An allowlist, not a denylist.** Round 1 denied five specific
 /// codepoints — `(`, `)`, the middle dot, and the two newlines — and a
@@ -1851,36 +1852,32 @@ impl Drop for ActivityGuard {
 /// (U+202A-U+202E, U+2066-U+2069), which can visually *reorder* the rest of
 /// the rendered row, including the relay-asserted IP address sitting next
 /// to it — turning a field marked "verified" into one that displays as
-/// something it is not. There is always another lookalike; there is not
-/// another letter, digit, space, hyphen, underscore, period, or apostrophe,
-/// which is everything a real machine name needs ("Bruno's MacBook Pro",
-/// "Mac-mini_2").
+/// something it is not.
 ///
-/// **Restricted to ASCII on purpose**, not merely Unicode "alphabetic":
-/// ASCII has no separators, no format/control codepoints, and no
-/// bidirectional text at all, so there is no residual category of
-/// lookalike or reordering codepoint left to reason about. Anything outside
-/// the allowlist is replaced one-for-one with `?` rather than dropped — a
-/// hostile name reads as visibly odd ("Air????????") rather than silently
-/// losing the evidence that something was stripped out of it, the same
-/// reasoning the identity block's own verified glyph exists for. The caller
-/// additionally quotes the result when it renders it (`"{name}"`), so the
-/// name's extent stays unambiguous even if this allowlist is widened
-/// later — `"` itself is not in the allowlist, so the name can never
-/// contain one to be confused with the quotes wrapping it.
+/// **Unicode letters, marks, and digits, not ASCII-only** (fix round 3,
+/// ITEM 1 — round 2's ASCII-only restriction mangled a real name like
+/// "Björns MacBook" into "Bj?rns MacBook" on every row it appeared in, for
+/// no extra safety). Round 2's own reasoning already shows why this is safe:
+/// none of the three attack categories above is a Letter, Mark, or Number
+/// either — a bidi control is Cf, a fullwidth paren is Ps/Pe, a dot
+/// lookalike is Po. Widening the allowlist to admit every codepoint in those
+/// three categories closes nothing that was closed before and opens nothing
+/// new. See [`crate::activity::sanitize_display_text`] (shared with every
+/// other viewer-influenceable string that reaches a summary, fix round 3,
+/// ITEM 2) for the actual character test.
+///
+/// Anything outside the allowlist is replaced one-for-one with `?` rather
+/// than dropped — a hostile name reads as visibly odd ("Air????????")
+/// rather than silently losing the evidence that something was stripped out
+/// of it, the same reasoning the identity block's own verified glyph exists
+/// for. The caller additionally quotes the result when it renders it
+/// (`"{name}"`), so the name's extent stays unambiguous even if this
+/// allowlist is widened again later — `"` itself is not in the allowlist,
+/// so the name can never contain one to be confused with the quotes
+/// wrapping it.
 fn sanitize_machine_name(raw: &str) -> String {
     const MAX_LEN: usize = 64;
-    const PLACEHOLDER: char = '?';
-    let cleaned: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'') {
-                c
-            } else {
-                PLACEHOLDER
-            }
-        })
-        .collect();
+    let cleaned = crate::activity::sanitize_display_text(raw);
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return "Unknown Mac".to_string();
@@ -2315,11 +2312,16 @@ mod tests {
     /// on, so a test failure names the actual offending codepoint instead of
     /// just failing a `contains` check on the one character the test author
     /// happened to think of (fix round 2's own instruction: "assert on
-    /// codepoint categories where you can").
+    /// codepoint categories where you can"). Widened in fix round 3, ITEM 1
+    /// from ASCII alphanumeric to `crate::activity::is_allowed_display_char`
+    /// — the exact same predicate `sanitize_machine_name` itself now runs on,
+    /// so this stays a property check on *categories* (Letter, Mark, Number,
+    /// or the five punctuation marks) rather than a re-hardcoded copy of the
+    /// allowlist that could silently drift from the real one.
     fn assert_only_allowed_chars(cleaned: &str) {
         for c in cleaned.chars() {
             assert!(
-                c == '?' || c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\''),
+                c == '?' || crate::activity::is_allowed_display_char(c),
                 "disallowed codepoint U+{:04X} ({c:?}) survived sanitization in {cleaned:?}",
                 c as u32
             );
@@ -2401,6 +2403,51 @@ mod tests {
         let hostile =
             "Air\u{ff08}1.2.3.4\u{ff09}\u{ff09}\u{2022}Disconnected\u{2028}\u{202e}3m 00s";
         assert_only_allowed_chars(&sanitize_machine_name(hostile));
+    }
+
+    /// Fix round 3, ITEM 1 — the pair that is the whole point of widening the
+    /// allowlist from ASCII to Unicode: a non-ASCII LETTER ("ö", category
+    /// Ll, as in "Björns MacBook") must now survive intact, while a
+    /// non-ASCII separator (a dot lookalike, Po), a format control (a bidi
+    /// override, Cf), and a line separator (U+2028, Zl) still must not — none
+    /// of those three is a Letter, Mark, or Number, so admitting the three
+    /// categories the letter needs changes nothing about what actually gets
+    /// caught.
+    #[test]
+    fn sanitize_machine_name_admits_a_unicode_letter_but_still_denies_separators_and_controls() {
+        assert_eq!(
+            sanitize_machine_name("Björns MacBook"),
+            "Björns MacBook",
+            "a Unicode LETTER must survive intact, not become \"Bj?rns MacBook\""
+        );
+
+        for (hostile, label) in [
+            ('\u{2022}', "a dot-lookalike separator (Po)"),
+            ('\u{202e}', "a bidi format control (Cf)"),
+            ('\u{2028}', "a line separator (Zl)"),
+        ] {
+            let cleaned = sanitize_machine_name(&format!("Air{hostile}Disconnected"));
+            assert!(
+                !cleaned.contains(hostile),
+                "{label} U+{:04X} must not survive sanitization: {cleaned:?}",
+                hostile as u32
+            );
+            assert_only_allowed_chars(&cleaned);
+        }
+    }
+
+    /// Fix round 3, ITEM 1: Marks are a distinct category from Letters, and
+    /// this is the case that actually needs the distinction —
+    /// `char::is_alphabetic()` alone (the Unicode *Alphabetic* derived
+    /// property) would still mangle this, since a combining diacritic's
+    /// `Alphabetic` property is `No`. An NFD-normalised "ö" — a bare "o"
+    /// (U+006F) followed by a separate COMBINING DIAERESIS (U+0308, category
+    /// Mn) — is exactly that shape, and is exactly as legitimate a machine
+    /// name as the precomposed form the test above already covers.
+    #[test]
+    fn sanitize_machine_name_admits_a_combining_mark_not_only_a_precomposed_letter() {
+        let nfd_name = "Bjo\u{308}rns MacBook";
+        assert_eq!(sanitize_machine_name(nfd_name), nfd_name);
     }
 
     #[test]

@@ -859,6 +859,7 @@ dependencies = [
  "mcp-server",
  "omniagent-pty-daemon",
  "portable-pty",
+ "regex",
  "rustls",
  "serde",
  "serde_json",
