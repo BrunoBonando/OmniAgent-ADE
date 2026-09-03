@@ -6918,6 +6918,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSM
             commitAccountSwitch(to: id, completion: completion)
             return
         }
+        // During the sign-in gate the workspace window is hidden behind the
+        // login card, so `presentWindowAsk` would add the "Move your
+        // workspace?" overlay to a window nobody can see — presented, yet
+        // unanswerable — and `switchAccount` would wait on a click that never
+        // comes, hanging the gate on "Opening your workspace…" forever. The
+        // sessions a signed-out root daemon is holding at this point are the
+        // pre-account scratch state, and the switch restarts the daemon
+        // regardless, so commit directly rather than ask a hidden question.
+        // The ordinary in-app switch (workspace visible) still asks below.
+        guard !awaitingSignIn else {
+            commitAccountSwitch(to: id, completion: completion)
+            return
+        }
         let presented = presentWindowAsk(
             title: "Move your workspace to your account?",
             message: "This restarts the daemon and ends \(Self.runningSessionsPhrase(sessions)).",

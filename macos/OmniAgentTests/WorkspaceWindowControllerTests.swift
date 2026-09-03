@@ -1922,6 +1922,40 @@ final class WorkspaceWindowControllerTests: XCTestCase {
         XCTAssertEqual(completed, 1, "and the sign-in completes anyway")
     }
 
+    /// Regression: during the sign-in gate the workspace window is hidden, so
+    /// the "Move your workspace?" ask would be presented on a window nobody can
+    /// see and the switch would wait forever for a click — the app hanging on
+    /// "Opening your workspace…". With `awaitingSignIn` up, the switch commits
+    /// directly instead: no ask, the pointer is written and the daemon
+    /// restarted, and the gate's `completion` fires so `.switching` can resolve.
+    func testSwitchAccountDuringSignInGateCommitsWithoutAnInvisibleAsk() throws {
+        let controller = makeController(settingsClient: FakeSettingsClient())
+        defer { controller.close() }
+        XCTAssertEqual(controller.menuBarSummary().sessionCount, 1, "a session is running")
+        let root = try temporaryAccountRoot()
+        controller.accountRoot = root
+        // The login window is up: the workspace behind it is hidden.
+        controller.presentLaunchGate(defaults: try throwawayDefaults()) {}
+        XCTAssertTrue(controller.awaitingSignIn, "the gate is up")
+        var terminated = 0
+        controller.daemonTerminator = { done in
+            terminated += 1
+            done(true)
+        }
+
+        var completed = 0
+        controller.switchAccount(toEmail: "bruno@bonando.com") { completed += 1 }
+
+        XCTAssertNil(
+            controller.windowAskOverlay,
+            "no ask during the gate — it would be drawn on the hidden workspace window and hang the switch"
+        )
+        XCTAssertEqual(AccountDirectory.readCurrentAccount(root: root), "fc44b18d5588b1d6", "pointer written")
+        XCTAssertEqual(controller.currentAccountID, "fc44b18d5588b1d6")
+        XCTAssertEqual(terminated, 1, "the daemon was restarted onto the account dir")
+        XCTAssertEqual(completed, 1, "the gate's completion fired, so .switching resolves")
+    }
+
     func testSwitchAccountRestartNowWritesThePointerEndsTheDaemonAndDropsThePanes() throws {
         let client = FakeSettingsClient()
         let controller = makeController(settingsClient: client)

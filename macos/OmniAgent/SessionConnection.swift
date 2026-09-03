@@ -275,6 +275,12 @@ enum SessionTransport {
 }
 
 final class SessionConnection {
+    /// Encrypts/decrypts the covered settings rows (the workspace/pane layout)
+    /// transparently in `getSetting`/`setSetting`, so the daemon and its store
+    /// hold only ciphertext. Set on the **local** connection only
+    /// (`AppDelegate`); `nil` — the default — leaves every row as-is, which is
+    /// what a connection driving another Mac wants for that Mac's own rows.
+    var settingsCipher: SettingsCipher?
     var onStateChange: ((ConnectionState) -> Void)?
     var onTerminalData: ((String, Data, UInt64, Bool) -> Void)?
     var onStatus: ((SessionStatusEvent) -> Void)?
@@ -598,27 +604,43 @@ final class SessionConnection {
     /// row) — `nil` when unset, mirroring `Store::get_setting` and the Tauri
     /// `settings_get` command's `Option<String>` result exactly.
     func getSetting(key: String, completion: @escaping (Result<String?, Error>) -> Void) {
-        sendCodable(kind: .getSetting, value: SettingKeyPayload(key: key)) { result in
+        sendCodable(kind: .getSetting, value: SettingKeyPayload(key: key)) { [weak self] result in
             completion(
                 result.flatMap { frame in
                     guard frame.kind == .response else {
                         return .failure(SessionConnectionError.invalidResponse(frame.kind))
                     }
                     return Result {
-                        try self.decoder.decode(SettingValueResponse.self, from: frame.payload).value
+                        let raw = try self?.decoder.decode(SettingValueResponse.self, from: frame.payload).value
+                        // A covered row comes off the wire as ciphertext; the
+                        // cipher (local connection only) turns it back into the
+                        // plaintext every caller already expects, or throws —
+                        // which surfaces here as a read failure, not an empty row.
+                        guard let raw else { return nil }
+                        return try self?.settingsCipher?.decode(key: key, value: raw) ?? raw
                     }
                 }
             )
         }
     }
 
-    /// Upserts a `settings`-table row.
+    /// Upserts a `settings`-table row. A covered key is encrypted first, so the
+    /// daemon and its store never see the plaintext (`settingsCipher`).
     func setSetting(
         key: String,
         value: String,
         completion: ((Result<Void, Error>) -> Void)? = nil
     ) {
-        sendCodable(kind: .setSetting, value: SettingValuePayload(key: key, value: value)) {
+        let stored: String
+        do {
+            stored = try settingsCipher?.encode(key: key, value: value) ?? value
+        } catch {
+            // Never fall back to writing plaintext for a covered key: report
+            // the failure and leave the row as it was.
+            (completion ?? { _ in })(.failure(error))
+            return
+        }
+        sendCodable(kind: .setSetting, value: SettingValuePayload(key: key, value: stored)) {
             self.finishResponse($0, completion: completion)
         }
     }
