@@ -1,5 +1,80 @@
+import CryptoKit
 import XCTest
 @testable import OmniAgent
+
+/// A `LayoutKeyStore` with no Keychain — so `LayoutCipher`'s crypto is testable
+/// without entitlements, and a test can hand two accounts deliberately
+/// different keys.
+final class InMemoryLayoutKeyStore: LayoutKeyStore {
+    private(set) var keys: [String: SymmetricKey]
+    init(keys: [String: SymmetricKey] = [:]) { self.keys = keys }
+    func key(forAccount accountID: String) throws -> SymmetricKey {
+        if let existing = keys[accountID] { return existing }
+        let fresh = SymmetricKey(size: .bits256)
+        keys[accountID] = fresh
+        return fresh
+    }
+}
+
+final class LayoutCipherTests: XCTestCase {
+    private func cipher(account: String?, keyStore: InMemoryLayoutKeyStore = InMemoryLayoutKeyStore()) -> LayoutCipher {
+        LayoutCipher(keyStore: keyStore) { account }
+    }
+
+    func testEncodedLayoutRoundTripsAndIsNotReadablePlaintext() throws {
+        let cipher = cipher(account: "acc1")
+        let plaintext = #"{"workspaces":[{"id":"OmniAgent"}],"panes":3}"#
+        let stored = try cipher.encode(key: SettingsKey.layout, value: plaintext)
+        XCTAssertNotEqual(stored, plaintext, "the stored row is ciphertext")
+        XCTAssertFalse(stored.contains("workspaces"), "the plaintext must not be legible in the stored row")
+        XCTAssertEqual(try cipher.decode(key: SettingsKey.layout, value: stored), plaintext, "round-trips")
+    }
+
+    func testUncoveredKeyIsLeftUntouched() throws {
+        let cipher = cipher(account: "acc1")
+        let value = "true"
+        XCTAssertEqual(try cipher.encode(key: SettingsKey.reviewMemory, value: value), value)
+        XCTAssertEqual(try cipher.decode(key: SettingsKey.reviewMemory, value: value), value)
+    }
+
+    func testSignedOutLeavesLayoutPlaintext() throws {
+        let cipher = cipher(account: nil)
+        let plaintext = #"{"panes":1}"#
+        XCTAssertEqual(try cipher.encode(key: SettingsKey.layout, value: plaintext), plaintext,
+                       "no account: the pre-account scratch layout stays plaintext")
+    }
+
+    func testLegacyPlaintextRowDecodesUnchanged() throws {
+        // The `native-macos-compat` fixtures pin plaintext `layout` rows; a
+        // value with no marker must read straight through.
+        let cipher = cipher(account: "acc1")
+        let legacy = #"{"tabs":[]}"#
+        XCTAssertEqual(try cipher.decode(key: SettingsKey.layout, value: legacy), legacy)
+    }
+
+    func testCiphertextIsAReadFailureWhenSignedOut() throws {
+        let keyStore = InMemoryLayoutKeyStore()
+        let stored = try cipher(account: "acc1", keyStore: keyStore)
+            .encode(key: SettingsKey.layout, value: #"{"panes":1}"#)
+        // Same key material, but nobody signed in to name it: a covered
+        // ciphertext row must throw, so the caller's write gate never mistakes
+        // it for an empty layout and overwrites it.
+        let signedOut = cipher(account: nil, keyStore: keyStore)
+        XCTAssertThrowsError(try signedOut.decode(key: SettingsKey.layout, value: stored)) { error in
+            XCTAssertEqual(error as? SettingsCipherError, .notSignedIn)
+        }
+    }
+
+    func testAnotherAccountsKeyCannotDecrypt() throws {
+        let shared = InMemoryLayoutKeyStore()
+        let stored = try cipher(account: "acc1", keyStore: shared)
+            .encode(key: SettingsKey.layout, value: #"{"panes":1}"#)
+        // acc2 has its own key in the same store — decrypting acc1's row with
+        // it must fail rather than return garbage.
+        XCTAssertThrowsError(try cipher(account: "acc2", keyStore: shared)
+            .decode(key: SettingsKey.layout, value: stored))
+    }
+}
 
 /// An in-memory `SettingsClient` — no socket, no `brain.db`, so
 /// `SettingsStore`'s own conventions (defaulting, bool coding) are testable

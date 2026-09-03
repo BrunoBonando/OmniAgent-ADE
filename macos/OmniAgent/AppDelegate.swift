@@ -52,6 +52,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             workspace?.revealPane(sessionID)
         }
         self.workspace = workspace
+        // The workspace/pane layout is encrypted at rest under a per-account
+        // Keychain key, so the settings store holds only ciphertext and only a
+        // signed-in user can read back what they had open. Deliberately the
+        // **local** connection, for `RemoteSharingModel`'s reason below: a
+        // per-Mac key cannot open another Mac's layout, so a connection driving
+        // another Mac must read that Mac's rows exactly as it stored them. The
+        // account follows the pointer `currentAccountID` mirrors — signed out
+        // (no account) leaves the pre-account scratch rows plaintext, signing
+        // in encrypts.
+        localConnection.settingsCipher = LayoutCipher(keyStore: KeychainLayoutKeyStore()) {
+            [weak workspace] in workspace?.currentAccountID
+        }
         // `RemoteSharingModel.shared` reads and writes through this same
         // connection — never a second one of its own — so its rows reach
         // the real daemon. Configured only once `workspace` is actually
